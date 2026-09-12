@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ClothMaterial::default(),
     )?;
     let handle = cloths.add_cloth(cloth);
-    
+
     // 外部substepごとに、Rapier → clothの順で同じhを一度だけ進める。
     let before = SceneSnapshot::capture(id, 0, &rigid.bodies, &rigid.colliders);
     // kinematic目標を設定する場合はここ。
