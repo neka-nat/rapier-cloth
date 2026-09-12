@@ -23,7 +23,7 @@
 
 `QueryFilter` のgroups・predicateと `CollisionSettings::excluded_colliders` を利用する。sensor・無効Colliderも除外する。これはcloth queryのfilterであり、Rapierの剛体solver用contact hooksやsolver groupsを代理実行しない。`ignored_colliders` は列挙された候補のうちadapterで除外したもの。QueryFilterで既に除外されたものやBVHから除かれた無効Colliderは列挙できない。
 
-kinematicの移動予算は、選択されたkinematic形状全体について `並進距離 + 形状の外接半径 × 回転角` を監視する。既定では最小粒子半径の0.5倍以下。高速横断を終端AABBだけで見落とさないため、布から離れたkinematic形状にも適用する。関係しないものは明示的にfilterする。超過時は `MotionBudget` の `required_substeps` を参照して外部時間分割を設計する。これは相対CCDの保証ではない。
+kinematicの移動予算は、選択されたkinematic形状全体について `Colliderの並進距離 + (形状の外接半径 + body原点からの距離) × 回転角` を監視する。回転角には終端姿勢差に加えてRapierの角速度×hを考慮し、1回転による姿勢の一致を見落とさない。既定では最小粒子半径の0.5倍以下。高速横断を終端AABBだけで見落とさないため、布から離れたkinematic形状にも適用する。関係しないものは明示的にfilterする。超過時は `MotionBudget` の `required_substeps` を参照して外部時間分割を設計する。これは相対CCDの保証ではない。
 
 静的sweepは開始位置→予測位置の変位を速度、TOIの上限を1としてParryへ渡す。ヒットした接平面をそのsubstep中の拘束として保持し、残りの移動は接線方向へ解く。反発係数は0。移動面には終端の離散接触を使う。開始時に存在した侵入の復旧は速度・摩擦から分離し、kinematic移動によって新たに生じた侵入は物理的な接触補正として扱う。
 

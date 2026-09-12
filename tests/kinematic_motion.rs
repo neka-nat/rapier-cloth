@@ -85,3 +85,21 @@ fn excluded_fast_kinematic_object_does_not_consume_motion_budget() {
     w.rigid.bodies[body].set_next_kinematic_translation(Vec3::splat(10.0));
     w.tick().unwrap();
 }
+
+#[test]
+fn velocity_based_complete_revolution_cannot_alias_zero_motion() {
+    let mut w = TestWorld::new();
+    let body = w.rigid.bodies.insert(
+        RigidBodyBuilder::kinematic_velocity_based()
+            .angvel(Vec3::Y * ((2.0 * rapier_cloth::Real::acos(-1.0)) / w.h)),
+    );
+    w.rigid.colliders.insert_with_parent(
+        ColliderBuilder::cuboid(0.2, 0.02, 0.02).translation(Vec3::X * 0.5),
+        body,
+        &mut w.rigid.bodies,
+    );
+    w.grid(2, 0.1, Vec3::splat(10.0));
+    assert!(
+        matches!(w.tick(),Err(IntegrationError::MotionBudget {required_substeps,..}) if required_substeps > 100)
+    );
+}

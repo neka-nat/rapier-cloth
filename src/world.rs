@@ -396,7 +396,9 @@ impl RapierClothWorld {
             let now = c.position();
             let delta = now.rotation * old.rotation.inverse();
             let s = (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z).sqrt();
-            let angle = 2.0 * s.atan2(delta.w.abs());
+            // End poses alone alias complete revolutions for velocity-based
+            // kinematics. Include Rapier's angular speed over the external step.
+            let angle = (2.0 * s.atan2(delta.w.abs())).max(body.angvel().length() * scene.h);
             let translation = now.translation.distance(old.translation);
             if angle == 0.0 && translation == 0.0 {
                 continue;
@@ -409,7 +411,12 @@ impl RapierClothWorld {
             }
             let aabb = c.shape().compute_local_aabb();
             let bound = aabb.mins.abs().max(aabb.maxs.abs()).length();
-            let movement = translation + bound * angle;
+            // An offset collider travels an arc around the body origin, even
+            // when its start/end translations almost coincide.
+            let lever_arm = c
+                .position_wrt_parent()
+                .map_or(0.0, |p| p.translation.length());
+            let movement = translation + (bound + lever_arm) * angle;
             let allowed = radius * self.collision_settings.motion_limit_ratio;
             if !movement.is_finite() || movement > allowed {
                 return Err(IntegrationError::MotionBudget {
