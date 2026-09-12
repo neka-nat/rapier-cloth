@@ -1,0 +1,1 @@
+{"grid":16,"size":0.3,"h":0.004166666666666667,"iterations":8,"attach_step":120,"lift_end":480,"release_step":960,"end_step":1560,"lift_height":0.3,"transport_distance":0.4,"record_stride":4,"surface_density":0.2,"stretch_compliance":0.0,"bend_compliance":0.0001,"damping":0.1,"friction":0.5,"contact_radius":0.005}
