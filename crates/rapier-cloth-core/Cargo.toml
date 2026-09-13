@@ -1,0 +1,18 @@
+[package]
+name = "rapier-cloth-core"
+description = "Engine-independent CPU XPBD cloth solver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE-*"]
+
+[features]
+default = ["f32"]
+f32 = []
+f64 = []
+
+[dependencies]
+glam = "0.33"

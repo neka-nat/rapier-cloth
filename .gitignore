@@ -1,0 +1,6 @@
+/target/
+**/target/
+**/node_modules/
+/demos/viewer/dist/
+/demos/viewer/test-results/
+/demos/viewer/playwright-report/

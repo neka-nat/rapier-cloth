@@ -1,0 +1,61 @@
+   Compiling rapier-cloth-core v0.1.0 (/home/nekanat/projects/rapier-cloth/crates/rapier-cloth-core)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.61s
+     Running unittests src/lib.rs (target/debug/deps/rapier_cloth_core-a99b1bfd7e549d93)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/bend_gradient.rs (target/debug/deps/bend_gradient-137d52122cb17e2a)
+
+running 1 test
+test analytic_gradient_matches_finite_difference_and_rigid_motion ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hanging_cloth.rs (target/debug/deps/hanging_cloth-5b375007e423f870)
+
+running 3 tests
+iteration sweep: grid=16, h=1/240, iterations=4, p95=0.0015128851, max=0.0069776773
+grid=16, h=1/240, iterations=8, p95=0.0008356571, max=0.0010125637
+iteration sweep: grid=16, h=1/240, iterations=8, p95=0.0008356571, max=0.0010125637
+grid=16, h=1/480, iterations=8, p95=0.00015473366, max=0.00017237663
+iteration sweep: grid=16, h=1/240, iterations=16, p95=0.00037038326, max=0.00042176247
+test iteration_sweep_records_error_for_same_initial_condition ... ok
+grid=32, h=1/240, iterations=8, p95=0.0115379095, max=0.017798662
+grid=32, h=1/480, iterations=8, p95=0.0022205114, max=0.021714449
+grid=64, h=1/240, iterations=8, p95=0.017373681, max=0.09115505
+grid=64, h=1/480, iterations=8, p95=0.010578275, max=0.033856273
+test resolution_and_timestep_sweep_records_error ... ok
+hanging cloth: worst final-1000 p95 stretch=0.016481519
+test horizontal_cloth_drapes_for_ten_thousand_substeps ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 45.81s
+
+     Running tests/mesh_contract.rs (target/debug/deps/mesh_contract-cad71bc6885878c3)
+
+running 2 tests
+test invalid_topology_is_rejected_without_repair ... ok
+test grid_counts_area_and_order ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/solver_reference.rs (target/debug/deps/solver_reference-fce994fc70b2e61c)
+
+running 7 tests
+test distance_constraint_has_expected_compliant_solution ... ok
+test failed_substep_is_atomic ... ok
+test handles_are_scoped_and_generational ... ok
+test material_and_state_setters_reject_invalid_input ... ok
+test pins_preserve_mass_and_release_velocity ... ok
+test freefall_matches_discrete_solution_and_converges ... ok
+test rigid_transform_equivariance_and_surface_normals ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests rapier_cloth_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

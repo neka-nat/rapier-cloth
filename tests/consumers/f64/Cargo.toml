@@ -1,0 +1,11 @@
+[package]
+name = "cloth-consumer-f64"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rapier-cloth = { path = "../../..", default-features = false, features = ["f64"] }
+rapier3d-f64 = "0.34"
+
+[workspace]

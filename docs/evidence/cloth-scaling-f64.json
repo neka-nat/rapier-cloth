@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "cpu": "13th Gen Intel(R) Core(TM) i9-13900H",
+  "os": "linux 6.8.0-139-generic",
+  "rust": "rustc 1.93.0 (254b59607 2026-01-19)",
+  "commit": "53afdb2bf5f5ad6220c80bff79a1c135112dc312",
+  "dirty": false,
+  "precision": "f64",
+  "h": 0.004166666666666667,
+  "iterations": 8,
+  "warmup": 100,
+  "measured": 1000,
+  "fixture": "1m square flat on fixed halfspace; default ClothMaterial; no pins; gravity=(0,-9.81,0)",
+  "samples": [
+    {
+      "grid": 32,
+      "vertices": 1024,
+      "core": {
+        "p50_ms": 4.038271,
+        "p95_ms": 4.702987
+      },
+      "query": {
+        "p50_ms": 1.695335,
+        "p95_ms": 1.9843929999999996
+      },
+      "total": {
+        "p50_ms": 5.743567,
+        "p95_ms": 6.694567999999999
+      },
+      "max_penetration": 0.0,
+      "max_stretch": 0.0,
+      "max_p95_stretch": 0.0,
+      "max_contacts": 1024,
+      "scratch_array_bytes": 283696
+    },
+    {
+      "grid": 64,
+      "vertices": 4096,
+      "core": {
+        "p50_ms": 16.632705,
+        "p95_ms": 17.677894
+      },
+      "query": {
+        "p50_ms": 7.32249,
+        "p95_ms": 7.821775999999999
+      },
+      "total": {
+        "p50_ms": 24.006099,
+        "p95_ms": 25.537956
+      },
+      "max_penetration": 0.0,
+      "max_stretch": 0.0,
+      "max_p95_stretch": 0.0,
+      "max_contacts": 4096,
+      "scratch_array_bytes": 1140784
+    },
+    {
+      "grid": 128,
+      "vertices": 16384,
+      "core": {
+        "p50_ms": 69.306491,
+        "p95_ms": 80.271885
+      },
+      "query": {
+        "p50_ms": 30.834649000000002,
+        "p95_ms": 36.50076200000001
+      },
+      "total": {
+        "p50_ms": 100.36745800000001,
+        "p95_ms": 117.026341
+      },
+      "max_penetration": 0.0,
+      "max_stretch": 0.0,
+      "max_p95_stretch": 0.0,
+      "max_contacts": 16384,
+      "scratch_array_bytes": 4575280
+    }
+  ]
+}

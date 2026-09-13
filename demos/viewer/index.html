@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>rapier-cloth · Replay</title><link rel="icon" href="data:,"></head>
+<body>
+<header><div><span class="eyebrow">RAPIER CLOTH / EXPERIMENT 01</span><h1>布の動きを、確かめる。</h1><p>CPUシミュレーションの記録再生</p></div><label class="file-button">記録を開く<input id="file" type="file" accept=".json,application/json" aria-label="記録ファイル"></label></header>
+<main><section class="stage"><div id="viewport" aria-label="布の3D表示"></div><div class="stage-tag"><span class="dot"></span><span id="phase">読込中</span><span id="precision"></span></div><div class="camera-hint">ドラッグで回転 · スクロールで拡大</div></section>
+<aside><span class="eyebrow">FRAME INSPECTOR</span><h2 id="time">0.000 s</h2><p id="frame">—</p><dl><div><dt>伸び率 · p95</dt><dd id="stretch">—</dd></div><div><dt>最大侵入量</dt><dd id="penetration">—</dd></div><div><dt>把持誤差</dt><dd id="target">—</dd></div><div><dt>接触数</dt><dd id="contacts">—</dd></div></dl><div class="toggles"><label><input id="wireframe" type="checkbox">ワイヤーフレーム</label><label><input id="anchors" type="checkbox" checked>固定点・把持点</label></div><p class="legend"><span class="mint">●</span> 布　<span class="amber">●</span> 把持　<span class="pink">●</span> 固定</p><p class="note">数値はRustの計算記録です。表示用の頂点とは独立した値を表示します。</p><p id="error" role="alert"></p></aside>
+<section class="transport"><button id="play" disabled>再生</button><label class="timeline-label">再生位置<input id="timeline" type="range" min="0" max="0" value="0" aria-label="再生位置"></label><button id="reset">先頭へ</button><button id="camera">視点を戻す</button></section></main>
+<footer><span>ONE-WAY COUPLING · CPU XPBD</span><span id="mesh-info">記録を読み込んでいます</span></footer>
+<script type="module" src="/src/main.js"></script></body></html>
