@@ -18,6 +18,7 @@ pub(crate) struct RapierContacts<'a, 'b> {
     limit: usize,
     excluded_pairs: &'a BTreeSet<(u32, (u32, u32))>,
     sweeps: Vec<Contact>,
+    prediction_sweeps: Vec<Contact>,
     merged: Vec<Contact>,
     pub error: Option<IntegrationError>,
     pub ignored: BTreeSet<(u32, u32)>,
@@ -40,6 +41,7 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
             limit,
             excluded_pairs,
             sweeps: Vec::new(),
+            prediction_sweeps: Vec::new(),
             merged: Vec::new(),
             error: None,
             ignored: BTreeSet::new(),
@@ -56,6 +58,7 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
         stage: ContactStage,
         out: &mut Vec<Contact>,
     ) -> Result<(), IntegrationError> {
+        self.prediction_sweeps.clear();
         let mut mins = Vec3::splat(Real::MAX);
         let mut maxs = Vec3::splat(-Real::MAX);
         for p in previous.iter().chain(positions) {
@@ -198,7 +201,7 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
                                     surface_velocity: Vec3::ZERO,
                                     friction,
                                 };
-                                self.sweeps.push(swept);
+                                self.prediction_sweeps.push(swept);
                                 geometry = Some(swept);
                             }
                         }
@@ -214,11 +217,18 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
         }
         // Keep sweep planes even if constraint projection moves the particle
         // outside the source collider's candidate AABB during this substep.
-        // Prediction is queried once per substep; its unique sweep keys remain
-        // sorted for all subsequent iterations. Linear union also replaces a
-        // matching discrete contact with its cached sweep plane.
+        // Continuous prediction may query several trial poses in one substep.
+        // Merge unique keys from this query into the retained cache, replacing
+        // an earlier witness for the same pair with the latest swept witness.
+        // Count retained keys, not the number of prediction queries.
         if stage == ContactStage::Prediction {
-            self.sweeps.sort_unstable_by_key(|c| c.key);
+            self.prediction_sweeps.sort_unstable_by_key(|c| c.key);
+            merge_sweep_contacts(
+                &mut self.sweeps,
+                &self.prediction_sweeps,
+                &mut self.merged,
+                self.limit,
+            )?;
         }
         if !self.sweeps.is_empty() {
             merge_sweep_contacts(out, &self.sweeps, &mut self.merged, self.limit)?;
@@ -276,6 +286,57 @@ impl ContactSource for RapierContacts<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_prediction_replaces_sweep_witness_without_duplicating_its_key() {
+        let mut rigid = PhysicsWorld::new();
+        rigid.colliders.insert(ColliderBuilder::ball(0.3));
+        let before = crate::SceneSnapshot::capture(
+            crate::WorldId::new(),
+            0,
+            &rigid.bodies,
+            &rigid.colliders,
+        );
+        rigid.step();
+        let query = rigid.broad_phase.as_query_pipeline(
+            rigid.narrow_phase.query_dispatcher(),
+            &rigid.bodies,
+            &rigid.colliders,
+            QueryFilter::default(),
+        );
+        let scene = RapierScene::new(query, &before, 1.0 / 240.0, Vec3::ZERO);
+        let settings = CollisionSettings::default();
+        let excluded = BTreeSet::new();
+        let mut source =
+            RapierContacts::new(&scene, &settings, ClothMaterial::default(), 1, &excluded);
+        let previous = [-Vec3::X * 2.0];
+        let mut out = Vec::new();
+        let mut last_normal = Vec3::ZERO;
+        for attempt in 0..128 {
+            out.clear();
+            let p = Vec3::new(2.0, if attempt % 2 == 0 { 0.0 } else { 0.1 }, 0.0);
+            source
+                .contacts(&previous, &[p], 0.05, ContactStage::Prediction, &mut out)
+                .unwrap();
+            assert_eq!(out.len(), 1);
+            assert_eq!(source.sweeps.len(), 1);
+            assert!(out[0].normal.x < -0.99);
+            assert_eq!(out[0].normal.y > 0.001, attempt % 2 != 0);
+            last_normal = out[0].normal;
+        }
+        out.clear();
+        source
+            .contacts(
+                &[Vec3::splat(3.0)],
+                &[Vec3::splat(3.0)],
+                0.05,
+                ContactStage::Iteration,
+                &mut out,
+            )
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].normal, last_normal);
+    }
 
     #[test]
     fn sweep_planes_override_current_geometry_and_survive_missing_candidates() {

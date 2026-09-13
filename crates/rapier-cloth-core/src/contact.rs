@@ -29,6 +29,8 @@ pub enum ContactStage {
 
 /// A narrow boundary for refreshing external constraints. Output is cleared
 /// by the solver before every call. Failure aborts the entire cloth substep.
+/// Every stage, including prediction, may be queried repeatedly for trial poses
+/// in the same substep. A source must retain unique keys when caching witnesses.
 pub trait ContactSource {
     fn contacts(
         &mut self,

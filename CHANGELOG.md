@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix cached static-sweep contact duplication when continuous prediction retries a trial pose. Repeated queries update the witness for each retained key without consuming extra contact capacity.
 - Add experimental continuous self-contact checks for prediction, accepted constraint corrections and the final substep sweep, with swept witnesses, explicit work/convergence failures and a friction-free tangential-motion regression. Whole-triangle rigid contact and folding qualification remain under development.
 - Add opt-in discrete, thickness-aware self-collision with refitted triangle/edge hierarchies, canonical contact features, bounded work and atomic failures. Static friction remains unimplemented.
 - Add generalized four-particle surface contacts and per-cloth contact history restored by checkpoints. Existing particle contact sources remain supported through a defaulted surface callback.
