@@ -11,6 +11,6 @@ pub struct StepReport {
     pub stabilized_contacts: usize,
     pub degenerate_faces: usize,
     pub iterations: usize,
-    /// Retained array capacities only; excludes BTreeMap nodes and bridge staging.
+    /// Retained array capacities, including contact states; excludes bridge staging.
     pub scratch_bytes: usize,
 }
