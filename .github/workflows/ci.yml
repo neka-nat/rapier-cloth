@@ -86,3 +86,12 @@ jobs:
         with:
           key: packages
       - run: bash scripts/check-packages.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crate-archives-and-consumer-evidence
+          path: |
+            /tmp/rapier-cloth-package-*/target-*/package/*.crate
+            /tmp/rapier-cloth-package-*/*contents.txt
+            /tmp/rapier-cloth-package-*/metadata-*.json
+            /tmp/rapier-cloth-package-*/SHA256SUMS

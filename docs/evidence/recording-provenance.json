@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "recording": "demos/viewer/public/sample-f64.json",
+  "sha256": "c2607afe4c52d373bfc7dce7c9531f86e5a9c352019074c1b74efd49a8f2cbdc",
+  "fixture": "examples/support/pick_fixture.json",
+  "precision": "f64",
+  "frames": 391,
+  "screenshot_time_seconds": 3.25,
+  "browser": "Chromium / Playwright 1.63.0",
+  "source_acceptance_commit": "53afdb2bf5f5ad6220c80bff79a1c135112dc312"
+}

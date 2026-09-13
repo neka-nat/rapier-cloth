@@ -4,20 +4,42 @@ Scope: PR0, PR1a, PR1b, PR2a, PR2b, PR3a, PR3b, PR3c and R0 from [the plan](impl
 
 | Phase | State | Evidence |
 |---|---|---|
-| PR0 | Implemented; local checks passed | Both precision graphs, independent direct-Rapier consumers, rejected feature combinations, core dependency boundary |
-| PR1a | Implemented; local tests passed | Grid topology, invalid meshes, surface density mass, generational handles |
-| PR1b | Implemented; local tests passed | Analytical integration/distance references, dihedral finite differences, 10,000-step drape in f32/f64 |
-| PR2a | Implemented; local tests passed | Four primitives, corner contacts, penetration stabilization, atomic contact budget failure |
-| PR2b | Implemented; local tests passed | Thin-box sweep, filters and BVH lifecycle, world/h/step contracts, checkpoint replay |
-| PR3a | Implemented; local tests passed | Local anchors, rotation/translation, release, deletion/reuse, selective exclusions, kinematic motion limits |
-| PR3b | Implemented; local tests passed | Coulomb slowdown and moving-surface velocity; canonical pick-and-place and exact JSON roundtrip in f32/f64 |
-| PR3c | Verification in progress | Actual f64 Rust recording matched browser GPU buffers/body poses; playback/seek/camera/upload tests passed; final benchmarks pending |
-| R0 | Verification in progress | Archives and extracted consumers exercised; final package script run and platform CI pending |
+| PR0 | Complete | Both precision graphs, independent direct-Rapier consumers, rejected feature combinations, core dependency boundary |
+| PR1a | Complete | Grid topology, invalid meshes, surface density mass, generational handles |
+| PR1b | Complete | Analytical integration/distance references, dihedral finite differences, 10,000-step drape in f32/f64 |
+| PR2a | Complete | Four primitives, corner contacts, penetration stabilization, atomic contact budget failure |
+| PR2b | Complete | Thin-box sweep, filters and BVH lifecycle, world/h/step contracts, checkpoint replay |
+| PR3a | Complete | Local anchors, rotation/translation, release, deletion/reuse, selective exclusions, kinematic motion limits |
+| PR3b | Complete | Coulomb slowdown and moving-surface velocity; canonical pick-and-place and exact JSON roundtrip in f32/f64 |
+| PR3c | Complete | Actual f64 Rust recording matched browser GPU buffers/body poses; playback/seek/camera/upload tests passed; f32/f64 scaling data stored in evidence/ |
+| R0 | Complete | Both workspace archives verified; independent consumers used extracted sources; all 11 platform/MSRV/viewer/package CI jobs completed successfully |
 
-The resolved dependency graph requires Rust 1.90, despite Rapier's own 1.86 declaration: nalgebra 0.35, safe_arch 1.2 and wide 1.7 need 1.89; ordered-float 5.5 needs 1.90. Development uses 1.93.0. Linux local MSRV checks passed; remote platform completion is recorded separately after checking the actual runs.
+The resolved dependency graph requires Rust 1.90, despite Rapier's own 1.86 declaration: nalgebra 0.35, safe_arch 1.2 and wide 1.7 need 1.89; ordered-float 5.5 needs 1.90. Development uses 1.93.0. Linux local MSRV checks and both remote MSRV jobs passed. Completed job logs were inspected before declaring platform success.
 
 The horizontal 32×32 hanging fixture completed 10,000 substeps at h=1/240 and 8 iterations. The maximum of the final 1,000 steps' p95 stretch was 0.016481519 (f32) and 0.01647869953082659 (f64), below 0.05. The free corner dropped below y=0.2, so this checks actual deformation.
 
 The canonical manipulation fixture uses 16×16 vertices, 0.3m size, 1/240s substeps, 8 iterations, default material. Release is at 4s with 0.2m/s horizontal velocity; the final maximum height is approximately 0.005012m. Capture happens after settling, and transport distance is measured from the captured position. All recorded steps passed finite-value checks. The maximum single-edge stretch during the whole operation was about 18.22% for f32 and 5.67% for f64 in the local runs; the hanging fixture's 5% p95 gate is a different measure and is not a blanket deformation guarantee for this operation.
 
 The replay viewer passed two Chromium tests against the actual f64 recording: first/middle/last frames and backward seeking, GPU f32 conversion, normals/bounds, body poses/local offsets, anchors/pins, numerical labels, playback/pause, wireframe, marker visibility, camera drag/reset, and valid/invalid file input. This is replay validation, not browser-side cloth physics.
+
+## CI and distribution evidence
+
+The source acceptance run [34726634469](https://github.com/neka-nat/rapier-cloth/actions/runs/34726634469) tested commit `53afdb2bf5f5ad6220c80bff79a1c135112dc312` and completed with **success** for all 11 jobs: Linux/Windows/macOS × f32/f64, MSRV 1.90 × f32/f64, feature/dependency boundaries, replay viewer, and package consumers. This was checked from both completed metadata and the actual job logs, not inferred from local Linux tests.
+
+- [Completed CI metadata](evidence/ci-source.json) / [job result excerpts](evidence/ci-source-checks.log)
+- [Local core f32](evidence/core-f32.log) / [core f64](evidence/core-f64.log)
+- [Local bridge f32](evidence/bridge-f32.log) / [bridge f64](evidence/bridge-f64.log)
+- [Pick-and-place f32 summary](evidence/pick-f32-summary.json) / [f64 summary](evidence/pick-f64-summary.json)
+- [Scaling methodology and measured results](benchmarks.ja.md)
+
+The core contains 13 integration tests per precision; the bridge contains 27 plus the README doctest, with one further test in each standalone consumer. The complete-revolution kinematic fixture was added during final review and is included in the source acceptance run. The first CI attempt failed because `rg` was absent on the runner; the diagnostic checker now uses a standard `grep` fallback and the corrected job passed.
+
+The local package script completed at `/tmp/rapier-cloth-package-iPtVxK`; that earlier local archive snapshot was subsequently covered by the final source's remote package job. The remote job packaged and verified both crates with default-equivalent f32 and explicit f64 features, then built and ran a fresh consumer for each precision using only extracted archives. Both archive manifests lose workspace path dependencies, core's only normal dependency is glam, and serde/serde_json remain dev dependencies. The successful source package job is [103641788449](https://github.com/neka-nat/rapier-cloth/actions/runs/34726634469/job/103641788449).
+
+The workflow retains `crate-archives-and-consumer-evidence` and `viewer-recording-and-browser-evidence` artifacts for subsequent runs. The latest evidence commit is revalidated by the [PR checks](https://github.com/neka-nat/rapier-cloth/pull/1/checks). R0 is local/CI distribution verification; crates.io publication and merging the PR have not been performed.
+
+## Replay artifact
+
+![Pick-and-place replay at 3.25 seconds](evidence/pick-and-place.png)
+
+Generated from the canonical 16×16 fixture described in [examples](examples.ja.md), with Rust f64 computation and Chromium replay. The full 391-frame recording is [sample-f64.json](../demos/viewer/public/sample-f64.json). The browser check compares source doubles with the actual f32 GPU buffer at the first/middle/last frames and after backward seeks. A screenshot alone is not the acceptance oracle.

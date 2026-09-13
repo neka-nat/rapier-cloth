@@ -19,7 +19,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
-include = ["src/**", "examples/**", "benches/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE-*", "docs/*.md", "CHANGELOG.md"]
+include = ["src/**", "examples/**", "benches/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE-*", "docs/**", "CHANGELOG.md"]
 
 [features]
 default = ["f32"]
