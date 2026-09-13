@@ -339,7 +339,8 @@ impl RapierClothWorld {
                 cloth.material(),
                 self.solver_settings.max_contacts,
                 &excluded_pairs,
-            );
+            )
+            .with_surface(cloth);
             let solver_start = Instant::now();
             let result = self.solver.step_with_contacts(
                 cloth,

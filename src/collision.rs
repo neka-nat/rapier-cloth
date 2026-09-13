@@ -10,6 +10,8 @@ use crate::{
     IntegrationError, RapierScene, Real, Vec3,
 };
 use std::{collections::BTreeSet, time::Instant};
+#[path = "collision/surface.rs"]
+mod surface;
 
 pub(crate) struct RapierContacts<'a, 'b> {
     scene: &'a RapierScene<'b>,
@@ -20,6 +22,9 @@ pub(crate) struct RapierContacts<'a, 'b> {
     sweeps: Vec<Contact>,
     prediction_sweeps: Vec<Contact>,
     merged: Vec<Contact>,
+    surface_mesh: Option<std::sync::Arc<crate::ClothMesh>>,
+    surface_settings: Option<crate::ClothContactSettings>,
+    surface_manifold: crate::rapier::parry::query::ContactManifold<(), ()>,
     pub error: Option<IntegrationError>,
     pub ignored: BTreeSet<(u32, u32)>,
     pub candidate_queries: usize,
@@ -43,12 +48,25 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
             sweeps: Vec::new(),
             prediction_sweeps: Vec::new(),
             merged: Vec::new(),
+            surface_mesh: None,
+            surface_settings: None,
+            surface_manifold: crate::rapier::parry::query::ContactManifold::new(),
             error: None,
             ignored: BTreeSet::new(),
             candidate_queries: 0,
             pair_queries: 0,
             query_time_seconds: 0.0,
         }
+    }
+    pub fn with_surface(mut self, cloth: &crate::Cloth) -> Self {
+        if let Some(settings) = cloth
+            .contact_settings()
+            .filter(|s| s.rigid_surface_collision)
+        {
+            self.surface_mesh = Some(cloth.shared_mesh());
+            self.surface_settings = Some(settings);
+        }
+        self
     }
     fn generate(
         &mut self,
@@ -272,8 +290,28 @@ impl ContactSource for RapierContacts<'_, '_> {
         stage: ContactStage,
         out: &mut Vec<Contact>,
     ) -> Result<(), ClothError> {
+        if self.surface_settings.is_some() {
+            return Ok(());
+        }
         let start = Instant::now();
         let result = self.generate(previous, positions, radius, stage, out);
+        self.query_time_seconds += start.elapsed().as_secs_f64();
+        result.map_err(|e| {
+            let message = e.to_string();
+            self.error = Some(e);
+            ClothError::External(message)
+        })
+    }
+    fn surface_contacts_with_work(
+        &mut self,
+        previous: &[Vec3],
+        positions: &[Vec3],
+        stage: ContactStage,
+        out: &mut Vec<crate::SurfaceContact>,
+        work: &mut crate::CollisionWork,
+    ) -> Result<(), ClothError> {
+        let start = Instant::now();
+        let result = self.generate_surface(previous, positions, stage, out, work);
         self.query_time_seconds += start.elapsed().as_secs_f64();
         result.map_err(|e| {
             let message = e.to_string();

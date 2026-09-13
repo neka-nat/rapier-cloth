@@ -1,4 +1,95 @@
-use crate::{Real, Vec3};
+use crate::{Real, SurfaceFeature, Vec3};
+/// Canonical support of a closest point on fixed mesh topology. Boundary
+/// barycentrics within 1e-6 are snapped to the shared vertex or sorted edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceWitness {
+    pub feature: SurfaceFeature,
+    pub particles: [u32; 3],
+    pub weights: [Real; 3],
+}
+impl SurfaceWitness {
+    pub(crate) fn vertex(i: u32) -> Self {
+        Self {
+            feature: SurfaceFeature::Vertex(i),
+            particles: [i, 0, 0],
+            weights: [1.0, 0.0, 0.0],
+        }
+    }
+    pub(crate) fn edge(edge: [u32; 2], t: Real) -> Self {
+        if t <= 1.0e-6 {
+            return Self::vertex(edge[0]);
+        }
+        if t >= 1.0 - 1.0e-6 {
+            return Self::vertex(edge[1]);
+        }
+        let mut indices = edge;
+        indices.sort_unstable();
+        let weights = if indices == edge {
+            [1.0 - t, t, 0.0]
+        } else {
+            [t, 1.0 - t, 0.0]
+        };
+        Self {
+            feature: SurfaceFeature::Edge(indices),
+            particles: [indices[0], indices[1], 0],
+            weights,
+        }
+    }
+    pub(crate) fn triangle(triangle: [u32; 3], face: u32, weights: [Real; 3]) -> Self {
+        let mask = weights
+            .iter()
+            .enumerate()
+            .fold(0u8, |mask, (i, &w)| mask | ((w > 1.0e-6) as u8) << i);
+        match mask {
+            1 => Self::vertex(triangle[0]),
+            2 => Self::vertex(triangle[1]),
+            4 => Self::vertex(triangle[2]),
+            3 => Self::edge(
+                [triangle[0], triangle[1]],
+                weights[1] / (weights[0] + weights[1]),
+            ),
+            5 => Self::edge(
+                [triangle[0], triangle[2]],
+                weights[2] / (weights[0] + weights[2]),
+            ),
+            6 => Self::edge(
+                [triangle[1], triangle[2]],
+                weights[2] / (weights[1] + weights[2]),
+            ),
+            _ => Self {
+                feature: SurfaceFeature::Face(face),
+                particles: triangle,
+                weights,
+            },
+        }
+    }
+}
+
+impl SurfaceWitness {
+    /// Validate triangle support and normalized barycentric coordinates, then
+    /// canonicalize its boundary feature. Particle bounds belong to the mesh.
+    pub fn from_triangle(
+        triangle: [u32; 3],
+        face: u32,
+        weights: [Real; 3],
+    ) -> Result<Self, crate::ClothError> {
+        let sum: Real = weights.iter().sum();
+        if triangle[0] == triangle[1]
+            || triangle[0] == triangle[2]
+            || triangle[1] == triangle[2]
+            || weights
+                .iter()
+                .any(|w| !w.is_finite() || *w < 0.0 || *w > 1.0)
+            || !sum.is_finite()
+            || (sum - 1.0).abs() > 64.0 * Real::EPSILON
+        {
+            return Err(crate::ClothError::InvalidSurfaceContact(
+                "invalid triangle witness",
+            ));
+        }
+        Ok(Self::triangle(triangle, face, weights.map(|w| w / sum)))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TriangleWitness {

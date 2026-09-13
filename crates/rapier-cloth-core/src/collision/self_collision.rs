@@ -1,10 +1,14 @@
 use super::{
     broad_phase::{Aabb, Hierarchy},
     ccd::{CcdFeature, conservative_advance},
-    geometry::{closest_segments, closest_triangle, triangles_intersect},
+    geometry::{
+        SurfaceWitness as Witness, closest_segments, closest_triangle, triangles_intersect,
+    },
     settings::*,
 };
-use crate::{ClothError, ClothMesh, Real, SurfaceContact, SurfaceContactKey, SurfaceFeature, Vec3};
+#[cfg(test)]
+use crate::SurfaceFeature;
+use crate::{ClothError, ClothMesh, Real, SurfaceContact, SurfaceContactKey, Vec3};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -30,69 +34,6 @@ impl CollisionTopology {
                     .map(|e| Aabb::points(e.vertices.map(|i| positions[i as usize])))
                     .collect::<Vec<_>>(),
             ),
-        }
-    }
-}
-#[derive(Clone, Copy)]
-struct Witness {
-    feature: SurfaceFeature,
-    particles: [u32; 3],
-    weights: [Real; 3],
-}
-impl Witness {
-    fn vertex(i: u32) -> Self {
-        Self {
-            feature: SurfaceFeature::Vertex(i),
-            particles: [i, 0, 0],
-            weights: [1.0, 0.0, 0.0],
-        }
-    }
-    fn edge(edge: [u32; 2], t: Real) -> Self {
-        if t <= 1.0e-6 {
-            return Self::vertex(edge[0]);
-        }
-        if t >= 1.0 - 1.0e-6 {
-            return Self::vertex(edge[1]);
-        }
-        let mut indices = edge;
-        indices.sort_unstable();
-        let weights = if indices == edge {
-            [1.0 - t, t, 0.0]
-        } else {
-            [t, 1.0 - t, 0.0]
-        };
-        Self {
-            feature: SurfaceFeature::Edge(indices),
-            particles: [indices[0], indices[1], 0],
-            weights,
-        }
-    }
-    fn triangle(triangle: [u32; 3], face: u32, weights: [Real; 3]) -> Self {
-        let mask = weights
-            .iter()
-            .enumerate()
-            .fold(0u8, |mask, (i, &w)| mask | ((w > 1.0e-6) as u8) << i);
-        match mask {
-            1 => Self::vertex(triangle[0]),
-            2 => Self::vertex(triangle[1]),
-            4 => Self::vertex(triangle[2]),
-            3 => Self::edge(
-                [triangle[0], triangle[1]],
-                weights[1] / (weights[0] + weights[1]),
-            ),
-            5 => Self::edge(
-                [triangle[0], triangle[2]],
-                weights[2] / (weights[0] + weights[2]),
-            ),
-            6 => Self::edge(
-                [triangle[1], triangle[2]],
-                weights[2] / (weights[1] + weights[2]),
-            ),
-            _ => Self {
-                feature: SurfaceFeature::Face(face),
-                particles: triangle,
-                weights,
-            },
         }
     }
 }

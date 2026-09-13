@@ -34,8 +34,10 @@ fn run(
     verify: bool,
     self_collision: bool,
     continuous: bool,
+    rigid_surface: bool,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let mut simulation = configured_world(config, variant, self_collision, continuous)?;
+    let mut simulation =
+        configured_world(config, variant, self_collision, continuous, rigid_surface)?;
     let rest: Vec<_> = simulation
         .world
         .cloth(simulation.cloth)?
@@ -141,10 +143,11 @@ fn run(
         .map(|p| (simulation.config.thickness * 0.5 - p[1]).max(0.0))
         .fold(0.0, f64::max);
     Ok(json!({
-        "status":if continuous {"unqualified_continuous_self_collision"} else if self_collision {"unqualified_discrete_self_collision"} else {"unqualified_particle_baseline"},
+        "status":if rigid_surface {"unqualified_rigid_surface_collision"} else if continuous {"unqualified_continuous_self_collision"} else if self_collision {"unqualified_discrete_self_collision"} else {"unqualified_particle_baseline"},
         "collision_settings":simulation.world.cloth(simulation.cloth)?.contact_settings().map(|s|json!({
             "thickness":s.thickness,"activation_margin":s.activation_margin,"self_collision":s.self_collision,
             "continuous_self_collision":s.continuous_self_collision,"ccd_minimum_separation":if s.continuous_self_collision {Some(s.thickness*0.9)} else {None},
+            "rigid_surface_collision":s.rigid_surface_collision,"rigid_separation":if s.rigid_surface_collision {Some(s.thickness*0.5)} else {None},
             "static_friction":s.static_friction,"kinetic_friction":s.kinetic_friction,
             "limits":{"candidate_pairs":s.limits.candidate_pairs,"retained_contacts":s.limits.retained_contacts,"ccd_checks":s.limits.ccd_checks}})),
         "collision_work_max_per_substep":{"candidate_pairs":collision_work.candidate_pairs,"retained_contacts":collision_work.retained_contacts,"ccd_checks":collision_work.ccd_checks,"limited_advances":collision_work.limited_advances},
@@ -164,9 +167,10 @@ fn configured_world(
     variant: usize,
     self_collision: bool,
     continuous: bool,
+    rigid_surface: bool,
 ) -> Result<FoldingWorld, Box<dyn std::error::Error>> {
     let mut simulation = FoldingWorld::new(config, variant)?;
-    if self_collision {
+    if self_collision || rigid_surface {
         simulation
             .world
             .cloth_mut(simulation.cloth)?
@@ -176,6 +180,8 @@ fn configured_world(
                 static_friction: real(simulation.config.static_friction),
                 kinetic_friction: real(simulation.config.kinetic_friction),
                 continuous_self_collision: continuous,
+                self_collision,
+                rigid_surface_collision: rigid_surface,
                 ..Default::default()
             }))?;
     }
@@ -188,6 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut verify = false;
     let mut self_collision = false;
     let mut continuous = false;
+    let mut rigid_surface = false;
     let mut config = Config::default();
     let mut variant = 0;
     while let Some(arg) = args.next() {
@@ -213,6 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--verify" => verify = true,
             "--self-collision" => self_collision = true,
+            "--rigid-surface-collision" => rigid_surface = true,
             "--continuous-self-collision" => {
                 self_collision = true;
                 continuous = true;
@@ -228,7 +236,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // not relabel the already-built benchmark at report-writing time.
     let source_commit = output("git", &["rev-parse", "HEAD"]);
     let source_dirty = !output("git", &["status", "--porcelain"]).is_empty();
-    let mut warmup = configured_world(config.clone(), variant, self_collision, continuous)?;
+    let mut warmup = configured_world(
+        config.clone(),
+        variant,
+        self_collision,
+        continuous,
+        rigid_surface,
+    )?;
     for _ in 0..120 {
         warmup.tick()?;
     }
@@ -240,6 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             verify,
             self_collision,
             continuous,
+            rigid_surface,
         )?);
     }
     let cpu = fs::read_to_string("/proc/cpuinfo")

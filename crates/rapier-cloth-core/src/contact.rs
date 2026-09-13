@@ -1,4 +1,4 @@
-use crate::{ClothError, ClothHandle, Real, Vec3};
+use crate::{ClothError, ClothHandle, CollisionWork, Real, Vec3};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ContactKey {
@@ -52,6 +52,20 @@ pub trait ContactSource {
         _out: &mut Vec<SurfaceContact>,
     ) -> Result<(), ClothError> {
         Ok(())
+    }
+
+    /// Surface callback with the same work counters used by built-in collision.
+    /// Charge work against the owning cloth's configured limits before querying.
+    /// The default forwards to the existing callback for source compatibility.
+    fn surface_contacts_with_work(
+        &mut self,
+        previous: &[Vec3],
+        positions: &[Vec3],
+        stage: ContactStage,
+        out: &mut Vec<SurfaceContact>,
+        _work: &mut CollisionWork,
+    ) -> Result<(), ClothError> {
+        self.surface_contacts(previous, positions, stage, out)
     }
 }
 

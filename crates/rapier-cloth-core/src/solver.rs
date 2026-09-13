@@ -87,6 +87,7 @@ pub struct Solver {
     self_collision: Option<SelfCollision>,
     contact_settings: Option<ClothContactSettings>,
     surface_high_water: usize,
+    external_collision_work: CollisionWork,
     motion_start: Vec<Vec3>,
     motion_trial: Vec<Vec3>,
     motion_distance_lambda: Vec<Real>,
@@ -122,6 +123,7 @@ impl Solver {
         }
         self.contact_settings = cloth.contact_settings;
         self.surface_high_water = 0;
+        self.external_collision_work = CollisionWork::default();
         if let Some(config) = cloth.contact_settings {
             config.validate()?;
             if config.self_collision {
@@ -464,7 +466,7 @@ impl Solver {
         report.surface_collision = if self.contact_settings.is_some_and(|s| s.self_collision) {
             self.self_collision.as_ref().unwrap().work
         } else {
-            CollisionWork::default()
+            self.external_collision_work
         };
         report.surface_collision.retained_contacts = report
             .surface_collision
@@ -664,11 +666,17 @@ impl Solver {
             stage,
             &mut self.contacts,
         )?;
-        source.surface_contacts(
+        let work = if self.contact_settings.is_some_and(|s| s.self_collision) {
+            &mut self.self_collision.as_mut().unwrap().work
+        } else {
+            &mut self.external_collision_work
+        };
+        source.surface_contacts_with_work(
             previous.unwrap_or(&self.reference),
             &self.positions,
             stage,
             &mut self.surface_contacts,
+            work,
         )?;
         if self.contact_settings.is_some_and(|s| s.self_collision) {
             self.self_collision.as_mut().unwrap().generate(

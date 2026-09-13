@@ -50,7 +50,11 @@ refitted candidate searches. Setting `continuous_self_collision: true` also chec
 prediction, accepted constraint corrections and the final substep sweep. This
 experimental mode can return a typed failure when a safe advance cannot be found;
 it has not qualified the complete folding task or its real-time performance.
-Static friction and entire-triangle contacts against rigid obstacles are not implemented.
+Static friction is not implemented. The Rapier adapter offers opt-in discrete
+whole-triangle rigid contacts through the core's generalized surface interface.
+Its candidates share the configured work budget with self-collision. The core
+contains no rigid-shape queries; `rigid_surface_collision` selects this behavior
+only in an adapter that supports it.
 Tearing is not implemented. Material compliance describes discrete constraints and requires
 tuning with the chosen grid, time step and iteration count.
 

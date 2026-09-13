@@ -36,6 +36,10 @@ pub struct ClothContactSettings {
     /// Experimental; rigid surface CCD is separate. Uses 90% of full thickness
     /// as the minimum swept separation while projections target full thickness.
     pub continuous_self_collision: bool,
+    /// Use whole-triangle contacts in supporting external adapters. In the
+    /// Rapier bridge this replaces the legacy particle-radius collision path.
+    /// Discrete only; continuous rigid motion is a separate capability.
+    pub rigid_surface_collision: bool,
     pub static_friction: Real,
     pub kinetic_friction: Real,
     pub limits: CollisionLimits,
@@ -47,6 +51,7 @@ impl Default for ClothContactSettings {
             activation_margin: 0.0001,
             self_collision: true,
             continuous_self_collision: false,
+            rigid_surface_collision: false,
             static_friction: 0.6,
             kinetic_friction: 0.5,
             limits: CollisionLimits::default(),
@@ -95,7 +100,10 @@ pub struct CollisionWork {
     pub limited_advances: usize,
 }
 impl CollisionWork {
-    pub(crate) fn charge(
+    /// Charge bounded external or built-in collision work before performing it.
+    /// Retained contacts use a high-water mark; other counters are cumulative.
+    /// On failure the counter is unchanged.
+    pub fn charge(
         &mut self,
         kind: CollisionBudgetKind,
         amount: usize,

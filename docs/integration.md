@@ -109,6 +109,7 @@ cloth.set_contact_settings(Some(ClothContactSettings {
     activation_margin: 0.0001,  // Extra candidate range, not extra thickness.
     self_collision: true,
     continuous_self_collision: false,
+    rigid_surface_collision: false,
     static_friction: 0.6,       // Reserved; static stick/slip is not implemented yet.
     kinetic_friction: 0.5,
     limits: CollisionLimits::default(),
@@ -124,7 +125,7 @@ collision or continuous self-collision. Use small-motion fixtures and inspect
 penetration/strain; the mode is not yet a qualified robotic folding system.
 
 `CollisionLimits` separates cumulative candidate-pair work (default 2,000,000 per
-substep), retained contact keys (65,536), and future CCD distance-evaluation work
+substep), retained contact keys (65,536), and CCD distance-evaluation work
 (2,000,000). The CCD counter is zero in the discrete implementation. Candidate
 work includes repeated refreshes and topologically incident candidates examined
 by the broad phase. Retained keys are bounded by maximum capacity, not summed
@@ -148,7 +149,58 @@ existing particle-contact callback remains available. Invalid geometry, unresolv
 initial self-intersections and infeasible all-fixed surface contacts return errors
 without committing the cloth state.
 
-### Continuous self-collision
+For bounded external surface queries, override
+`ContactSource::surface_contacts_with_work` and charge each primitive candidate
+through `CollisionWork::charge` using the owning cloth's limits. These counters
+are shared with built-in self-contact/CCD; the default callback forwards to
+`surface_contacts`. Every contact stage can be queried repeatedly within one
+substep, including prediction. Keep cached keys unique and update their witnesses
+when retrying a trial pose.
+
+## Rigid surface contact
+
+Enable the experimental Rapier surface adapter per cloth:
+
+```rust
+cloth.set_contact_settings(Some(ClothContactSettings {
+    rigid_surface_collision: true,
+    self_collision: true,
+    continuous_self_collision: true,
+    ..Default::default()
+}))?;
+```
+
+The adapter queries complete triangles against spheres, boxes and capsules, and
+uses vertex inequalities to cover triangles against a fixed half-space. It finds
+small obstacles inside a triangle even when every cloth vertex misses them.
+Canonical vertex/edge/face witnesses avoid counting a shared boundary twice;
+collider identities include their handle generation. Gripper exclusions apply
+only when all nonzero support particles belong to the selected excluded patch.
+An adjacent unselected feature remains eligible for collision.
+
+Required rigid-surface separation is `thickness / 2`; activation adds only a
+candidate margin. For example, 1 mm full thickness rests with its midsurface
+0.5 mm above a plane. The legacy particle contact/sweep path is disabled for that
+cloth, so its numerical `contact_radius` does not inflate the surface offset.
+Kinetic friction combines the new cloth coefficient with collider friction using
+their arithmetic mean; `friction_override` overrides both coefficients. The
+static coefficient remains reserved until static stick/slip is implemented.
+
+This adapter currently performs discrete queries. The continuous flag in the
+example applies to **self-collision only**; it does not add rigid-surface CCD.
+Kinematic sphere/box/capsule poses use the existing motion-budget contract, and
+pre-step poses are used for stabilization. Moving contact-point velocities include
+body rotation. Dynamic bodies and moving half-spaces remain unsupported.
+
+Initial midsurface intersections deeper than the precision length tolerance
+(10 micrometres for f32, 1 nanometre for f64) return
+`IntegrationError::InitialRigidIntersection`. A final separation below 90% of the
+half-thickness target returns `ClothError::UnresolvedSurfaceContact`. Contact/work
+overflow and infeasible fixed targets also fail atomically. The adapter has small
+primitive and moving-support regression tests; the complete fold, continuous
+rigid motion and CPU frame budget remain unqualified.
+
+## Continuous self-collision
 
 Set `continuous_self_collision: true` together with `self_collision: true` to
 enable experimental continuous checks. The core bounds linear motion during
@@ -172,10 +224,10 @@ their multiplier increments. Hard target commands are still required to be reach
 within the precision's length tolerance; infeasible commands fail atomically.
 `surface_collision.limited_advances` counts motion checks requesting a reduction.
 
-This option covers cloth self-contact. The Rapier adapter still uses its particle
-collision path for rigid obstacles; complete triangle-surface and moving/rotating
-rigid-shape coverage remain under development. Static friction, the complete
-folding task and its CPU budget are also not yet qualified.
+This option covers cloth self-contact. The Rapier adapter uses particle contacts
+unless `rigid_surface_collision` separately enables discrete triangle contacts.
+Continuous moving/rotating rigid-shape coverage remains under development. Static
+friction, the complete folding task and its CPU budget are also not yet qualified.
 
 ## Attachments and grasping
 

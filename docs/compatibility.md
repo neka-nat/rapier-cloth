@@ -30,13 +30,22 @@ The project does not promise bitwise determinism across CPUs or precisions.
 | Fixed obstacles | Spheres, boxes, capsules, half-spaces | Arbitrary triangle meshes and compound shapes |
 | Moving obstacles | Kinematic spheres, boxes and capsules within the motion budget | Dynamic obstacle contacts and unrestricted fast motion |
 | Coupling | One-way obstacle-to-cloth interaction | Cloth reaction forces on dynamic rigid bodies |
-| Cloth collision | Particle contacts, static particle sweeps and opt-in self-contact with optional continuous checks | Cloth-to-cloth collision and whole-triangle rigid-obstacle contacts/CCD |
+| Cloth collision | Particle contacts/static particle sweeps, opt-in self-contact with optional continuous checks, opt-in discrete whole-triangle rigid contacts | Cloth-to-cloth collision and continuous rigid-surface collision |
 | Grasping | Pins and body-local attachment targets | Grasping based only on static friction |
 | Recovery | In-memory checkpoint of one cloth world | Public serialized checkpoints or automatic Rapier rollback |
 
 Unsupported collision candidates return errors. Filter unrelated colliders when
 necessary. A thin obstacle can pass between vertices of a coarse cloth mesh;
-particle collision does not test entire triangle interiors. Discrete self-contact
+particle collision does not test entire triangle interiors. The separate
+`rigid_surface_collision` setting covers triangle interiors against the supported
+primitives, using half the physical thickness as the rigid offset. It replaces
+particle contacts for that cloth. Its current queries are discrete; moving or
+rotating obstacles and solver corrections can cross between queries. The existing
+kinematic motion budget still applies, and does not itself certify continuous
+surface coverage. Initial rigid intersections beyond the precision length
+tolerance and unresolved final separation return typed errors.
+
+Discrete self-contact
 checks nonincident vertex-face and edge-edge proximity, with a physical thickness
 independent of particle radius. It refreshes bounds after constraint iterations,
 rejects preexisting intersections and fails on exhausted work/contact limits.

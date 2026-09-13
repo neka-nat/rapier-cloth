@@ -58,6 +58,11 @@ impl Cloth {
     pub fn mesh(&self) -> &ClothMesh {
         &self.mesh
     }
+    /// Share immutable rest geometry and topology without copying its arrays.
+    /// Current positions and contact history remain owned by this cloth.
+    pub fn shared_mesh(&self) -> Arc<ClothMesh> {
+        self.mesh.clone()
+    }
     pub fn material(&self) -> ClothMaterial {
         self.material
     }

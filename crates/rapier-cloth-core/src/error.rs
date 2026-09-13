@@ -15,6 +15,7 @@ pub enum ClothError {
     },
     InvalidSurfaceContact(&'static str),
     InfeasibleSurfaceContact,
+    UnresolvedSurfaceContact,
     UnresolvedContinuousCollision(&'static str),
     InitialSelfIntersection {
         triangles: [u32; 2],
@@ -40,6 +41,12 @@ impl fmt::Display for ClothError {
             Self::InvalidSurfaceContact(s) => write!(f, "invalid surface contact: {s}"),
             Self::InfeasibleSurfaceContact => {
                 write!(f, "surface contact conflicts with fixed targets")
+            }
+            Self::UnresolvedSurfaceContact => {
+                write!(
+                    f,
+                    "surface contact did not converge within the separation tolerance"
+                )
             }
             Self::UnresolvedContinuousCollision(reason) => write!(
                 f,

@@ -1,5 +1,23 @@
 use rapier_cloth_core::{collision::geometry::*, *};
 
+#[test]
+fn canonical_surface_witnesses_match_shared_edges_and_validate_barycentrics() {
+    let a = SurfaceWitness::from_triangle([7, 3, 2], 0, [0.25, 0.75, 0.0]).unwrap();
+    let b = SurfaceWitness::from_triangle([3, 7, 9], 1, [0.75, 0.25, 0.0]).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a.feature, SurfaceFeature::Edge([3, 7]));
+    assert_eq!(a.particles, [3, 7, 0]);
+    assert_eq!(a.weights, [0.75, 0.25, 0.0]);
+    let vertex = SurfaceWitness::from_triangle([7, 3, 2], 0, [0.0, 1.0, 0.0]).unwrap();
+    assert_eq!(vertex.feature, SurfaceFeature::Vertex(3));
+    let interior = SurfaceWitness::from_triangle([7, 3, 2], 5, [0.25, 0.5, 0.25]).unwrap();
+    assert_eq!(interior.feature, SurfaceFeature::Face(5));
+    for barycentric in [[Real::NAN, 0.0, 1.0], [-0.1, 0.6, 0.5], [0.0; 3], [0.5; 3]] {
+        assert!(SurfaceWitness::from_triangle([7, 3, 2], 0, barycentric).is_err());
+    }
+    assert!(SurfaceWitness::from_triangle([7, 7, 2], 0, [0.25, 0.5, 0.25]).is_err());
+}
+
 fn contact() -> SurfaceContact {
     SurfaceContact {
         key: SurfaceContactKey {
