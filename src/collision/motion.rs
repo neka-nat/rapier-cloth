@@ -111,12 +111,17 @@ impl RapierContacts<'_, '_> {
                     work.charge(CollisionBudgetKind::CandidatePairs, 1, config.limits)?;
                     work.charge(CollisionBudgetKind::CcdChecks, 1, config.limits)?;
                     self.pair_queries += 1;
-                    let rounding = (a.abs() + b.abs() + pose.translation.abs() * 2.0)
-                        .dot(normal.abs())
-                        * Real::EPSILON
-                        * 64.0;
-                    let da = normal.dot(a - pose.translation) - rounding;
-                    let db = normal.dot(b - pose.translation) - rounding;
+                    // Fixed-plane distance is affine along the segment. Bound
+                    // each endpoint's dot product separately: a farther end
+                    // must not consume the starting point's positive clearance.
+                    let distance_bound = |p: Vec3| {
+                        let rounding = (p.abs() + pose.translation.abs()).dot(normal.abs())
+                            * Real::EPSILON
+                            * 64.0;
+                        normal.dot(p - pose.translation) - rounding
+                    };
+                    let da = distance_bound(a);
+                    let db = distance_bound(b);
                     if !da.is_finite() || !db.is_finite() || da <= minimum {
                         return Err(ClothError::UnresolvedContinuousCollision(
                             "insufficient plane separation or numerical clearance",

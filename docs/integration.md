@@ -339,6 +339,13 @@ commands are still required to be reached within the precision's length toleranc
 infeasible commands fail atomically.
 `surface_collision.limited_advances` counts motion checks requesting a reduction.
 
+When self-contact shares particles with rigid contacts that each constrain one
+particle, the solver couples the normal constraints in a local block. It selects
+at most one such rigid support per particle; the remaining contacts still use the
+iterative solve. Particles retain their physical inverse masses and free motion.
+Supports can release, and unloading retracts any unsupported friction correction.
+This adds no time steps or global solver iterations.
+
 This option covers cloth self-contact. The Rapier adapter uses particle contacts
 unless `rigid_surface_collision` separately enables discrete triangle contacts.
 Enable `continuous_rigid_collision` as described above for bounded external checks.

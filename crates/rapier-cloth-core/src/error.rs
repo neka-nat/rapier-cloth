@@ -53,7 +53,10 @@ impl fmt::Display for ClothError {
             Self::ContactBudgetExceeded { limit } => write!(f, "contact budget exceeded ({limit})"),
             Self::InvalidSurfaceContact(s) => write!(f, "invalid surface contact: {s}"),
             Self::InfeasibleSurfaceContact => {
-                write!(f, "surface contact conflicts with fixed targets")
+                write!(
+                    f,
+                    "surface contact conflicts with fixed targets or rigid supports"
+                )
             }
             Self::UnresolvedSurfaceContact => {
                 write!(

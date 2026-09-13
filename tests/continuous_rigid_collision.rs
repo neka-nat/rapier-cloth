@@ -163,6 +163,48 @@ fn continuous_plane_contact_keeps_tangent_and_full_gravity_load() {
 }
 
 #[test]
+fn plane_clearance_for_a_separating_step_depends_on_its_own_endpoint() {
+    // A later, farther endpoint must not consume the starting point's rounding
+    // allowance. The nominal supported fold exposed this near the CCD reserve.
+    for has_clearance in [true, false] {
+        let mut world = TestWorld::new();
+        world.rigid.gravity = Vec3::ZERO;
+        world
+            .rigid
+            .colliders
+            .insert(ColliderBuilder::new(SharedShape::halfspace(Vec3::Y)).friction(0.0));
+        let minimum: Real = 0.001 * 0.5 * 0.9;
+        let height = minimum
+            * (1.0
+                + if has_clearance {
+                    96.0 * Real::EPSILON
+                } else {
+                    0.0
+                });
+        let handle = world.cloth.add_cloth(triangle(height, true));
+        let before = world.cloth.cloth(handle).unwrap().positions().to_vec();
+        let result = world.tick();
+        let cloth = world.cloth.cloth(handle).unwrap();
+        if has_clearance {
+            let report = result.unwrap();
+            assert!(report.cloths[0].1.stabilized_contacts > 0);
+            for (&p, &v) in cloth.positions().iter().zip(cloth.velocities()) {
+                assert!((p.y - 0.0005).abs() < 1e-7);
+                assert!(v.length() < 1e-6, "stabilization added velocity: {v:?}");
+            }
+        } else {
+            assert!(matches!(
+                result,
+                Err(IntegrationError::Core(
+                    ClothError::UnresolvedContinuousCollision(_)
+                ))
+            ));
+            assert_eq!(cloth.positions(), before);
+        }
+    }
+}
+
+#[test]
 fn a_supported_compressed_triangle_recovers_its_edge_lengths_with_ccd() {
     // One shortened, tilted edge pushes a table-supported vertex downward in
     // the elastic trial. That intermediate correction must not suppress the

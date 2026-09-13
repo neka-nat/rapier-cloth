@@ -1,6 +1,6 @@
 use crate::collision::{
     ClothContactSettings, CollisionBudgetKind, CollisionWork, friction::FrictionState,
-    self_collision::SelfCollision,
+    normal_block, self_collision::SelfCollision,
 };
 use crate::{
     Cloth, ClothError, Contact, ContactMotion, ContactSource, ContactStage, NoContacts, Real,
@@ -89,6 +89,8 @@ pub struct Solver {
     surface_states: Vec<SurfaceContactState>,
     previous_surface_states: Vec<SurfaceContactState>,
     next_surface_states: Vec<SurfaceContactState>,
+    surface_solve_order: Vec<usize>,
+    rigid_support: Vec<usize>,
     stretches: Vec<Real>,
     self_collision: Option<SelfCollision>,
     contact_settings: Option<ClothContactSettings>,
@@ -608,6 +610,9 @@ impl Solver {
             .as_ref()
             .map_or(0, SelfCollision::scratch_bytes);
         report.scratch_bytes += self.tethers.scratch_bytes();
+        report.scratch_bytes += (self.surface_solve_order.capacity()
+            + self.rigid_support.capacity())
+            * std::mem::size_of::<usize>();
         // Persist only current, still touching features. A disappeared contact
         // must not act as adhesion or consume history indefinitely.
         self.surface_states.retain(|state| {
@@ -877,6 +882,9 @@ impl Solver {
         limit: usize,
     ) -> Result<(), ClothError> {
         self.next_surface_states.clear();
+        self.surface_solve_order.clear();
+        self.rigid_support.resize(self.positions.len(), usize::MAX);
+        self.rigid_support.fill(usize::MAX);
         let mut old = self.surface_states.iter().peekable();
         for &contact in &self.surface_contacts {
             while old.peek().is_some_and(|s| s.contact.key < contact.key) {
@@ -921,17 +929,14 @@ impl Solver {
                 state.normal_lambda = 0.0;
             }
             state.contact = contact;
-            contact.project_validated(
-                &mut self.positions,
-                &self.weights,
-                &mut state.normal_lambda,
-            )?;
-            state.friction.project(
-                &mut self.positions,
-                &self.weights,
-                contact.normal,
-                state.normal_lambda,
-            )?;
+            let index = self.next_surface_states.len();
+            self.surface_solve_order.push(index);
+            if let Some((particle, _)) = normal_block::single_particle(&contact)
+                && self.weights[particle as usize] > 0.0
+                && self.rigid_support[particle as usize] == usize::MAX
+            {
+                self.rigid_support[particle as usize] = index;
+            }
             self.next_surface_states.push(state);
             Self::check_surface_capacity(
                 self.contact_settings,
@@ -953,6 +958,58 @@ impl Solver {
             return Err(ClothError::ContactBudgetExceeded { limit });
         }
         std::mem::swap(&mut self.surface_states, &mut self.next_surface_states);
+        // Keep the existing contact order, but solve a deforming contact and
+        // its selected independent rigid supports as one normal block. Support
+        // forces can increase or release; no support inverse mass is zeroed.
+        for &index in &self.surface_solve_order {
+            let contact = self.surface_states[index].contact;
+            let supports = std::array::from_fn(|i| {
+                if contact.weights[i] == 0.0 || self.surface_states[index].friction.external() {
+                    return None;
+                }
+                let support_index = self.rigid_support[contact.particles[i] as usize];
+                (support_index != usize::MAX).then(|| {
+                    let state = self.surface_states[support_index];
+                    normal_block::Support {
+                        contact: state.contact,
+                        lambda: state.normal_lambda,
+                    }
+                })
+            });
+            if supports.iter().any(Option::is_some) {
+                let (lambda, loads) = normal_block::project(
+                    contact,
+                    &mut self.positions,
+                    &self.weights,
+                    self.surface_states[index].normal_lambda,
+                    supports,
+                )?;
+                self.surface_states[index].normal_lambda = lambda;
+                for i in 0..4 {
+                    if supports[i].is_some() {
+                        let support_index = self.rigid_support[contact.particles[i] as usize];
+                        let state = &mut self.surface_states[support_index];
+                        state.normal_lambda = loads[i];
+                        state
+                            .friction
+                            .limit_load(&mut self.positions, &self.weights, loads[i])?;
+                    }
+                }
+            } else {
+                contact.project_validated(
+                    &mut self.positions,
+                    &self.weights,
+                    &mut self.surface_states[index].normal_lambda,
+                )?;
+            }
+            let state = &mut self.surface_states[index];
+            state.friction.project(
+                &mut self.positions,
+                &self.weights,
+                contact.normal,
+                state.normal_lambda,
+            )?;
+        }
         Ok(())
     }
     fn check_surface_capacity(

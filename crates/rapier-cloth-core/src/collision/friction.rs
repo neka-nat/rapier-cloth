@@ -28,6 +28,34 @@ impl FrictionState {
             .any(|f| matches!(f, SurfaceFeature::External { .. }))
     }
 
+    /// A coupled normal block can unload this support after its tangent update.
+    /// Retract any now-unsupported tangent multiplier and its actual displacement.
+    pub fn limit_load(
+        &mut self,
+        positions: &mut [Vec3],
+        inverse_masses: &[Real],
+        normal_lambda: Real,
+    ) -> Result<(), ClothError> {
+        let length = self.lambda.length();
+        let coefficient = if self.sliding {
+            self.support.kinetic_friction
+        } else {
+            self.support.static_friction
+        };
+        let limit = coefficient * normal_lambda;
+        if !length.is_finite() || !limit.is_finite() || limit < 0.0 {
+            return Err(ClothError::NonFiniteState);
+        }
+        if length > limit {
+            let next = self.lambda * (self.support.kinetic_friction * normal_lambda / length);
+            self.support
+                .apply(positions, inverse_masses, next - self.lambda);
+            self.lambda = next;
+            self.sliding = true;
+        }
+        Ok(())
+    }
+
     /// Preserve nearby material witnesses, not an arbitrarily distant point on
     /// the same triangle/edge. Compare each deforming side independently: their
     /// relative vector alone would miss a simultaneous shift of both witnesses.
@@ -205,5 +233,37 @@ mod tests {
         assert!(!state.compatible(&refreshed, &far));
         refreshed.static_friction = 0.7;
         assert!(!state.compatible(&refreshed, &reference));
+    }
+
+    #[test]
+    fn unloading_retracts_friction_and_restores_free_slip_on_release() {
+        let c = SurfaceContact {
+            key: SurfaceContactKey {
+                other_cloth: None,
+                features: [
+                    SurfaceFeature::Vertex(0),
+                    SurfaceFeature::External {
+                        object: 0,
+                        feature: 0,
+                    },
+                ],
+            },
+            particles: [0; 4],
+            weights: [1.0, 0.0, 0.0, 0.0],
+            ..pair()
+        };
+        let mut positions = [Vec3::Y * 0.01];
+        let mut state = FrictionState::new(c, &positions);
+        positions[0].x = 0.004;
+        state
+            .project(&mut positions, &[1.0], Vec3::Y, 0.02)
+            .unwrap();
+        assert!(positions[0].x.abs() < 1e-7);
+        state.limit_load(&mut positions, &[1.0], 0.002).unwrap();
+        assert!((positions[0].x - 0.0036).abs() < 1e-7);
+        assert!((state.lambda.length() - 0.0004).abs() < 1e-7);
+        state.limit_load(&mut positions, &[1.0], 0.0).unwrap();
+        assert!(positions[0].distance(Vec3::new(0.004, 0.01, 0.0)) < 1e-7);
+        assert_eq!(state.lambda, Vec3::ZERO);
     }
 }

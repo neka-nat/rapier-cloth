@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Couple deforming surface normal contacts with independent single-particle rigid supports. Solve their local complementarity conditions together, preserve free particle motion and retract friction when a support unloads. This repairs supported-fold prediction regressions without increasing substeps or solver iterations; full folding and CPU qualification remain open.
+- Bound fixed-plane CCD endpoint distances independently so movement away from a plane cannot consume the starting point's numerical clearance. Zero-clearance starts still fail atomically.
 - Add bounded ray, sphere-approach and closest-surface queries, generational cloth-associated material points, rest-edge-path patch selection and a runnable `surface_grasp` example. Preserve nearby-layer ordering for long rays in f32 and reject invalid or over-budget queries instead of returning partial selections.
 - Add weighted surface targets and body-local point grasps alongside existing vertex attachments. Preserve support masses, integrate corrections/multipliers into CCD and reject overlapping supports. Both attachment kinds participate in release/removal events, filtering and atomic checkpoints.
 - Keep cloth and attachment allocation generations monotonic across checkpoint clones so handles from discarded simulation time cannot reconnect to later allocations. Add surface-target and surface-query budget error variants; update exhaustive matches as needed.
