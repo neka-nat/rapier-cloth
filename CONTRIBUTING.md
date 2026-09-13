@@ -87,4 +87,4 @@ and include regression coverage for changes to solver or integration contracts.
 Documentation and example corrections should stay focused on the public workflow.
 
 Unless explicitly stated otherwise, contributions are licensed under the project's
-[MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) terms, at the user's option.
+[MIT License](LICENSE-MIT).

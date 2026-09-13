@@ -48,4 +48,4 @@ tuning with the chosen grid, time step and iteration count.
 See the repository's [documentation](https://github.com/neka-nat/rapier-cloth/tree/main/docs)
 and [examples](https://github.com/neka-nat/rapier-cloth/tree/main/examples).
 
-Licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+Licensed under the [MIT License](LICENSE-MIT).

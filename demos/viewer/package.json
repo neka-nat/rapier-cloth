@@ -1,5 +1,6 @@
 {
   "name": "rapier-cloth-replay", "private": true, "version": "0.1.0", "type": "module",
+  "license": "MIT",
   "engines": {"node": ">=22.12.0"},
   "scripts": {"dev": "vite --host 127.0.0.1", "live":"node scripts/live.mjs", "build": "vite build", "preview": "vite preview --host 127.0.0.1", "test": "playwright test", "test:live":"playwright test --config playwright.live.config.js"},
   "dependencies": {"three": "0.186.0"},

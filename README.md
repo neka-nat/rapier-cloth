@@ -86,4 +86,4 @@ Read the [compatibility and limitations](docs/compatibility.md) before integrati
 - [Performance measurement](docs/performance.md)
 - [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
-Licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+Licensed under the [MIT License](LICENSE-MIT).
