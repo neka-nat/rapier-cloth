@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Tighten self-collision broad-phase bounds with six diagonal projection intervals and outward rounding. Preserve swept convex-hull coverage and physical activation margins while rejecting separated diagonal features.
+- Accelerate exactly inextensible cloth attached to hard anchors with redundant rest-edge-path distance bounds. Keep compliant stretch and soft targets unchanged, allow folded rest meshes to unfold, and clear bounds on release. Include the corrections in existing continuous motion checks and memory diagnostics.
 - Complete elastic and contact projections as one trial before continuous motion checks. Restore contact thickness after a shortened trial with a separately checked correction, fixing edge-length recovery for compressed cloth supported by a surface.
 - Reuse exact unchanged self-contact queries and certified initial geometry. Invalidate derived caches on changed inputs, topology or settings, and preserve initial-intersection checks, retained-contact limits and scratch-memory accounting.
 - Add opt-in `continuous_rigid_collision` for bounded sphere/box/capsule/fixed-plane sweeps, including all solver correction stages with self-collision disabled. Add defaulted external motion callbacks, immutable shape snapshots, shared work limits and atomic failure tests. Update explicit contact-settings literals for the new field.

@@ -57,6 +57,24 @@ from stretch so that softness does not require elastic edges. Zero stretch
 compliance does not guarantee zero numerical strain with a finite iteration budget.
 Diagonal triangle edges are not an independent shear material model.
 
+With zero stretch compliance and hard pins or attachments, the solver also bounds
+each free vertex's distance to a reachable hard anchor in each connected hard-target
+region by a shortest rest-edge path length. Corrections from different regions are
+averaged so that selecting one gripper does not open a gap at their boundary.
+These one-sided bounds accelerate propagation from the grasp: they
+follow from inextensible edge lengths and leave vertices inside the bound free to
+buckle. Local edge constraints remain necessary; the bounds do not guarantee a
+maximum local strain. The approach follows
+[long-range attachments](https://matthias-research.github.io/pages/publications/sca2012cloth.pdf),
+using edge-path upper bounds rather than distances through the rest surface's
+interior.
+
+The bounds use rest topology, so folded rest meshes can unfold. They are disabled
+for positive stretch compliance and soft targets, and are rebuilt when topology
+or the set of hard anchors changes. Releasing all anchors removes the bounds.
+Their projections are part of the same trial and continuous-collision checks as
+other constraints; they are not additional physical time steps or force sensors.
+
 `pin(particle, world_position)` creates a fixed target; `unpin(particle)` releases
 it without replacing its current position or velocity. `set_force` sets a persistent
 force in newtons; set it to zero to clear it. The live demo multiplies its wind

@@ -1,5 +1,5 @@
 use super::{
-    broad_phase::{Aabb, Hierarchy},
+    broad_phase::{Bounds, Hierarchy},
     ccd::{CcdFeature, conservative_advance},
     geometry::{
         SurfaceWitness as Witness, closest_segments, closest_triangle, triangles_intersect,
@@ -24,14 +24,14 @@ impl CollisionTopology {
                 &mesh
                     .triangles()
                     .iter()
-                    .map(|t| Aabb::points(t.map(|i| positions[i as usize])))
+                    .map(|t| Bounds::points(t.map(|i| positions[i as usize])))
                     .collect::<Vec<_>>(),
             ),
             edges: Hierarchy::new(
                 &mesh
                     .edges()
                     .iter()
-                    .map(|e| Aabb::points(e.vertices.map(|i| positions[i as usize])))
+                    .map(|e| Bounds::points(e.vertices.map(|i| positions[i as usize])))
                     .collect::<Vec<_>>(),
             ),
         }
@@ -188,10 +188,10 @@ pub(crate) struct SelfCollision {
     topology: Arc<CollisionTopology>,
     pub settings: ClothContactSettings,
     pub work: CollisionWork,
-    triangle_bounds: Vec<Aabb>,
-    edge_bounds: Vec<Aabb>,
-    triangle_nodes: Vec<Aabb>,
-    edge_nodes: Vec<Aabb>,
+    triangle_bounds: Vec<Bounds>,
+    edge_bounds: Vec<Bounds>,
+    triangle_nodes: Vec<Bounds>,
+    edge_nodes: Vec<Bounds>,
     stack: Vec<usize>,
     candidates: Vec<usize>,
     generated: Vec<SurfaceContact>,
@@ -246,13 +246,13 @@ impl SelfCollision {
             self.mesh
                 .triangles()
                 .iter()
-                .map(|t| Aabb::points(t.map(|i| positions[i as usize]))),
+                .map(|t| Bounds::points(t.map(|i| positions[i as usize]))),
         );
         self.edge_bounds.extend(
             self.mesh
                 .edges()
                 .iter()
-                .map(|e| Aabb::points(e.vertices.map(|i| positions[i as usize]))),
+                .map(|e| Bounds::points(e.vertices.map(|i| positions[i as usize]))),
         );
         self.topology
             .triangles
@@ -288,11 +288,11 @@ impl SelfCollision {
         self.edge_bounds.clear();
         self.triangle_bounds.extend(
             self.mesh.triangles().iter().map(|t| {
-                Aabb::points(t.iter().flat_map(|&i| [start[i as usize], end[i as usize]]))
+                Bounds::points(t.iter().flat_map(|&i| [start[i as usize], end[i as usize]]))
             }),
         );
         self.edge_bounds.extend(self.mesh.edges().iter().map(|e| {
-            Aabb::points(
+            Bounds::points(
                 e.vertices
                     .iter()
                     .flat_map(|&i| [start[i as usize], end[i as usize]]),
@@ -307,7 +307,7 @@ impl SelfCollision {
         let mut fraction: Real = 1.0;
         for vertex in 0..start.len() {
             self.topology.triangles.query(
-                Aabb::points([start[vertex], end[vertex]]).expanded(separation),
+                Bounds::points([start[vertex], end[vertex]]).expanded(separation),
                 0,
                 &self.triangle_bounds,
                 &self.triangle_nodes,
@@ -494,7 +494,7 @@ impl SelfCollision {
         let activation = self.settings.thickness + self.settings.activation_margin;
         for (vertex, &p) in positions.iter().enumerate() {
             self.topology.triangles.query(
-                Aabb::point(p).expanded(activation),
+                Bounds::point(p).expanded(activation),
                 0,
                 &self.triangle_bounds,
                 &self.triangle_nodes,
@@ -578,7 +578,7 @@ impl SelfCollision {
             + self.edge_bounds.capacity()
             + self.triangle_nodes.capacity()
             + self.edge_nodes.capacity())
-            * std::mem::size_of::<Aabb>()
+            * std::mem::size_of::<Bounds>()
             + (self.stack.capacity() + self.candidates.capacity()) * std::mem::size_of::<usize>()
             + (self.generated.capacity() + self.motion_contacts.capacity())
                 * std::mem::size_of::<SurfaceContact>()

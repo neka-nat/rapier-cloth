@@ -7,6 +7,7 @@ use crate::{
     constraints::{
         bend::{angle, angle_and_gradients, angle_difference},
         distance,
+        tether::Tethers,
     },
     contact::{SurfaceContact, SurfaceContactState, friction_velocity},
 };
@@ -75,6 +76,7 @@ pub struct Solver {
     distance_lambda: Vec<Real>,
     bend_lambda: Vec<Real>,
     target_lambda: Vec<Vec3>,
+    tethers: Tethers,
     contacts: Vec<Contact>,
     // Sorted by key. Merge each query with the cumulative substep states, so
     // inactive contacts retain their lambda without per-contact tree lookups.
@@ -177,6 +179,11 @@ impl Solver {
                 self.weights[t.particle as usize] = 0.0;
             }
         }
+        self.tethers.prepare(
+            &cloth.mesh,
+            &targets,
+            cloth.material.stretch_compliance == 0.0,
+        )?;
         let radius = cloth.material.contact_radius;
         let mut report = StepReport::default();
         self.contact_states.clear();
@@ -296,6 +303,7 @@ impl Solver {
             // normal contact may restore separation while retaining tangential
             // stretch recovery. Certify the completed trial from the previous
             // accepted pose, and scale every contributing multiplier together.
+            self.tethers.project(&mut self.positions, &self.weights)?;
             self.query(source, None, radius, ContactStage::Iteration, settings)?;
             self.project_contacts(radius, settings.max_contacts)?;
             self.project_surface_contacts(h, settings.max_contacts)?;
@@ -516,6 +524,7 @@ impl Solver {
             .self_collision
             .as_ref()
             .map_or(0, SelfCollision::scratch_bytes);
+        report.scratch_bytes += self.tethers.scratch_bytes();
         // Persist only current, still touching features. A disappeared contact
         // must not act as adhesion or consume history indefinitely.
         self.surface_states.retain(|state| {

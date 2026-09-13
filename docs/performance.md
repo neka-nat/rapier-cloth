@@ -51,8 +51,11 @@ performance qualification. Add `--rigid-surface-collision` to use discrete trian
 contacts against the supported rigid shapes. It is independent of the self-contact
 flags, and reports the actual half-thickness offset. Use
 `--continuous-rigid-collision` to enable bounded rigid CCD as well; it implies
-rigid-surface contacts and records `rigid_ccd_minimum_separation`. Omit all collision flags to
-reproduce the legacy particle-contact baseline. An exit code of zero means the
+rigid-surface contacts and records `rigid_ccd_minimum_separation`. Omit all collision
+flags to use particle-contact mode. Historical numerical results also require
+their recorded solver revision: current hard-attached inextensible meshes use
+the [attachment distance bounds](integration.md#materials).
+An exit code of zero means the
 diagnostic wrote its report; inspect `failure`, `steps` and geometry/task metrics
 before interpreting the result as a completed trajectory.
 
