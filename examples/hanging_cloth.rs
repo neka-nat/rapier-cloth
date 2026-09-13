@@ -1,3 +1,5 @@
+//! Core-only cloth with one pinned edge; prints diagnostics after 10 seconds.
+//! Run: cargo run --release --example hanging_cloth
 use rapier_cloth::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

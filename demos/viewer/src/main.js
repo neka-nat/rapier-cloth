@@ -28,7 +28,7 @@ function disposeContent() {
   content.traverse(object => { object.geometry?.dispose(); object.material?.dispose(); });
   content.clear(); bodies.clear();
 }
-function stop() { playing = false; $('play').textContent = '再生'; }
+function stop() { playing = false; $('play').textContent = 'Play'; }
 function load(data, name) {
   const valid = validateRecording(data); // Keep the previous scene if validation fails.
   stop(); disposeContent(); record = valid;
@@ -66,7 +66,7 @@ function showFrame(index) {
   updatePoints(pinPoints, frame.pinned_particles.map(i => frame.positions[i]));
   $('timeline').value = current; $('time').textContent = `${frame.time.toFixed(3)} s`;
   $('frame').textContent = `FRAME ${current + 1} / ${record.frames.length} · STEP ${frame.step}`;
-  $('phase').textContent = ({settle:'初期化',lift:'持ち上げ',transport:'運搬',release:'解放',drop:'落下・静止'})[frame.phase] ?? frame.phase;
+  $('phase').textContent = ({settle:'Settling',lift:'Lifting',transport:'Transport',release:'Release',drop:'Dropping'})[frame.phase] ?? frame.phase;
   $('stretch').textContent = `${(frame.diagnostics.p95_stretch * 100).toFixed(3)} %`;
   $('penetration').textContent = `${(frame.diagnostics.max_penetration * 1000).toPrecision(3)} mm`;
   $('target').textContent = `${(frame.diagnostics.max_target_error * 1000).toPrecision(3)} mm`;
@@ -76,7 +76,7 @@ $('play').onclick = () => {
   if (!record) return;
   if (playing) { stop(); return; }
   if (current === record.frames.length - 1) showFrame(0);
-  playing = true; $('play').textContent = '停止'; startTime = performance.now(); playOrigin = record.frames[current].time;
+  playing = true; $('play').textContent = 'Pause'; startTime = performance.now(); playOrigin = record.frames[current].time;
 };
 $('timeline').oninput = () => { stop(); showFrame(Number($('timeline').value)); };
 $('reset').onclick = () => { stop(); showFrame(0); };
@@ -114,6 +114,6 @@ window.__clothReplay = Object.freeze({ snapshot: () => !record ? null : ({
 }) });
 try {
   const response = await fetch(`${import.meta.env.BASE_URL}sample-f64.json`);
-  if (!response.ok) throw new Error('同梱記録がありません。「記録を開く」からRustのJSON記録を選択してください。');
+  if (!response.ok) throw new Error('No bundled recording. Choose Open recording to load a JSON recording from Rust.');
   load(await response.json(), 'pick-and-place / f64');
 } catch (error) { $('error').textContent = error.message; }

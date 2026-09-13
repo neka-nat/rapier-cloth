@@ -1,3 +1,5 @@
+//! Grasp, lift, transport and release a cloth; optionally write a JSON recording.
+//! Run: cargo run --release --example pick_and_place -- --help
 #[path = "support/recording.rs"]
 mod recording;
 use std::{fs, path::Path};

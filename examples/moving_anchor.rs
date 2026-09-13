@@ -1,3 +1,5 @@
+//! Attach a particle to a moving body, then release it with its current velocity.
+//! Run: cargo run --release --example moving_anchor
 use rapier::prelude::*;
 use rapier_cloth::{Real, *};
 fn main() -> Result<(), Box<dyn std::error::Error>> {

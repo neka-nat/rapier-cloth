@@ -3,6 +3,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 package_check_dir="$(mktemp -d "${TMPDIR:-/tmp}/rapier-cloth-package-XXXXXX")"
 echo "Package evidence: $package_check_dir"
+# Exercise exclusion even on clean CI checkouts with no local work records.
+mkdir -p .internal
+package_probe_dir="$(mktemp -d "$PWD/.internal/package-probe-XXXXXX")"
+trap 'rm -rf -- "$package_probe_dir"' EXIT
+for probe in README.md CHANGELOG.md CONTRIBUTING.md LICENSE-PROBE; do
+  printf 'Generated package exclusion probe.\n' > "$package_probe_dir/$probe"
+done
 for precision in f32 f64; do
   package_target="$package_check_dir/target-$precision"
   cargo package --workspace --locked --allow-dirty --target-dir "$package_target" --no-default-features --features "rapier-cloth/$precision,rapier-cloth-core/$precision"
@@ -14,6 +21,11 @@ for precision in f32 f64; do
     test -f "$unpacked/$name-0.1.0/LICENSE-MIT"
     test -f "$unpacked/$name-0.1.0/LICENSE-APACHE"
     tar -tzf "$package_target/package/$name-0.1.0.crate" > "$package_check_dir/$name-$precision-contents.txt"
+    if grep -E '/(\.internal|evidence|node_modules|target)/|/(progress\.md|package-design\.ja\.md|implementation-plan\.ja\.md)$' "$package_check_dir/$name-$precision-contents.txt"; then
+      echo "Internal work records and build dependencies must not be distributed" >&2
+      exit 1
+    fi
+    python3 scripts/check-docs.py --root "$unpacked/$name-0.1.0"
     sha256sum "$package_target/package/$name-0.1.0.crate" >> "$package_check_dir/SHA256SUMS"
   done
   consumer="$package_check_dir/consumer-$precision"

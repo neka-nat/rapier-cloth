@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add English documentation, example entry points and demo controls, with automated documentation and example checks.
 - Soften bending in the live demo while retaining inextensible edges and the existing solver budget; add smooth spatial gusts for local billowing.
 - Add a live Rust CPU demo with a Three.js UI, per-connection worlds, demand-driven WebSocket frames, draping/wind scenes, bounded obstacle controls, pause/reset/release and reconnection. Keep transport dependencies in an independent unpublished demo crate.
 - Add f32/f64 live browser tests against actual Rust responses and a one-command launcher.

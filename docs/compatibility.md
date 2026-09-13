@@ -1,18 +1,47 @@
-# Compatibility
+# Compatibility and limitations
 
-| Component | Contract |
+## Toolchain and dependencies
+
+| Component | Supported configuration |
 |---|---|
-| Development toolchain | Rust 1.93.0, edition 2024 |
-| Minimum Rust | 1.90; see actual CI results in progress.md |
-| Rapier / Parry | Rapier 0.34.0; Parry 0.29.0 resolved in Cargo.lock |
-| Math | glam 0.33.7; f32 Vec3 or f64 DVec3 |
-| Precision | Exactly one of f32/f64; f32 is default |
-| CI targets | Linux, Windows, macOS, both precisions; completion evidence in progress.md |
-| Viewer | Node >=22.12; Three.js 0.186.0, Vite 8.3.0, Playwright 1.63.0 |
-| Distribution | Two Rust crate archives; registry publication is separate from R0 |
+| Minimum Rust | 1.90, edition 2024 |
+| Repository toolchain | Rust 1.93.0, pinned in `rust-toolchain.toml` |
+| Rapier | `rapier3d 0.34` for f32, `rapier3d-f64 0.34` for f64 |
+| Math | glam 0.33; `Vec3` for f32 and `DVec3` for f64 |
+| Precision | Exactly one of `f32` and `f64`; f32 is the default |
+| Library CI | Linux, Windows and macOS, both precisions |
+| Browser demos | Node.js >=22.12, WebGL; Three.js 0.186 and Vite 8.3 |
 
-Core has no Rapier, Parry, renderer or serde normal dependency. Rapier is re-exported by the bridge. Rust 1.86 was an initial candidate based on Rapier's own metadata, but the resolved graph includes nalgebra/wide/safe_arch requiring 1.89 and ordered-float requiring 1.90. Both precision graphs must pass the actual 1.90 job.
+Cargo.lock and the viewer's package-lock.json pin the repository's resolved
+versions. The core's only normal dependency is glam. It has no Rapier, Parry,
+renderer or serde dependency; the bridge re-exports the selected Rapier crate.
+The resolved graph requires Rust 1.90 even though some dependencies allow older Rust.
 
-The two precisions are mutually exclusive even through feature unification. Do not use `--all-features`, or enable a consumer's default f32 dependency together with f64. This workspace does not declare cross-CPU or cross-precision bitwise determinism. Replaying the same checkpoint on the same build is tested.
+Precision features are mutually exclusive after Cargo feature unification. Do not
+use `--all-features` or combine a default-f32 dependency with an f64 dependency.
+The project does not promise bitwise determinism across CPUs or precisions.
 
-Before release, run `bash scripts/check-packages.sh`: workspace packaging, archive inspection, then independent consumers using only extracted crate sources. This validates local distribution artifacts, not installation from crates.io. See [integration](integration.ja.md) for supported shapes, step ordering and explicit exclusions.
+## Simulation limits
+
+| Area | Supported | Not implemented |
+|---|---|---|
+| Cloth mesh | Fixed, oriented triangle topology | Tearing, remeshing and automatic repair |
+| Material | Edge-length and dihedral XPBD constraints | Calibrated continuum fabric or independent shear model |
+| Fixed obstacles | Spheres, boxes, capsules, half-spaces | Arbitrary triangle meshes and compound shapes |
+| Moving obstacles | Kinematic spheres, boxes and capsules within the motion budget | Dynamic obstacle contacts and unrestricted fast motion |
+| Coupling | One-way obstacle-to-cloth interaction | Cloth reaction forces on dynamic rigid bodies |
+| Cloth collision | Particle contacts and static particle sweeps | Self-collision, cloth-to-cloth collision and edge/face CCD |
+| Grasping | Pins and body-local attachment targets | Grasping based only on static friction |
+| Recovery | In-memory checkpoint of one cloth world | Public serialized checkpoints or automatic Rapier rollback |
+
+Unsupported collision candidates return errors. Filter unrelated colliders when
+necessary. A thin obstacle can pass between vertices of a coarse cloth mesh;
+particle collision does not test entire triangle interiors. Cloth can intersect
+itself because self-collision is absent.
+
+Inconsistent winding, non-manifold edges, isolated vertices and zero-area triangles
+are rejected. Compliance values depend on the discrete setup; evaluate strain and
+contact error when changing resolution, substep size or iteration count.
+
+See [integration](integration.md) for filters, kinematic motion limits, friction
+rules and recovery, and [performance](performance.md) for measurement boundaries.

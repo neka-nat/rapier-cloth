@@ -1,3 +1,5 @@
+//! Cloth contacts with a fixed Rapier sphere and floor; runs for 5 seconds.
+//! Run: cargo run --release --example drape_static
 use rapier::prelude::*;
 use rapier_cloth::*;
 
