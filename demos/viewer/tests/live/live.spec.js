@@ -4,7 +4,7 @@ const snapshot = page => page.evaluate(() => window.__clothLive.snapshot());
 async function idle(page) { await expect.poll(async () => { const s = await snapshot(page); return !!s?.connected && !s.pending && s.queued === 0; }).toBe(true); }
 async function advance(page) {
   const old = (await snapshot(page)).step;
-  await page.getByRole('button',{name:'1frame進める'}).click();
+  await page.getByRole('button',{name:'Step frame'}).click();
   await expect.poll(async () => (await snapshot(page)).step).toBe(old + 4);
   await idle(page);
 }
@@ -35,13 +35,13 @@ test('live Rust frames reach GPU buffers; pause, controls, release, reset and ca
   await page.locator('#sphere-x').fill('0.4'); await idle(page);
   expect((await snapshot(page)).options.sphere_x).toBeCloseTo(0.4,6);
   expect((await snapshot(page)).step).toBe(actual.step);
-  await page.getByRole('button',{name:'再開',exact:true}).click();
+  await page.getByRole('button',{name:'Resume',exact:true}).click();
   await expect.poll(async () => (await snapshot(page)).sphere[0]).toBeGreaterThan(0.1);
-  await page.getByRole('button',{name:'停止',exact:true}).click(); await idle(page);
+  await page.getByRole('button',{name:'Pause',exact:true}).click(); await idle(page);
   const paused = await snapshot(page); await page.waitForTimeout(200);
   expect((await snapshot(page)).step).toBe(paused.step);
   await page.screenshot({path:testInfo.outputPath('live-drape.png'),fullPage:true});
-  await page.getByRole('button',{name:'リセット',exact:true}).click(); await idle(page);
+  await page.getByRole('button',{name:'Reset',exact:true}).click(); await idle(page);
   expect((await snapshot(page)).positions).toEqual(initial.positions);
   expect((await snapshot(page)).step).toBe(0);
 
@@ -50,11 +50,11 @@ test('live Rust frames reach GPU buffers; pause, controls, release, reset and ca
   const pinned = await snapshot(page);
   expect(pinned.pinPositions).toEqual(pinned.pins.flatMap(i => pinned.sourcePositions.slice(3*i,3*i+3)).map(Math.fround));
   await page.locator('#wind').fill('1'); await idle(page);
-  await page.getByRole('button',{name:'再開',exact:true}).click();
+  await page.getByRole('button',{name:'Resume',exact:true}).click();
   await expect.poll(async () => (await snapshot(page)).time).toBeGreaterThan(0.8);
-  await page.getByRole('button',{name:'停止',exact:true}).click(); await idle(page);
+  await page.getByRole('button',{name:'Pause',exact:true}).click(); await idle(page);
   const beforeRelease = await snapshot(page);
-  await page.getByRole('button',{name:'固定を外す'}).click(); await idle(page);
+  await page.getByRole('button',{name:'Release pins'}).click(); await idle(page);
   expect((await snapshot(page)).pins).toEqual([]);
   expect((await snapshot(page)).pinPositions).toEqual([]);
   expect((await snapshot(page)).positions).toEqual(beforeRelease.positions);
@@ -66,7 +66,7 @@ test('live Rust frames reach GPU buffers; pause, controls, release, reset and ca
   const box = await page.locator('canvas').boundingBox();
   await page.mouse.move(box.x+300,box.y+200); await page.mouse.down(); await page.mouse.move(box.x+380,box.y+230,{steps:10}); await page.mouse.up();
   await expect.poll(async () => (await snapshot(page)).camera).not.toEqual(camera);
-  await page.getByRole('button',{name:'視点を戻す'}).click();
+  await page.getByRole('button',{name:'Reset view'}).click();
   await page.screenshot({path:testInfo.outputPath('live-cloth.png'),fullPage:true});
   await page.evaluate(() => {
     const scene = document.getElementById('scene'), wind = document.getElementById('wind');
@@ -114,9 +114,9 @@ test('disconnect freezes the displayed state and reconnect starts a new live wor
   await page.goto('/live.html?paused=1'); await idle(page); await advance(page);
   const before = await snapshot(page);
   await page.evaluate(() => window.__testClothSocket.close(1000,'test disconnect'));
-  await expect(page.locator('#status')).toHaveText('未接続');
+  await expect(page.locator('#status')).toHaveText('Disconnected');
   expect((await snapshot(page)).positions).toEqual(before.positions);
   await expect(page.locator('#play')).toBeDisabled();
-  await page.getByRole('button',{name:'再接続',exact:true}).click(); await idle(page);
+  await page.getByRole('button',{name:'Reconnect',exact:true}).click(); await idle(page);
   expect((await snapshot(page)).step).toBe(0); await advance(page);
 });

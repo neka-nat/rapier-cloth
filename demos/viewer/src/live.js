@@ -40,12 +40,12 @@ function updateControls() {
   $('step').disabled = !ready || running;
   $('release').disabled = !ready || !source?.pins.length;
   for (const id of ['sphere-x','sphere-z']) $(id).disabled = !ready || $('auto-motion').checked;
-  $('play').textContent = running ? '停止' : '再開';
-  if (ready) setStatus(document.hidden ? 'タブ非表示 · 待機' : running ? 'ライブ計算中' : pending ? '停止処理中' : '停止中');
+  $('play').textContent = running ? 'Pause' : 'Resume';
+  if (ready) setStatus(document.hidden ? 'Tab hidden · idle' : running ? 'Running' : pending ? 'Pausing' : 'Paused');
 }
 function fail(message) {
   running = false; pending = null; queue = [];
-  $('error').textContent = message; updateControls(); setStatus('停止 · エラー', 'error');
+  $('error').textContent = message; updateControls(); setStatus('Stopped · error', 'error');
 }
 function enqueue(command) {
   if (!ready) return;
@@ -71,8 +71,8 @@ function validate(frame) {
   if (frame.protocol !== 1 || frame.positions?.length !== 3072 || !frame.positions.every(Number.isFinite)
       || frame.sphere?.length !== 3 || !frame.sphere.every(Number.isFinite)
       || !Number.isFinite(frame.time) || !Number.isSafeInteger(frame.step)
-      || !Array.isArray(frame.pins) || frame.pins.length > 32 || !frame.pins.every(i => Number.isInteger(i) && i >= 0 && i < 1024)) throw new Error('サーバーから不正な頂点データを受信しました。');
-  if (frame.triangles && (frame.triangles.length !== 5766 || !frame.triangles.every(i => Number.isInteger(i) && i >= 0 && i < 1024))) throw new Error('三角形データが不正です。');
+      || !Array.isArray(frame.pins) || frame.pins.length > 32 || !frame.pins.every(i => Number.isInteger(i) && i >= 0 && i < 1024)) throw new Error('The server sent invalid vertex data.');
+  if (frame.triangles && (frame.triangles.length !== 5766 || !frame.triangles.every(i => Number.isInteger(i) && i >= 0 && i < 1024))) throw new Error('Invalid triangle data.');
 }
 function applyFrame(frame) {
   validate(frame);
@@ -84,7 +84,7 @@ function applyFrame(frame) {
     $('scene').value = frame.scene;
     metricStart = performance.now(); metricTime = frame.time; metricRenders = renderCount;
   }
-  if (!cloth) throw new Error('初期メッシュがありません。再接続してください。');
+  if (!cloth) throw new Error('Initial mesh is missing. Reconnect to continue.');
   const attribute = cloth.geometry.getAttribute('position'); attribute.array.set(frame.positions); attribute.needsUpdate = true;
   cloth.geometry.computeVertexNormals(); cloth.geometry.computeBoundingBox(); cloth.geometry.computeBoundingSphere();
   sphere.position.fromArray(frame.sphere); sphere.scale.setScalar(frame.sphere_radius);
@@ -112,14 +112,14 @@ function connect() {
   ready = false; pending = null; queue = []; nextId = 1;
   const current = socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/live/ws`);
   old?.close(); clearTimeout(connectionTimeout); $('reconnect').hidden = true;
-  $('error').textContent = ''; updateControls(); setStatus('接続中');
+  $('error').textContent = ''; updateControls(); setStatus('Connecting');
   connectionTimeout = setTimeout(() => { if (socket === current && !ready) current.close(); }, 10000);
   current.onmessage = event => {
     if (socket !== current) return;
     try {
       const frame = JSON.parse(event.data);
       if (frame.type === 'error') { fail(frame.message); return; }
-      if (frame.type !== 'frame' || (ready ? frame.request_id !== pending?.request_id : frame.request_id !== 0)) throw new Error('応答の順序が一致しません。再接続してください。');
+      if (frame.type !== 'frame' || (ready ? frame.request_id !== pending?.request_id : frame.request_id !== 0)) throw new Error('Unexpected response order. Reconnect to continue.');
       lastRoundtrip = pending ? performance.now() - pending.start : 0;
       pending = null; applyFrame(frame); ready = true; clearTimeout(connectionTimeout); updateControls();
       // Commands can follow immediately; automatic stepping waits for rAF.
@@ -129,10 +129,10 @@ function connect() {
   current.onclose = () => {
     if (socket !== current) return;
     clearTimeout(connectionTimeout); ready = false;
-    fail('CPUサーバーとの接続が切れました。サーバーを確認して再接続してください。');
-    setStatus('未接続', 'error'); $('reconnect').hidden = false;
+    fail('Disconnected from the CPU server. Check the server and reconnect.');
+    setStatus('Disconnected', 'error'); $('reconnect').hidden = false;
   };
-  current.onerror = () => { if (socket === current) $('error').textContent = 'CPUサーバーに接続できません。npm run live で起動してください。'; };
+  current.onerror = () => { if (socket === current) $('error').textContent = 'Cannot connect to the CPU server. Start it with npm run live.'; };
 }
 function optionsChanged() {
   $('wind-value').textContent = `${Math.round(Number($('wind').value)*100)}%`;

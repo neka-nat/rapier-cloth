@@ -31,7 +31,10 @@ impl Options {
             || !self.wind.is_finite()
             || !(0.0..=1.0).contains(&self.wind)
         {
-            return Err("操作値が範囲外です。球は±0.45m、風は0〜1で指定してください。".into());
+            return Err(
+                "Invalid options. Sphere targets must be within ±0.45 m and wind between 0 and 1."
+                    .into(),
+            );
         }
         Ok(self)
     }
@@ -147,7 +150,7 @@ impl Demo {
     }
     pub fn command(&mut self, command: Command, request_id: u32) -> Result<Frame, String> {
         if self.world.is_desynchronized() && !matches!(command, Command::Reset { .. }) {
-            return Err("計算が停止しています。リセットして再開してください。".into());
+            return Err("Physics has stopped. Reset the scene to continue.".into());
         }
         let topology = matches!(command, Command::Reset { .. });
         match command {
@@ -281,7 +284,7 @@ mod tests {
         assert!(demo.command(Command::Step, 1).is_err());
         assert!(demo.world.is_desynchronized());
         assert!(
-            matches!(demo.command(Command::Release, 2), Err(message) if message.contains("リセット"))
+            matches!(demo.command(Command::Release, 2), Err(message) if message.contains("Reset"))
         );
         assert!(
             demo.command(

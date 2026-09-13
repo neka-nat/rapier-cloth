@@ -1,4 +1,5 @@
 /target/
+/.internal/
 **/target/
 **/node_modules/
 /demos/viewer/dist/

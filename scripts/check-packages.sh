@@ -14,6 +14,11 @@ for precision in f32 f64; do
     test -f "$unpacked/$name-0.1.0/LICENSE-MIT"
     test -f "$unpacked/$name-0.1.0/LICENSE-APACHE"
     tar -tzf "$package_target/package/$name-0.1.0.crate" > "$package_check_dir/$name-$precision-contents.txt"
+    if grep -E '/(\.internal|evidence)/|/(progress\.md|package-design\.ja\.md|implementation-plan\.ja\.md)$' "$package_check_dir/$name-$precision-contents.txt"; then
+      echo "Internal work records must not be distributed" >&2
+      exit 1
+    fi
+    python3 scripts/check-docs.py --root "$unpacked/$name-0.1.0"
     sha256sum "$package_target/package/$name-0.1.0.crate" >> "$package_check_dir/SHA256SUMS"
   done
   consumer="$package_check_dir/consumer-$precision"

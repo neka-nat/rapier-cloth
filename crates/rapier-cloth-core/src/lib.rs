@@ -1,4 +1,4 @@
-//! Engine-independent cloth data and CPU XPBD simulation.
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
 #[cfg(any(

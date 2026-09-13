@@ -27,9 +27,9 @@ test('Rust frames match actual GPU buffers and body poses through seek, playback
     expect(actual.pins).toEqual(source.pinned_particles.flatMap(i=>source.positions[i]).map(Math.fround));
     await expect(page.locator('#stretch')).toHaveText(`${(source.diagnostics.p95_stretch*100).toFixed(3)} %`);
   }
-  await page.getByRole('button',{name:'再生',exact:true}).click();
+  await page.getByRole('button',{name:'Play',exact:true}).click();
   await expect.poll(()=>page.evaluate(()=>window.__clothReplay.snapshot().frameIndex)).toBeGreaterThan(0);
-  await page.getByRole('button',{name:'停止',exact:true}).click();
+  await page.getByRole('button',{name:'Pause',exact:true}).click();
   const stopped=await page.evaluate(()=>window.__clothReplay.snapshot().frameIndex);
   await page.waitForTimeout(100);expect(await page.evaluate(()=>window.__clothReplay.snapshot().frameIndex)).toBe(stopped);
   await page.locator('#wireframe').check();expect(await page.evaluate(()=>window.__clothReplay.snapshot().wireframe)).toBe(true);
@@ -41,9 +41,9 @@ test('Rust frames match actual GPU buffers and body poses through seek, playback
   const canvas=await page.locator('canvas').boundingBox();
   await page.mouse.move(canvas.x+300,canvas.y+200);await page.mouse.down();await page.mouse.move(canvas.x+370,canvas.y+230,{steps:10});await page.mouse.up();
   await expect.poll(()=>page.evaluate(()=>window.__clothReplay.snapshot().camera)).not.toEqual(before);
-  await page.getByRole('button',{name:'視点を戻す'}).click();
+  await page.getByRole('button',{name:'Reset view'}).click();
   await page.screenshot({path:testInfo.outputPath('pick-and-place.png'),fullPage:true});
-  await page.getByRole('button',{name:'先頭へ'}).click();await expect(page.getByRole('slider')).toHaveValue('0');
+  await page.getByRole('button',{name:'Restart'}).click();await expect(page.getByRole('slider')).toHaveValue('0');
   expect(errors).toEqual([]);
 });
 test('file input loads recordings and reports unsupported schemas without destroying the current frame',async({page})=>{

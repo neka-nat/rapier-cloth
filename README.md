@@ -1,21 +1,38 @@
 # rapier-cloth
 
-既存のRapier worldへ追加できる、Rust製のCPU XPBD clothシミュレータです。
-`rapier-cloth-core` が布の計算、`rapier-cloth` がRapierとの接触・把持・時間同期を担当します。
+CPU cloth simulation for Rust applications using Rapier 3D. Add deformable triangle
+meshes to an existing physics world, with contacts, pinned vertices and attachments
+to rigid bodies. The solver uses extended position-based dynamics (XPBD).
 
-0.1.0候補。crates.ioへの公開はまだ行っていません。checkoutをpath依存として利用できます。
+`rapier-cloth-core` provides the engine-independent solver; `rapier-cloth` adds
+Rapier collision queries, attachments and time synchronization.
+
+## Try the live demo
+
+From a repository checkout, with Rust and Node.js 22.12 or newer:
+
+```bash
+npm --prefix demos/viewer ci
+npm --prefix demos/viewer run live
+```
+
+Open **http://127.0.0.1:5173/live.html** to drape cloth over a sphere, adjust wind,
+move the obstacle and release pinned vertices. The launcher builds a local Rust
+CPU server and starts the browser UI. See the [live demo guide](docs/live-demo.md)
+for controls and requirements.
+
+## Use from Rust
+
+This is a pre-release project. Use a checkout as a path dependency:
 
 ```toml
 [dependencies]
 rapier-cloth = { path = "../rapier-cloth" }
 ```
 
-f64の場合は `default-features = false, features = ["f64"]` を指定します。
-
-| 精度 | 同じworldで利用するRapier | Rust |
-|---|---|---|
-| f32（既定） | `rapier3d 0.34` | 1.90以上 |
-| f64 | `rapier3d-f64 0.34` | 1.90以上 |
+Rust 1.90 or newer is required. The default is `f32`, compatible with `rapier3d 0.34`.
+For `rapier3d-f64 0.34`, set `default-features = false, features = ["f64"]`.
+Select exactly one precision; do not use `--all-features`.
 
 ```rust
 use rapier_cloth::{rapier::prelude::*, prelude::*};
@@ -32,9 +49,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let handle = cloths.add_cloth(cloth);
 
-    // 外部substepごとに、Rapier → clothの順で同じhを一度だけ進める。
+    // Run this sequence once per substep, using the same h for both worlds.
     let before = SceneSnapshot::capture(id, 0, &rigid.bodies, &rigid.colliders);
-    // kinematic目標を設定する場合はここ。
+    // Set any kinematic targets here, after taking the snapshot.
     rigid.step();
     let query = rigid.broad_phase.as_query_pipeline(
         rigid.narrow_phase.query_dispatcher(),
@@ -47,24 +64,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-固定トポロジーの三角形mesh、面密度、伸び・二面角の曲げ、固定点、局所anchorによる複数頂点の把持を扱います。対応する外部形状は球・箱・カプセル・固定の半空間です。有限形状のkinematic移動にはsubstepごとの移動量制限があります。
+See [integration](docs/integration.md) for step ordering, rendering, materials,
+collision filters, attachments and recovery after a failed step.
 
-連成は一方向です。自己衝突、布の辺・面のCCD、動的剛体への反作用、任意TriMesh、静止摩擦だけによる把持は未対応です。初版の把持は明示的なattachmentを使います。
+## Capabilities and limits
 
-```bash
-npm --prefix demos/viewer ci
-npm --prefix demos/viewer run live
-```
+The solver supports fixed triangle topology, surface density, stretch and dihedral
+bending constraints, pins and attachments with body-local anchors. Collisions
+support spheres, boxes, capsules and fixed half-spaces. Kinematic obstacle motion
+is bounded per substep.
 
-http://127.0.0.1:5173/live.html で、Rustがその場で計算する布を操作できます。球へのdrape、風、停止・再開、固定解除に対応します。初回はRustのreleaseビルドを行います。[ライブデモの使い方](docs/live-demo.ja.md)。
+Coupling is one-way. Self-collision, cloth-to-cloth collision, reactions on dynamic
+rigid bodies, arbitrary collision meshes and edge/face CCD are not implemented.
+Use explicit attachments for grasping; static friction alone is not a grasp model.
+Read the [compatibility and limitations](docs/compatibility.md) before integrating.
 
-CPU性能は32×32・1枚、1/240秒×4回・8反復を[実測](docs/benchmarks.ja.md#realtime-cpu)しています。利用時はreleaseビルドで、描画も含むframe時間を確認してください。
+## Documentation
 
-従来のviewerはRustの記録を再生します。[記録の生成と再生](docs/examples.ja.md)も利用できます。
+- [Documentation index](docs/README.md)
+- [Runnable examples and recording playback](docs/examples.md)
+- [Performance measurement](docs/performance.md)
+- [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
-- [時間同期・接触・把持・失敗からの復元](docs/integration.ja.md)
-- [実行例と記録形式](docs/examples.ja.md) / [性能計測](docs/benchmarks.ja.md)
-- [対応表](docs/compatibility.md) / [検証記録](docs/progress.md) / [変更履歴](CHANGELOG.md)
-- [設計検討](docs/package-design.ja.md) / [実装プラン](docs/implementation-plan.ja.md)
-
-MIT OR Apache-2.0。
+Licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.

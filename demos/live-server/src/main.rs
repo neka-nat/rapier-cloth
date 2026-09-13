@@ -69,7 +69,7 @@ async fn connection(mut socket: WebSocket) {
         let request = match serde_json::from_str::<Request>(&text) {
             Ok(request) if request.request_id > last_request => request,
             _ => {
-                send(&mut socket, &serde_json::json!({"type":"error","request_id":0,"message":"不正な操作です。再接続してください。"})).await;
+                send(&mut socket, &serde_json::json!({"type":"error","request_id":0,"message":"Invalid command. Reconnect to continue."})).await;
                 break;
             }
         };

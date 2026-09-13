@@ -3,6 +3,20 @@ on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 jobs:
+  docs-examples:
+    name: Documentation and examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docs-examples
+      - run: python3 scripts/check-docs.py
+      - run: cargo doc --locked --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: bash scripts/check-examples.sh
   rust:
     name: Rust ${{ matrix.os }} ${{ matrix.precision }}
     runs-on: ${{ matrix.os }}
