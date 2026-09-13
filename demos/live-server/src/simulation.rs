@@ -5,6 +5,7 @@ use std::time::Instant;
 
 pub const H: Real = 1.0 / 240.0;
 pub const SUBSTEPS: usize = 4;
+const SPHERE_RADIUS: Real = 0.3;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -88,16 +89,20 @@ impl Demo {
         rigid
             .colliders
             .insert(ColliderBuilder::new(SharedShape::halfspace(Vec3::Y)));
-        let sphere = rigid.bodies.insert(
-            RigidBodyBuilder::kinematic_position_based().translation(Vec3::new(0.0, 0.3, 0.0)),
+        // A hemisphere above the floor avoids trapping cloth in a closing,
+        // sub-radius gap between two opposing one-way contact surfaces.
+        let sphere = rigid
+            .bodies
+            .insert(RigidBodyBuilder::kinematic_position_based().translation(Vec3::ZERO));
+        rigid.colliders.insert_with_parent(
+            ColliderBuilder::ball(SPHERE_RADIUS),
+            sphere,
+            &mut rigid.bodies,
         );
-        rigid
-            .colliders
-            .insert_with_parent(ColliderBuilder::ball(0.3), sphere, &mut rigid.bodies);
         let height = if scene == SceneKind::Hanging {
             1.15
         } else {
-            0.61
+            SPHERE_RADIUS + 0.01
         };
         let mesh = GridBuilder::new(32, 32)
             .origin(Vec3::new(-0.5, height, -0.5))
@@ -153,9 +158,18 @@ impl Demo {
             }
             Command::Step => {
                 let start = Instant::now();
+                let mut penetration: Real = 0.0;
+                let mut stretch: Real = 0.0;
+                let mut contacts = 0;
                 for _ in 0..SUBSTEPS {
                     self.substep()?;
+                    penetration = penetration.max(self.report.max_penetration);
+                    stretch = stretch.max(self.report.p95_stretch);
+                    contacts = contacts.max(self.report.contacts);
                 }
+                self.report.max_penetration = penetration;
+                self.report.p95_stretch = stretch;
+                self.report.contacts = contacts;
                 self.physics_ms = start.elapsed().as_secs_f64() * 1000.0;
             }
         }
@@ -171,13 +185,9 @@ impl Demo {
             &self.rigid.colliders,
         );
         let target = if self.options.auto_motion {
-            Vec3::new(
-                0.1 * (0.9 * t).sin(),
-                0.3 + 0.06 * (0.7 * t).sin(),
-                0.07 * (0.6 * t).sin(),
-            )
+            Vec3::new(0.1 * (0.9 * t).sin(), 0.0, 0.07 * (0.6 * t).sin())
         } else {
-            Vec3::new(self.options.sphere_x, 0.3, self.options.sphere_z)
+            Vec3::new(self.options.sphere_x, 0.0, self.options.sphere_z)
         };
         let current = self.rigid.bodies[self.sphere].translation();
         // UI targets may jump. Limit actual surface motion to 0.25m/s, below
@@ -234,7 +244,7 @@ impl Demo {
                 .then(|| cloth.mesh().triangles().iter().flatten().copied().collect()),
             pins: cloth.pins().keys().copied().collect(),
             sphere: self.rigid.bodies[self.sphere].translation().to_array(),
-            sphere_radius: 0.3,
+            sphere_radius: SPHERE_RADIUS,
             options: self.options,
             physics_ms: self.physics_ms,
             p95_stretch: self.report.p95_stretch,
@@ -286,23 +296,29 @@ mod tests {
         let initial = demo.frame(0, true);
         assert_eq!(initial.positions.len(), 3072);
         assert_eq!(initial.triangles.as_ref().unwrap().len(), 31 * 31 * 6);
-        let mut last = initial.positions.clone();
-        for seq in 1..=90 {
+        let mut draped = false;
+        for seq in 1..=1200 {
             let frame = demo.command(Command::Step, seq).unwrap();
             assert_eq!(frame.step, seq as u64 * 4);
             assert!(frame.positions.iter().all(|p| p.is_finite()));
-            assert!(frame.max_penetration < 0.001);
-            last = frame.positions;
+            assert!(
+                frame.max_penetration < 0.001,
+                "frame {seq}: penetration {}",
+                frame.max_penetration
+            );
+            draped |= frame.positions.chunks_exact(3).any(|p| p[1] < 0.1)
+                && frame
+                    .positions
+                    .chunks_exact(3)
+                    .any(|p| p[1] > SPHERE_RADIUS * 0.8);
         }
-        assert_ne!(last, initial.positions);
-        assert!(last.chunks_exact(3).any(|p| p[1] < 0.1));
-        assert!(last.chunks_exact(3).any(|p| p[1] > 0.5));
+        assert!(draped, "cloth must actually drape over the sphere");
         let reset = demo
             .command(
                 Command::Reset {
                     scene: SceneKind::Drape,
                 },
-                91,
+                1201,
             )
             .unwrap();
         assert_eq!(reset.positions, initial.positions);

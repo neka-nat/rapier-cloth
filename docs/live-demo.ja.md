@@ -23,7 +23,7 @@ CLOTH_SERVER_PORT=9200 CLOTH_VIEWER_PORT=5273 npm --prefix demos/viewer run live
 
 | 操作 | 動作 |
 |---|---|
-| 球に布をかぶせる | 自由な布を球と床へ落とす。球の自動移動で接触が変化する |
+| 球面に布をかぶせる | 自由な布を球面と床へ落とす。球の下半分を床に埋め、水平方向の自動移動で接触を変える |
 | 風になびく布 | 一辺の32頂点を固定した布に風を加える |
 | 風の強さ | 時間変化する外力を調整する。流体シミュレーションではなく、面密度に合わせた外力のデモ |
 | 球の左右・前後位置 | 自動移動をOFFにして操作。目標へ最大0.25m/sで移動する |
@@ -42,7 +42,7 @@ CLOTH_SERVER_PORT=9200 CLOTH_VIEWER_PORT=5273 npm --prefix demos/viewer run live
 - **物理 / frame**: Rustで4substepを計算した時間。Rapier、外力設定、clothの診断を含み、JSON変換・通信・描画を含まない。
 - **応答時間**: 操作要求の送信から応答受信まで。物理、JSON、通信、ブラウザでのイベント処理待ちを含む。
 - **実時間比**: 進んだシミュレーション時間 / 実際の経過時間。1×が実時間相当。停止中は0×になる。
-- **伸び・侵入・接触**: 最新substepのRust側診断。
+- **伸び・侵入・接触**: 最新frame内の4substepにおける各診断の最大値。
 
 遅い環境では時間刻みや反復数を落とさず、シミュレーションの進行が遅くなる。表示fpsだけでは物理が実時間で進んでいると判断できない。[CPU benchmark](benchmarks.ja.md#realtime-cpu)の結果は通信・描画込みの60fps保証ではない。Chromiumのsoftware WebGLによる自動試験は操作と描画データの検証で、実GPUの性能検証とは分ける。
 
@@ -91,7 +91,7 @@ CLOTH_LIVE_PRECISION=f64 npm --prefix demos/viewer run test:live
 
 既存Chromeを使う場合は `CHROME_PATH=/usr/bin/google-chrome` を指定する。テスト用のCPU/UIポートは9174/4174。UIはproduction buildをpreviewし、実際のRustサーバーを起動する。
 
-Rust試験は4substep/frame、変形と接触、初期状態へのreset、目標速度制限、不正な値の拒否、固定解除を確認する。ブラウザ試験は受信したWebSocket frameとGPU頂点・bounds・球の姿勢を照合し、操作後の変形、停止、1frame実行、リセット、風、固定解除、カメラ、接続間の独立性、切断・再接続を確認する。記録JSONの取得が発生していないことも検証する。
+Rust試験は4substep/frame、変形と接触、初期状態へのreset、目標速度制限、不正な値の拒否、固定解除を確認する。drapeは4,800substep（20秒分）を進め、全substepの侵入が1mm未満であることも検証する。ブラウザ試験は受信したWebSocket frameとGPU頂点・bounds・球の姿勢を照合し、操作後の変形、停止、1frame実行、リセット、風、固定解除、カメラ、接続間の独立性、切断・再接続を確認する。記録JSONの取得が発生していないことも検証する。
 
 ![ライブデモの操作画面](evidence/live-demo.png)
 
