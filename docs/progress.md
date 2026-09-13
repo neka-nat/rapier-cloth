@@ -43,3 +43,11 @@ The workflow retains `crate-archives-and-consumer-evidence` and `viewer-recordin
 ![Pick-and-place replay at 3.25 seconds](evidence/pick-and-place.png)
 
 Generated from the canonical 16×16 fixture described in [examples](examples.ja.md), with Rust f64 computation and Chromium replay. The full 391-frame recording is [sample-f64.json](../demos/viewer/public/sample-f64.json). The browser check compares source doubles with the actual f32 GPU buffer at the first/middle/last frames and after backward seeks. A screenshot alone is not the acceptance oracle.
+
+## CPU real-time performance update — 2026-09-13
+
+[PR #2](https://github.com/neka-nat/rapier-cloth/pull/2) targets one 32×32 cloth at h=1/240s, four substeps/frame and eight iterations on CPU. The solver and bridge retain the original accuracy and failure gates. Closed-form bend gradients and sorted contact-state/sweep merges reduce the dominant costs. [Method, raw measurements and limitations](benchmarks.ja.md#32×321枚cpu60fpsへの改善) document three runs per precision and fixture, using clean pre-optimization `a603f02` and optimized `5d9ac1e` sources.
+
+The local f32 physics-frame p95 stayed below 16.67ms in all nine measured cases (three fixtures × three runs); individual outliers are retained. f64 moving-sphere p95 exceeded that budget in two runs. Rendering, GPU uploads and normal updates are not measured. This establishes the scoped CPU physics result, not application-wide or browser rendering throughput.
+
+Both local precision suites passed, including the 10,000-substep hanging gate. Regression coverage now compares 2,000 bend cases with the original derivative chain, matches contact lambdas and projected positions against the original map algorithm, checks disappearing sweep candidates and cumulative budgets, and preserves fully excluded attachment pairs. The current core has 16 tests and the bridge has 30 including its README doctest per precision. Final platform, MSRV, viewer and extracted-package validation is reported in [PR checks](https://github.com/neka-nat/rapier-cloth/pull/2/checks); the earlier CI evidence above applies to the original MVP.

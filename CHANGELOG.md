@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Reduce CPU cloth cost with closed-form dihedral gradients, a fast path for unwrapped angle differences, angle-only diagnostics and linear-time strain quantiles.
+- Merge sorted contact states and cached sweep planes in linear time while preserving contact order, budgets, friction, atomic failure and attachment exclusions.
+- Add a 32×32 benchmark measuring four actual sequential physics substeps per frame, with before/after data for stationary contact, hanging cloth and a moving sphere.
+- Include retained contact-state arrays in scratch memory diagnostics; historical tree nodes were excluded from that metric.
+
 ## 0.1.0 candidate — 2026-09-13
 
 - Add an engine-independent CPU XPBD core with validated fixed triangle meshes, area-based masses, stretch and signed dihedral constraints, pins and compliant targets.
