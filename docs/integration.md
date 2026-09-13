@@ -167,7 +167,12 @@ coefficient limits slip resistance. Tangential position corrections participate
 in the same continuous motion checks as other constraints; initial-overlap
 recovery supplies no friction load. The velocity solve uses only additional
 residual impact load, avoiding a second application of position friction.
-Deforming contact participants receive mass-weighted, equal-and-opposite impulses.
+Deforming contacts distribute corrections through mass-weighted material-coordinate
+gradients. The supporting triangle contributes rotational response, including its
+vertices outside a vertex/edge normal-contact stencil. The tangent effective mass
+accounts for that response. Applied per-vertex corrections are retained through
+geometry refresh, motion shortening and unloading, so changing the support frame
+does not rotate an already applied correction or apply its load twice.
 
 Between substeps, closest-point refreshes keep sticking material weights when each witness
 stays within twice the separation distance and the normal dot product is at least
@@ -189,8 +194,10 @@ cloth histories. For changes in a custom external model or filter that retains
 the same feature keys, call `Cloth::clear_contact_history()` explicitly.
 
 Analytical pull/incline, kinetic-load, common-rotation, moving-support and small
-stacked-patch tests exercise this mode. Rotating self-support tests also cover
-checkpoint replay and release after separation. Complete garment manipulation,
+stacked-patch tests exercise this mode. Independent virtual-work and rigid-motion
+tests cover the force distribution on rotated and deformed support triangles.
+Rotating self-support tests also cover checkpoint replay and release after
+separation. Complete garment manipulation,
 large support deformations and dense-fold performance remain unqualified.
 
 The position-level Coulomb model follows the approach described in

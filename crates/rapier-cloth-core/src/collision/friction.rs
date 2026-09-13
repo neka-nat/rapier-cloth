@@ -1,4 +1,5 @@
-use super::friction_frame::{MaterialFrame, side_vertices};
+use super::friction_frame::{MaterialFrame, double, side_vertices, wide};
+use super::friction_stencil::{Applied, Stencil, traction};
 use crate::{ClothError, ClothMesh, Real, SurfaceContact, SurfaceFeature, Vec3};
 
 /// Material witnesses remain fixed during a sticking contact. The normal
@@ -10,6 +11,7 @@ pub(crate) struct FrictionState {
     pub lambda: Vec3,
     pub sliding: bool,
     material_frame: Option<MaterialFrame>,
+    applied: Applied,
 }
 
 impl FrictionState {
@@ -20,7 +22,38 @@ impl FrictionState {
             lambda: Vec3::ZERO,
             sliding: false,
             material_frame: MaterialFrame::from_contact(contact, reference),
+            applied: Applied::default(),
         }
+    }
+
+    pub fn reset_step(&mut self) {
+        self.lambda = Vec3::ZERO;
+        self.applied = Applied::default();
+    }
+
+    #[cfg(test)]
+    pub fn applied_force(&self, particle: u32) -> Vec3 {
+        Vec3::from_array(self.applied.force(particle).to_array().map(|x| x as Real))
+    }
+
+    pub fn scale_motion(
+        &mut self,
+        before: Option<&Self>,
+        fraction: Real,
+    ) -> Result<(), ClothError> {
+        let base = before.map_or(Vec3::ZERO, |s| s.lambda);
+        let fraction_wide = wide(fraction);
+        let lambda = double(base) * (1.0 - fraction_wide) + double(self.lambda) * fraction_wide;
+        let lambda = Vec3::from_array(lambda.to_array().map(|x| x as Real));
+        if !lambda.is_finite() {
+            return Err(ClothError::NonFiniteState);
+        }
+        let applied = self
+            .applied
+            .interpolate(before.map(|s| &s.applied), fraction_wide)?;
+        self.applied = applied;
+        self.lambda = lambda;
+        Ok(())
     }
 
     pub fn external(&self) -> bool {
@@ -98,8 +131,9 @@ impl FrictionState {
         }
         if length > limit {
             let next = self.lambda * (self.support.kinetic_friction * normal_lambda / length);
-            self.support
-                .apply(positions, inverse_masses, next - self.lambda);
+            let ratio = wide(self.support.kinetic_friction * normal_lambda / length);
+            self.applied
+                .replace(self.applied.scaled(ratio), positions, inverse_masses)?;
             self.lambda = next;
             self.sliding = true;
         }
@@ -148,36 +182,27 @@ impl FrictionState {
     ) -> Result<(), ClothError> {
         self.transport_material_frame(positions)?;
         self.support.normal = normal;
-        let inverse_mass = self.support.inverse_mass(inverse_masses);
-        if inverse_mass == 0.0 {
-            self.lambda = Vec3::ZERO;
-            return Ok(());
-        }
         let relative = self.support.relative(positions) - self.anchor;
-        let tangent = relative - normal * relative.dot(normal);
-        let trial = self.lambda - tangent / inverse_mass;
-        let trial = trial - normal * trial.dot(normal);
-        let length = trial.length();
-        let static_limit = self.support.static_friction * normal_lambda;
-        let kinetic_limit = self.support.kinetic_friction * normal_lambda;
-        if !relative.is_finite()
-            || !trial.is_finite()
-            || !length.is_finite()
-            || !static_limit.is_finite()
-            || !kinetic_limit.is_finite()
-            || !inverse_mass.is_finite()
-        {
+        if !relative.is_finite() || !normal_lambda.is_finite() || normal_lambda < 0.0 {
             return Err(ClothError::NonFiniteState);
         }
-        let sliding = length > static_limit;
-        let next = if sliding && length > 0.0 {
-            trial * (kinetic_limit / length)
-        } else {
-            trial
-        };
-        self.support
-            .apply(positions, inverse_masses, next - self.lambda);
-        self.lambda = next;
+        let stencil = Stencil::new(self.support, self.material_frame.as_ref(), positions)?;
+        let (mass, old) = stencil.metric(inverse_masses, &self.applied);
+        let (next, sliding) = traction(
+            mass,
+            |direction| stencil.directional_mass(inverse_masses, direction),
+            old - double(relative),
+            double(normal),
+            wide(self.support.static_friction) * wide(normal_lambda),
+            wide(self.support.kinetic_friction) * wide(normal_lambda),
+        )?;
+        let lambda = Vec3::from_array(next.to_array().map(|x| x as Real));
+        if !lambda.is_finite() {
+            return Err(ClothError::NonFiniteState);
+        }
+        self.applied
+            .replace(stencil.forces(next), positions, inverse_masses)?;
+        self.lambda = lambda;
         self.sliding = sliding;
         Ok(())
     }
@@ -204,6 +229,40 @@ impl FrictionState {
 mod tests {
     use super::*;
     use crate::{SurfaceContactKey, SurfaceFeature};
+
+    #[test]
+    fn unrepresentable_tangent_multiplier_fails_before_applying_positions() {
+        let c = SurfaceContact {
+            key: SurfaceContactKey {
+                other_cloth: None,
+                features: [
+                    SurfaceFeature::Vertex(0),
+                    SurfaceFeature::External {
+                        object: 0,
+                        feature: 0,
+                    },
+                ],
+            },
+            particles: [0; 4],
+            weights: [1.0, 0.0, 0.0, 0.0],
+            static_friction: 4.0,
+            kinetic_friction: 1.0,
+            ..pair()
+        };
+        let reference = [Vec3::Y * 0.01];
+        let mut state = FrictionState::new(c, &reference);
+        let original = [reference[0] + Vec3::X * 10.0];
+        let mut positions = original;
+        let result = state.project(&mut positions, &[Real::MIN_POSITIVE], Vec3::Y, Real::MAX);
+        assert!(
+            matches!(result, Err(ClothError::NonFiniteState)),
+            "{result:?}, lambda={:?}",
+            state.lambda
+        );
+        assert_eq!(positions, original);
+        assert_eq!(state.applied.force(0), glam::DVec3::ZERO);
+        assert_eq!(state.lambda, Vec3::ZERO);
+    }
 
     fn pair() -> SurfaceContact {
         SurfaceContact {
@@ -473,6 +532,58 @@ mod tests {
     }
 
     #[test]
+    fn edge_material_frame_applies_and_releases_its_additional_support_vertex() {
+        let reference = [
+            Vec3::Y * 0.01,
+            Vec3::new(0.02, 0.01, 0.0),
+            Vec3::new(0.0, 0.01, 0.02),
+            Vec3::ZERO,
+            Vec3::X * 0.02,
+            Vec3::Z * 0.02,
+        ];
+        let mesh = ClothMesh::new(reference.to_vec(), vec![[0, 1, 2], [3, 4, 5]]).unwrap();
+        let contact = SurfaceContact {
+            key: SurfaceContactKey {
+                other_cloth: None,
+                features: [SurfaceFeature::Edge([0, 1]), SurfaceFeature::Edge([3, 4])],
+            },
+            particles: [0, 1, 3, 4],
+            weights: [0.5, 0.5, -0.5, -0.5],
+            ..pair()
+        };
+        let mut state = FrictionState::new(contact, &reference);
+        state.ensure_material_frame(&mesh, &reference).unwrap();
+        let inverse: [Real; 6] = [1.0, 0.5, 0.25, 0.2, 0.3, 0.4];
+        let mut positions = reference;
+        positions[0].z += 0.005;
+        positions[1].z += 0.005;
+        let before = positions;
+        state
+            .project(&mut positions, &inverse, Vec3::Y, 0.001)
+            .unwrap();
+        assert!(state.sliding);
+        assert!(
+            positions[5].distance(before[5]) > 1e-6,
+            "incident vertex received no moment correction"
+        );
+        let force: Vec3 = (0..6)
+            .map(|i| (positions[i] - before[i]) / inverse[i])
+            .sum();
+        assert!(force.length() < 1e-7);
+        // A shortened motion must retract only the accepted fraction, including
+        // the incident vertex absent from the four-particle normal contact.
+        for (p, &start) in positions.iter_mut().zip(&before) {
+            *p = start + (*p - start) * 0.25;
+        }
+        state.scale_motion(None, 0.25).unwrap();
+        state.limit_load(&mut positions, &inverse, 0.0).unwrap();
+        for (&p, &expected) in positions.iter().zip(&before) {
+            assert!(p.distance(expected) < 1e-7);
+        }
+        assert_eq!(state.lambda, Vec3::ZERO);
+    }
+
+    #[test]
     fn material_frame_preserves_slip_covariance_momentum_and_dissipation() {
         let reference = surface_reference();
         let masses: [Real; 4] = [2.0, 3.0, 5.0, 7.0];
@@ -529,6 +640,7 @@ mod tests {
             .project(&mut positions, &inverse, Vec3::Y, 0.01)
             .unwrap();
         let previous_lambda = state.lambda;
+        let previous_forces: [Vec3; 4] = std::array::from_fn(|i| state.applied_force(i as u32));
         assert!(previous_lambda.length() > 0.001);
 
         // Another constraint rotates the support after a friction impulse has
@@ -544,16 +656,67 @@ mod tests {
             .unwrap();
         for i in 0..4 {
             let force = (positions[i] - before[i]) / inverse[i];
-            let expected = (state.lambda - previous_lambda) * pair().weights[i];
+            let expected = state.applied_force(i as u32) - previous_forces[i];
             assert!(force.distance(expected) < 1e-7);
         }
         let before_release = positions;
-        let loaded_lambda = state.lambda;
+        let loaded_forces: [Vec3; 4] = std::array::from_fn(|i| state.applied_force(i as u32));
         state.limit_load(&mut positions, &inverse, 0.0).unwrap();
         for i in 0..4 {
             let force = (positions[i] - before_release[i]) / inverse[i];
-            assert!(force.distance(-loaded_lambda * pair().weights[i]) < 1e-7);
+            assert!(force.distance(-loaded_forces[i]) < 1e-7);
         }
         assert_eq!(state.lambda, Vec3::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod traction_torque_probe {
+    use super::*;
+
+    #[test]
+    fn material_frame_traction_balances_the_surface_offset_torque() {
+        let reference = [
+            Vec3::new(0.002, 0.01, 0.0),
+            Vec3::new(-0.02, 0.0, -0.02),
+            Vec3::new(0.02, 0.0, -0.02),
+            Vec3::new(0.0, 0.0, 0.02),
+        ];
+        let contact = SurfaceContact {
+            key: crate::SurfaceContactKey {
+                other_cloth: None,
+                features: [SurfaceFeature::Vertex(0), SurfaceFeature::Face(0)],
+            },
+            particles: [0, 1, 2, 3],
+            weights: [1.0, -0.2, -0.3, -0.5],
+            normal: Vec3::Y,
+            offset: Vec3::ZERO,
+            surface_velocity: Vec3::ZERO,
+            separation: 0.01,
+            static_friction: 0.5,
+            kinetic_friction: 0.2,
+        };
+        let mut state = FrictionState::new(contact, &reference);
+        let inverse: [Real; 4] = [0.5, 1.0 / 3.0, 0.2, 1.0 / 7.0];
+        let mut positions = reference;
+        positions[0].x += 0.005;
+        let before = positions;
+        state
+            .project(&mut positions, &inverse, Vec3::Y, 0.001)
+            .unwrap();
+        assert!(state.sliding);
+        let forces: [Vec3; 4] = std::array::from_fn(|i| (positions[i] - before[i]) / inverse[i]);
+        let force: Vec3 = forces.into_iter().sum();
+        let torque: Vec3 = before
+            .into_iter()
+            .zip(forces)
+            .map(|(p, f)| p.cross(f))
+            .sum();
+        assert!(force.length() < 1e-7, "force {force:?}");
+        assert!(
+            torque.length() < 1e-9,
+            "material anchor rotation needs its force gradient; torque={torque:?}, tangent={:?}",
+            state.lambda
+        );
     }
 }

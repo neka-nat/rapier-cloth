@@ -207,7 +207,7 @@ impl Solver {
             .clone_from(&cloth.contact_history);
         for state in &mut self.previous_surface_states {
             state.normal_lambda = 0.0;
-            state.friction.lambda = Vec3::ZERO;
+            state.friction.reset_step();
             if !state.friction.anchor.is_finite() {
                 return Err(ClothError::NonFiniteState);
             }
@@ -391,7 +391,7 @@ impl Solver {
                     *value = before + (*value - before) * fraction;
                 }
             }
-            self.scale_contact_motion(fraction);
+            self.scale_contact_motion(fraction)?;
             if fraction < 1.0 {
                 // A distant trial can pass beyond a feature's discrete contact
                 // margin before CCD shortens it. Refresh at the accepted prefix
@@ -403,7 +403,7 @@ impl Solver {
                 self.project_contacts(radius, settings.max_contacts)?;
                 self.project_surface_contacts(source, h, settings.max_contacts, &cloth.mesh)?;
                 let fraction = self.accept_motion(source, ContactStage::Iteration)?;
-                self.scale_contact_motion(fraction);
+                self.scale_contact_motion(fraction)?;
             }
         }
         // Also certify the observable substep's linear endpoint sweep, rather
@@ -748,9 +748,9 @@ impl Solver {
             "rounded endpoint could not be certified",
         ))
     }
-    fn scale_contact_motion(&mut self, fraction: Real) {
+    fn scale_contact_motion(&mut self, fraction: Real) -> Result<(), ClothError> {
         if fraction == 1.0 {
-            return;
+            return Ok(());
         }
         // After the sorted-state swaps, the next_* arrays still contain the
         // old states. Scale only this batch's multipliers, matching its accepted
@@ -788,13 +788,13 @@ impl Solver {
                 })
                 .map_or(0.0, |s| s.normal_lambda);
             state.normal_lambda = base + (state.normal_lambda - base) * fraction;
-            let tangent_base = old
+            let previous_friction = old
                 .peek()
                 .filter(|s| s.contact.key == state.contact.key)
-                .map_or(Vec3::ZERO, |s| s.friction.lambda);
-            state.friction.lambda =
-                tangent_base + (state.friction.lambda - tangent_base) * fraction;
+                .map(|s| &s.friction);
+            state.friction.scale_motion(previous_friction, fraction)?;
         }
+        Ok(())
     }
 
     fn query(
@@ -1236,7 +1236,7 @@ mod contact_state_tests {
                 .accept_motion(&mut ShortenOnce(true), ContactStage::Iteration)
                 .unwrap();
             assert_eq!(fraction, 0.25);
-            solver.scale_contact_motion(fraction);
+            solver.scale_contact_motion(fraction).unwrap();
             let after = solver.surface_states[0];
             let force_increment = contact.normal * (after.normal_lambda - before.normal_lambda)
                 + after.friction.lambda
@@ -1246,7 +1246,12 @@ mod contact_state_tests {
                 let free =
                     solver.motion_start[i] + (*unconstrained - solver.motion_start[i]) * fraction;
                 let applied_force = (solver.positions[i] - free) / solver.weights[i];
-                assert!(applied_force.distance(force_increment * contact.weights[i]) < 1e-7);
+                let expected = contact.normal
+                    * (after.normal_lambda - before.normal_lambda)
+                    * contact.weights[i]
+                    + after.friction.applied_force(i as u32)
+                    - before.friction.applied_force(i as u32);
+                assert!(applied_force.distance(expected) < 1e-7);
             }
 
             // Transport through the rejected trial must compose to the same

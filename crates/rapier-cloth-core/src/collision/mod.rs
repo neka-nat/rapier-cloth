@@ -3,6 +3,9 @@ mod broad_phase;
 pub mod ccd;
 pub(crate) mod friction;
 mod friction_frame;
+#[cfg(test)]
+mod friction_oracle_tests;
+mod friction_stencil;
 pub mod geometry;
 pub(crate) mod normal_block;
 pub(crate) mod self_collision;
