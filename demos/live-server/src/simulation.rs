@@ -108,7 +108,14 @@ impl Demo {
             .origin(Vec3::new(-0.5, height, -0.5))
             .build()
             .map_err(|e| e.to_string())?;
-        let mut cloth = Cloth::new(mesh, ClothMaterial::default()).map_err(|e| e.to_string())?;
+        // The default material strongly resists folding on this 32x32 grid.
+        // Increase only bending compliance: retain inextensible edges, mass,
+        // damping and the same solver budget while allowing fabric-like folds.
+        let material = ClothMaterial {
+            bend_compliance: 1.0e3,
+            ..ClothMaterial::default()
+        };
+        let mut cloth = Cloth::new(mesh, material).map_err(|e| e.to_string())?;
         if scene == SceneKind::Hanging {
             for i in 0..32 {
                 cloth
@@ -201,8 +208,14 @@ impl Demo {
             .cloth_mut(self.cloth)
             .map_err(|e| e.to_string())?;
         for i in 0..cloth.positions().len() {
+            // A smooth travelling gust varies over the sheet instead of
+            // accelerating every vertex identically. Rest coordinates keep
+            // the pattern continuous as the cloth folds; wind=0 clears it.
+            let rest = cloth.mesh().rest_positions()[i];
+            let gust = (3.0 * t - 7.0 * rest.x + 4.0 * rest.z).sin() * self.options.wind;
+            let local_acceleration = acceleration + Vec3::new(0.4, 1.2, 2.0) * gust;
             cloth
-                .set_force(i as u32, acceleration * cloth.masses()[i])
+                .set_force(i as u32, local_acceleration * cloth.masses()[i])
                 .map_err(|e| e.to_string())?;
         }
         self.rigid.step();
