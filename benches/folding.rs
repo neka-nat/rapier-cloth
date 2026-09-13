@@ -32,8 +32,9 @@ fn run(
     config: Config,
     variant: usize,
     verify: bool,
+    self_collision: bool,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let mut simulation = FoldingWorld::new(config, variant)?;
+    let mut simulation = configured_world(config, variant, self_collision)?;
     let rest: Vec<_> = simulation
         .world
         .cloth(simulation.cloth)?
@@ -58,6 +59,7 @@ fn run(
     let mut max_penetration: rapier_cloth::Real = 0.0;
     let mut max_contacts = 0;
     let mut max_scratch = 0;
+    let mut collision_work = rapier_cloth::CollisionWork::default();
     let mut error = None;
     let mut settle_center = None;
     let mut drift = 0.0_f64;
@@ -76,6 +78,15 @@ fn run(
                 max_penetration = max_penetration.max(r.max_penetration);
                 max_contacts = max_contacts.max(r.contacts);
                 max_scratch = max_scratch.max(r.scratch_bytes);
+                collision_work.candidate_pairs = collision_work
+                    .candidate_pairs
+                    .max(r.surface_collision.candidate_pairs);
+                collision_work.retained_contacts = collision_work
+                    .retained_contacts
+                    .max(r.surface_collision.retained_contacts);
+                collision_work.ccd_checks = collision_work
+                    .ccd_checks
+                    .max(r.surface_collision.ccd_checks);
             }
             Err(e) => {
                 error = Some(e.to_string());
@@ -126,7 +137,13 @@ fn run(
         .map(|p| (simulation.config.thickness * 0.5 - p[1]).max(0.0))
         .fold(0.0, f64::max);
     Ok(json!({
-        "status":"unqualified_particle_baseline", "config":simulation.config,"variant":simulation.variant,
+        "status":if self_collision {"unqualified_discrete_self_collision"} else {"unqualified_particle_baseline"},
+        "collision_settings":simulation.world.cloth(simulation.cloth)?.contact_settings().map(|s|json!({
+            "thickness":s.thickness,"activation_margin":s.activation_margin,"self_collision":s.self_collision,
+            "static_friction":s.static_friction,"kinetic_friction":s.kinetic_friction,
+            "limits":{"candidate_pairs":s.limits.candidate_pairs,"retained_contacts":s.limits.retained_contacts,"ccd_checks":s.limits.ccd_checks}})),
+        "collision_work_max_per_substep":{"candidate_pairs":collision_work.candidate_pairs,"retained_contacts":collision_work.retained_contacts,"ccd_checks":collision_work.ccd_checks},
+        "config":simulation.config,"variant":simulation.variant,
         "steps":simulation.step,"failure":error,"failure_next_step":error.as_ref().map(|_|simulation.step+1),
         "physics_frame":timing(frames),"physics_phases":frame_by_phase.into_iter().map(|(k,v)|(k,timing(v))).collect::<std::collections::BTreeMap<_,_>>(),
         "max_strain":max_strain,"max_p95_strain":max_p95,"max_target_error":max_target,"max_particle_penetration":max_penetration,
@@ -137,11 +154,32 @@ fn run(
         "finite":positions.iter().flatten().all(|x|x.is_finite())
     }))
 }
+fn configured_world(
+    config: Config,
+    variant: usize,
+    self_collision: bool,
+) -> Result<FoldingWorld, Box<dyn std::error::Error>> {
+    let mut simulation = FoldingWorld::new(config, variant)?;
+    if self_collision {
+        simulation
+            .world
+            .cloth_mut(simulation.cloth)?
+            .set_contact_settings(Some(rapier_cloth::ClothContactSettings {
+                thickness: real(simulation.config.thickness),
+                activation_margin: real(simulation.config.activation_margin),
+                static_friction: real(simulation.config.static_friction),
+                kinetic_friction: real(simulation.config.kinetic_friction),
+                ..Default::default()
+            }))?;
+    }
+    Ok(simulation)
+}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let mut directory = None;
     let mut repeats = 5;
     let mut verify = false;
+    let mut self_collision = false;
     let mut config = Config::default();
     let mut variant = 0;
     while let Some(arg) = args.next() {
@@ -166,6 +204,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .parse()?
             }
             "--verify" => verify = true,
+            "--self-collision" => self_collision = true,
             "--bench" => (),
             _ => return Err(format!("unknown argument {arg}").into()),
         }
@@ -173,13 +212,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if repeats == 0 || repeats > 100 {
         return Err("repeats must be in 1..=100".into());
     }
-    let mut warmup = FoldingWorld::new(config.clone(), variant)?;
+    let mut warmup = configured_world(config.clone(), variant, self_collision)?;
     for _ in 0..120 {
         warmup.tick()?;
     }
     let mut runs = vec![];
     for _ in 0..repeats {
-        runs.push(run(config.clone(), variant, verify)?);
+        runs.push(run(config.clone(), variant, verify, self_collision)?);
     }
     let cpu = fs::read_to_string("/proc/cpuinfo")
         .ok()

@@ -97,6 +97,56 @@ mean of cloth and collider coefficients, or `friction_override` when set. Rapier
 coefficient combination rule is not used. A Coulomb limit bounds the impulse and
 prevents reversing the remaining slip. There is no static-friction history.
 
+## Discrete self-collision
+
+Self-collision is experimental and disabled until a cloth opts in:
+
+```rust
+use rapier_cloth::{ClothContactSettings, CollisionLimits};
+
+cloth.set_contact_settings(Some(ClothContactSettings {
+    thickness: 0.001,           // Full physical thickness in metres.
+    activation_margin: 0.0001,  // Extra candidate range, not extra thickness.
+    self_collision: true,
+    static_friction: 0.6,       // Reserved; static stick/slip is not implemented yet.
+    kinetic_friction: 0.5,
+    limits: CollisionLimits::default(),
+}))?;
+```
+
+The core constrains nonincident vertex-face and edge-edge features on either side
+of the sheet. Shared vertices/edges are excluded by topology; connected components
+and pinned regions are not excluded wholesale. Physical self-contact separation
+is `thickness`; Rapier's current external particle contacts still use
+`ClothMaterial::contact_radius`. This option does not add rigid triangle-surface
+collision or continuous self-collision. Use small-motion fixtures and inspect
+penetration/strain; the mode is not yet a qualified robotic folding system.
+
+`CollisionLimits` separates cumulative candidate-pair work (default 2,000,000 per
+substep), retained contact keys (65,536), and future CCD distance-evaluation work
+(2,000,000). The CCD counter is zero in the discrete implementation. Candidate
+work includes repeated refreshes and topologically incident candidates examined
+by the broad phase. Retained keys are bounded by maximum capacity, not summed
+across iterations. `SolverSettings::max_contacts` additionally limits the combined
+legacy and surface contacts. Limits return typed errors; contacts are never silently
+dropped. `StepReport::surface_collision` reports successful-step work/high-water
+counts, and its scratch-byte estimate includes reusable hierarchy/contact buffers.
+
+Contact history belongs to each cloth and participates in world checkpoints and
+atomic stepping. `set_positions` and changed contact settings invalidate it; an
+invalid setting or failed substep preserves the previous physical state. Reapplying
+identical settings preserves history. `contact_history_len()` reports retained
+touching surface contacts. The `static_friction` coefficient is validated but its
+static-cone/history behavior remains unimplemented; kinetic friction currently
+acts on relative velocity with equal-and-opposite updates on the two cloth features.
+
+Custom core collision adapters can implement the defaulted
+`ContactSource::surface_contacts` method, returning `SurfaceContact` constraints
+with up to four particles and stable, unique `SurfaceContactKey` values. The
+existing particle-contact callback remains available. Invalid geometry, unresolved
+initial self-intersections and infeasible all-fixed surface contacts return errors
+without committing the cloth state.
+
 ## Attachments and grasping
 
 Call `world.attach(desc, &bodies, &colliders)` with an `AttachmentDesc` containing a

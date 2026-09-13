@@ -8,6 +8,7 @@ pub struct StepReport {
     pub max_target_error: Real,
     pub max_penetration: Real,
     pub contacts: usize,
+    pub surface_collision: crate::collision::CollisionWork,
     pub stabilized_contacts: usize,
     pub degenerate_faces: usize,
     pub iterations: usize,

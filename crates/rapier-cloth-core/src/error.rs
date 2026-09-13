@@ -10,9 +10,18 @@ pub enum ClothError {
     ConflictingTarget(u32),
     DegenerateConstraint,
     NonFiniteState,
-    ContactBudgetExceeded { limit: usize },
+    ContactBudgetExceeded {
+        limit: usize,
+    },
     InvalidSurfaceContact(&'static str),
     InfeasibleSurfaceContact,
+    InitialSelfIntersection {
+        triangles: [u32; 2],
+    },
+    CollisionBudgetExceeded {
+        kind: crate::collision::CollisionBudgetKind,
+        limit: usize,
+    },
     External(String),
 }
 
@@ -30,6 +39,13 @@ impl fmt::Display for ClothError {
             Self::InvalidSurfaceContact(s) => write!(f, "invalid surface contact: {s}"),
             Self::InfeasibleSurfaceContact => {
                 write!(f, "surface contact conflicts with fixed targets")
+            }
+            Self::InitialSelfIntersection { triangles } => write!(
+                f,
+                "initial self-intersection between triangles {triangles:?}"
+            ),
+            Self::CollisionBudgetExceeded { kind, limit } => {
+                write!(f, "surface collision {kind:?} budget exceeded ({limit})")
             }
             Self::External(s) => write!(f, "external contact error: {s}"),
         }

@@ -20,6 +20,7 @@ pub struct Cloth {
     pub(crate) forces: Vec<Vec3>,
     pub(crate) pins: BTreeMap<u32, Vec3>,
     pub(crate) contact_history: Vec<crate::contact::SurfaceContactState>,
+    pub(crate) contact_settings: Option<crate::collision::ClothContactSettings>,
 }
 
 impl Cloth {
@@ -51,6 +52,7 @@ impl Cloth {
             forces: vec![Vec3::ZERO; n],
             pins: BTreeMap::new(),
             contact_history: vec![],
+            contact_settings: None,
         })
     }
     pub fn mesh(&self) -> &ClothMesh {
@@ -77,6 +79,23 @@ impl Cloth {
     /// Active surface contacts retained by the last successful substep.
     pub fn contact_history_len(&self) -> usize {
         self.contact_history.len()
+    }
+    pub fn contact_settings(&self) -> Option<crate::collision::ClothContactSettings> {
+        self.contact_settings
+    }
+    /// Opt in to surface collision; changing settings invalidates contact history.
+    pub fn set_contact_settings(
+        &mut self,
+        settings: Option<crate::collision::ClothContactSettings>,
+    ) -> Result<(), ClothError> {
+        if let Some(settings) = settings {
+            settings.validate()?;
+        }
+        if self.contact_settings != settings {
+            self.contact_history.clear();
+            self.contact_settings = settings;
+        }
+        Ok(())
     }
     pub fn surface(&self) -> SurfaceView<'_> {
         SurfaceView {

@@ -1,3 +1,6 @@
+use crate::collision::{
+    ClothContactSettings, CollisionBudgetKind, CollisionWork, self_collision::SelfCollision,
+};
 use crate::{
     Cloth, ClothError, Contact, ContactSource, ContactStage, NoContacts, Real, StepReport, Vec3,
     constraints::{
@@ -81,6 +84,9 @@ pub struct Solver {
     previous_surface_states: Vec<SurfaceContactState>,
     next_surface_states: Vec<SurfaceContactState>,
     stretches: Vec<Real>,
+    self_collision: Option<SelfCollision>,
+    contact_settings: Option<ClothContactSettings>,
+    surface_high_water: usize,
 }
 
 impl Solver {
@@ -108,6 +114,16 @@ impl Solver {
         settings.validate(h)?;
         if !gravity.is_finite() {
             return Err(ClothError::InvalidParameter("gravity"));
+        }
+        self.contact_settings = cloth.contact_settings;
+        self.surface_high_water = 0;
+        if let Some(config) = cloth.contact_settings {
+            config.validate()?;
+            if config.self_collision {
+                self.self_collision
+                    .get_or_insert_with(|| SelfCollision::new(cloth.mesh.clone(), config))
+                    .begin(cloth.mesh.clone(), config);
+            }
         }
         let mut targets: Vec<_> = cloth
             .pins
@@ -391,6 +407,15 @@ impl Solver {
             }
         }
         report.contacts = self.contact_states.len() + self.surface_states.len();
+        report.surface_collision = if self.contact_settings.is_some_and(|s| s.self_collision) {
+            self.self_collision.as_ref().unwrap().work
+        } else {
+            CollisionWork::default()
+        };
+        report.surface_collision.retained_contacts = report
+            .surface_collision
+            .retained_contacts
+            .max(self.surface_high_water);
         report.iterations = settings.iterations;
         report.scratch_bytes = (self.positions.capacity()
             + self.prediction.capacity()
@@ -411,6 +436,10 @@ impl Solver {
                 + self.previous_surface_states.capacity()
                 + self.next_surface_states.capacity())
                 * std::mem::size_of::<SurfaceContactState>();
+        report.scratch_bytes += self
+            .self_collision
+            .as_ref()
+            .map_or(0, SelfCollision::scratch_bytes);
         // Persist only current, still touching features. A disappeared contact
         // must not act as adhesion or consume history indefinitely.
         self.surface_states.retain(|state| {
@@ -451,6 +480,18 @@ impl Solver {
             &self.positions,
             stage,
             &mut self.surface_contacts,
+        )?;
+        if self.contact_settings.is_some_and(|s| s.self_collision) {
+            self.self_collision.as_mut().unwrap().generate(
+                previous.unwrap_or(&self.reference),
+                &self.positions,
+                &mut self.surface_contacts,
+            )?;
+        }
+        Self::check_surface_capacity(
+            self.contact_settings,
+            &mut self.surface_high_water,
+            self.surface_contacts.len(),
         )?;
         if self.contacts.len() + self.surface_contacts.len() > settings.max_contacts {
             return Err(ClothError::ContactBudgetExceeded {
@@ -517,15 +558,42 @@ impl Solver {
                 &mut state.normal_lambda,
             )?;
             self.next_surface_states.push(state);
+            Self::check_surface_capacity(
+                self.contact_settings,
+                &mut self.surface_high_water,
+                self.next_surface_states.len(),
+            )?;
             if self.next_surface_states.len() + self.contact_states.len() > limit {
                 return Err(ClothError::ContactBudgetExceeded { limit });
             }
         }
         self.next_surface_states.extend(old);
+        // Check once after the merge; no state has been committed to the cloth.
+        Self::check_surface_capacity(
+            self.contact_settings,
+            &mut self.surface_high_water,
+            self.next_surface_states.len(),
+        )?;
         if self.next_surface_states.len() + self.contact_states.len() > limit {
             return Err(ClothError::ContactBudgetExceeded { limit });
         }
         std::mem::swap(&mut self.surface_states, &mut self.next_surface_states);
+        Ok(())
+    }
+    fn check_surface_capacity(
+        settings: Option<ClothContactSettings>,
+        high_water: &mut usize,
+        count: usize,
+    ) -> Result<(), ClothError> {
+        if let Some(settings) = settings
+            && count > settings.limits.retained_contacts
+        {
+            return Err(ClothError::CollisionBudgetExceeded {
+                kind: CollisionBudgetKind::RetainedContacts,
+                limit: settings.limits.retained_contacts,
+            });
+        }
+        *high_water = (*high_water).max(count);
         Ok(())
     }
     fn project_contacts(&mut self, radius: Real, limit: usize) -> Result<(), ClothError> {

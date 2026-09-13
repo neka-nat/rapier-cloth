@@ -41,8 +41,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 This example has gravity and pins but no external collision source. The caller owns
-the substep loop and rendering. Mesh topology is fixed; self-collision and tearing
-are not implemented. Material compliance describes discrete constraints and requires
+the substep loop and rendering. Mesh topology is fixed. Experimental discrete
+self-collision can be enabled with
+`cloth.set_contact_settings(Some(ClothContactSettings::default()))?`.
+This separates nonincident vertex-face and edge-edge features using a physical
+thickness (default 1 mm). It rejects initial intersections and uses bounded,
+refitted candidate searches. It does not yet prevent continuous crossings between
+queries, provide static friction, or test entire triangles against rigid obstacles.
+Tearing is not implemented. Material compliance describes discrete constraints and requires
 tuning with the chosen grid, time step and iteration count.
 
 See the repository's [documentation](https://github.com/neka-nat/rapier-cloth/tree/main/docs)

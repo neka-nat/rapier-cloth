@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add opt-in discrete, thickness-aware self-collision with refitted triangle/edge hierarchies, canonical contact features, bounded work and atomic failures. Continuous self-collision and static friction remain unimplemented.
+- Add generalized four-particle surface contacts and per-cloth contact history restored by checkpoints. Existing particle contact sources remain supported through a defaulted surface callback.
+- Pre-release API additions include `ClothContactSettings`, collision work/error types, and `StepReport::surface_collision`; update exhaustive error matches and report struct literals as needed.
 - Use the MIT license for the libraries and demos.
 - Add English documentation, example entry points and demo controls, with automated documentation and example checks.
 - Soften bending in the live demo while retaining inextensible edges and the existing solver budget; add smooth spatial gusts for local billowing.

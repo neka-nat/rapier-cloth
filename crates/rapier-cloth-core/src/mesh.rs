@@ -1,5 +1,7 @@
+use crate::collision::self_collision::CollisionTopology;
 use crate::{ClothError, Real, Vec3, constraints::bend::angle_and_gradients};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone)]
 pub struct Edge {
@@ -22,6 +24,7 @@ pub struct ClothMesh {
     hinges: Vec<Hinge>,
     vertex_areas: Vec<Real>,
     area: Real,
+    collision_topology: OnceLock<Arc<CollisionTopology>>,
 }
 
 impl ClothMesh {
@@ -114,11 +117,16 @@ impl ClothMesh {
             hinges,
             vertex_areas,
             area,
+            collision_topology: OnceLock::new(),
         })
     }
 
     pub fn rest_positions(&self) -> &[Vec3] {
         &self.positions
+    }
+    pub(crate) fn collision_topology(&self) -> &Arc<CollisionTopology> {
+        self.collision_topology
+            .get_or_init(|| Arc::new(CollisionTopology::new(self)))
     }
     pub fn triangles(&self) -> &[[u32; 3]] {
         &self.triangles

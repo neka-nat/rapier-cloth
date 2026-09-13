@@ -74,8 +74,10 @@ bending constraints, pins and attachments with body-local anchors. Collisions
 support spheres, boxes, capsules and fixed half-spaces. Kinematic obstacle motion
 is bounded per substep.
 
-Coupling is one-way. Self-collision, cloth-to-cloth collision, reactions on dynamic
-rigid bodies, arbitrary collision meshes and edge/face CCD are not implemented.
+Coupling is one-way. Experimental discrete self-collision is available as an
+[opt-in setting](docs/integration.md#discrete-self-collision). Cloth-to-cloth
+collision, reactions on dynamic rigid bodies, arbitrary collision meshes and
+edge/face CCD are not implemented.
 Use explicit attachments for grasping; static friction alone is not a grasp model.
 Read the [compatibility and limitations](docs/compatibility.md) before integrating.
 

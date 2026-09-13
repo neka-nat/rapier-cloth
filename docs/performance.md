@@ -32,6 +32,23 @@ Reports include CPU, OS, compiler, commit, dirty-checkout flag, precision, condi
 p50/p95/maximum timing, maximum errors and the number of frames over budget. Compare
 runs with the same conditions and inspect outliers as well as percentiles.
 
+## Folding development trajectory
+
+The folding development benchmark can also exercise the discrete self-contact
+path with the frozen dual-gripper trajectory:
+
+```bash
+cargo bench --locked --bench folding -- --self-collision --repeats 1 --output target/folding/discrete-01
+```
+
+This is a diagnostic, not a qualified folding example: continuous collision,
+static friction and rigid triangle-surface contacts are still missing. The report
+records partial failures, exact collision settings, per-substep work high-water
+marks, geometry errors and four-substep timings. `--verify` enables an expensive
+independent geometry audit between timed substeps; run that separately from
+performance qualification. Omit `--self-collision` to reproduce the legacy
+particle-contact baseline.
+
 ## Resolution scaling
 
 ```bash

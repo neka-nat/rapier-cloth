@@ -134,3 +134,41 @@ pub fn closest_segments(first: [Vec3; 2], second: [Vec3; 2]) -> Option<SegmentWi
         parameters: [s, t],
     })
 }
+
+/// Initial-state validation including edge/face piercing. A point/triangle plus
+/// edge/edge distance test alone misses triangles which already intersect.
+pub fn triangles_intersect(a: [Vec3; 3], b: [Vec3; 3]) -> Option<bool> {
+    let scale = (a[1] - a[0])
+        .length()
+        .max((a[2] - a[0]).length())
+        .max((b[1] - b[0]).length())
+        .max((b[2] - b[0]).length());
+    let epsilon = scale * Real::EPSILON * 8.0;
+    let na = (a[1] - a[0]).cross(a[2] - a[0]).try_normalize()?;
+    let nb = (b[1] - b[0]).cross(b[2] - b[0]).try_normalize()?;
+    for i in 0..3 {
+        if a[i].distance_squared(closest_triangle(a[i], b)?.point) <= epsilon * epsilon
+            || b[i].distance_squared(closest_triangle(b[i], a)?.point) <= epsilon * epsilon
+        {
+            return Some(true);
+        }
+        for (p, q, triangle, n) in [(a[i], a[(i + 1) % 3], b, nb), (b[i], b[(i + 1) % 3], a, na)] {
+            let da = (p - triangle[0]).dot(n);
+            let db = (q - triangle[0]).dot(n);
+            if (da <= 0.0 && db >= 0.0 || da >= 0.0 && db <= 0.0) && da != db {
+                let hit = p + (q - p) * (da / (da - db));
+                if hit.distance_squared(closest_triangle(hit, triangle)?.point) <= epsilon * epsilon
+                {
+                    return Some(true);
+                }
+            }
+        }
+        for j in 0..3 {
+            let w = closest_segments([a[i], a[(i + 1) % 3]], [b[j], b[(j + 1) % 3]])?;
+            if w.a.distance_squared(w.b) <= epsilon * epsilon {
+                return Some(true);
+            }
+        }
+    }
+    Some(false)
+}

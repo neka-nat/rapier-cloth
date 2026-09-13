@@ -18,6 +18,7 @@ pub use material::ClothMaterial;
 pub use mesh::{ClothMesh, GridBuilder};
 pub mod cloth;
 pub mod collision;
+pub use collision::{ClothContactSettings, CollisionBudgetKind, CollisionLimits, CollisionWork};
 pub mod contact;
 pub mod diagnostics;
 pub mod solver;
