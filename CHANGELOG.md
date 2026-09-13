@@ -2,11 +2,14 @@
 
 ## Unreleased
 
+- Add opt-in `continuous_rigid_collision` for bounded sphere/box/capsule/fixed-plane sweeps, including all solver correction stages with self-collision disabled. Add defaulted external motion callbacks, immutable shape snapshots, shared work limits and atomic failure tests. Update explicit contact-settings literals for the new field.
+- Validate the declared rigid trajectory against Rapier 0.34's normalized quaternion integration and damping. Reject ambiguous velocity-based rotations reaching half a turn per external step; existing motion limits still apply. Add transformed analytical crossings, offset arcs and moving/rotating support regressions.
+- Add `--continuous-rigid-collision` to the folding diagnostic, implying rigid-surface contacts and recording the actual swept minimum. Full folding and real-time performance remain unqualified.
 - Add folding fixture version 2, capturing grasp anchors after the final approach pose to avoid commanding settled cloth into the table. Version 1 remains available/default for historical replay; every trajectory sample, physical parameter and acceptance limit is preserved.
-- Add opt-in discrete whole-triangle contact against Rapier spheres, boxes, capsules and fixed half-spaces, with half-thickness offsets, canonical shared-feature witnesses, scoped patch exclusions and a shared self/rigid work budget. Continuous rigid-surface collision remains under development.
+- Add opt-in discrete whole-triangle contact against Rapier spheres, boxes, capsules and fixed half-spaces, with half-thickness offsets, canonical shared-feature witnesses, scoped patch exclusions and a shared self/rigid work budget.
 - Add `ClothContactSettings::rigid_surface_collision`, `SurfaceWitness`, shared immutable mesh access and a defaulted budget-aware surface callback. Initial rigid intersections and unresolved final separation return typed errors; update exhaustive error matches and contact-settings literals as needed.
 - Fix cached static-sweep contact duplication when continuous prediction retries a trial pose. Repeated queries update the witness for each retained key without consuming extra contact capacity.
-- Add experimental continuous self-contact checks for prediction, accepted constraint corrections and the final substep sweep, with swept witnesses, explicit work/convergence failures and a friction-free tangential-motion regression. Whole-triangle rigid contact and folding qualification remain under development.
+- Add experimental continuous self-contact checks for prediction, accepted constraint corrections and the final substep sweep, with swept witnesses, explicit work/convergence failures and a friction-free tangential-motion regression. Folding qualification remains under development.
 - Add opt-in discrete, thickness-aware self-collision with refitted triangle/edge hierarchies, canonical contact features, bounded work and atomic failures. Static friction remains unimplemented.
 - Add generalized four-particle surface contacts and per-cloth contact history restored by checkpoints. Existing particle contact sources remain supported through a defaulted surface callback.
 - Pre-release API additions include `ClothContactSettings`, collision work/error types, and `StepReport::surface_collision`; update exhaustive error matches and report struct literals as needed.

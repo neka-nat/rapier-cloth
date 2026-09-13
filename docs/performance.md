@@ -41,15 +41,17 @@ path with the frozen dual-gripper trajectory:
 cargo bench --locked --bench folding -- --self-collision --repeats 1 --output target/folding/discrete-01
 ```
 
-This is a diagnostic, not a qualified folding example: static friction and
-continuous rigid-surface collision are still missing. Replace `--self-collision` with
+This is a diagnostic, not a qualified folding example: persistent static friction
+and full-task qualification are still missing. Replace `--self-collision` with
 `--continuous-self-collision` to exercise the experimental self-CCD path. The report
 records partial failures, exact collision settings, per-substep work high-water
 marks, geometry errors and four-substep timings. `--verify` enables an expensive
 independent geometry audit between timed substeps; run that separately from
 performance qualification. Add `--rigid-surface-collision` to use discrete triangle
 contacts against the supported rigid shapes. It is independent of the self-contact
-flags, and reports the actual half-thickness offset. Omit all collision flags to
+flags, and reports the actual half-thickness offset. Use
+`--continuous-rigid-collision` to enable bounded rigid CCD as well; it implies
+rigid-surface contacts and records `rigid_ccd_minimum_separation`. Omit all collision flags to
 reproduce the legacy particle-contact baseline. An exit code of zero means the
 diagnostic wrote its report; inspect `failure`, `steps` and geometry/task metrics
 before interpreting the result as a completed trajectory.
@@ -63,6 +65,12 @@ the fixture version; compare equivalent versions when attributing solver changes
 
 ```bash
 cargo bench --locked --bench folding -- --fixture-version 2 --rigid-surface-collision --continuous-self-collision --verify --repeats 1 --output target/folding/surface-v2-01
+
+# Experimental continuous self and rigid checks; correctness replay.
+cargo bench --locked --bench folding -- --fixture-version 2 --continuous-rigid-collision --continuous-self-collision --verify --repeats 1 --output target/folding/continuous-v2-01
+
+# Separate timing run without the interleaved geometric oracle.
+cargo bench --locked --bench folding -- --fixture-version 2 --continuous-rigid-collision --continuous-self-collision --repeats 5 --output target/folding/continuous-timing-v2-01
 ```
 
 ## Resolution scaling

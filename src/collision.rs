@@ -10,6 +10,8 @@ use crate::{
     IntegrationError, RapierScene, Real, Vec3,
 };
 use std::{collections::BTreeSet, time::Instant};
+#[path = "collision/motion.rs"]
+mod motion;
 #[path = "collision/surface.rs"]
 mod surface;
 
@@ -25,6 +27,7 @@ pub(crate) struct RapierContacts<'a, 'b> {
     surface_mesh: Option<std::sync::Arc<crate::ClothMesh>>,
     surface_settings: Option<crate::ClothContactSettings>,
     surface_manifold: crate::rapier::parry::query::ContactManifold<(), ()>,
+    motion_contacts: Vec<crate::SurfaceContact>,
     pub error: Option<IntegrationError>,
     pub ignored: BTreeSet<(u32, u32)>,
     pub candidate_queries: usize,
@@ -51,6 +54,7 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
             surface_mesh: None,
             surface_settings: None,
             surface_manifold: crate::rapier::parry::query::ContactManifold::new(),
+            motion_contacts: Vec::new(),
             error: None,
             ignored: BTreeSet::new(),
             candidate_queries: 0,
@@ -282,6 +286,24 @@ fn merge_sweep_contacts(
 }
 
 impl ContactSource for RapierContacts<'_, '_> {
+    fn continuous_motion(&self) -> bool {
+        self.surface_settings
+            .is_some_and(|s| s.continuous_rigid_collision)
+    }
+    fn motion_fraction(
+        &mut self,
+        motion: crate::ContactMotion<'_>,
+        work: &mut crate::CollisionWork,
+    ) -> Result<Real, ClothError> {
+        let start = Instant::now();
+        let result = self.generate_motion(motion, work);
+        self.query_time_seconds += start.elapsed().as_secs_f64();
+        result.map_err(|e| {
+            let message = e.to_string();
+            self.error = Some(e);
+            ClothError::External(message)
+        })
+    }
     fn contacts(
         &mut self,
         previous: &[Vec3],

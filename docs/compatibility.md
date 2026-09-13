@@ -30,7 +30,7 @@ The project does not promise bitwise determinism across CPUs or precisions.
 | Fixed obstacles | Spheres, boxes, capsules, half-spaces | Arbitrary triangle meshes and compound shapes |
 | Moving obstacles | Kinematic spheres, boxes and capsules within the motion budget | Dynamic obstacle contacts and unrestricted fast motion |
 | Coupling | One-way obstacle-to-cloth interaction | Cloth reaction forces on dynamic rigid bodies |
-| Cloth collision | Particle contacts/static particle sweeps, opt-in self-contact with optional continuous checks, opt-in discrete whole-triangle rigid contacts | Cloth-to-cloth collision and continuous rigid-surface collision |
+| Cloth collision | Particle contacts/static particle sweeps, opt-in self-contact and whole-triangle rigid contacts, separate optional continuous checks | Cloth-to-cloth collision and unrestricted continuous motion |
 | Grasping | Pins and body-local attachment targets | Grasping based only on static friction |
 | Recovery | In-memory checkpoint of one cloth world | Public serialized checkpoints or automatic Rapier rollback |
 
@@ -39,11 +39,15 @@ necessary. A thin obstacle can pass between vertices of a coarse cloth mesh;
 particle collision does not test entire triangle interiors. The separate
 `rigid_surface_collision` setting covers triangle interiors against the supported
 primitives, using half the physical thickness as the rigid offset. It replaces
-particle contacts for that cloth. Its current queries are discrete; moving or
-rotating obstacles and solver corrections can cross between queries. The existing
-kinematic motion budget still applies, and does not itself certify continuous
-surface coverage. Initial rigid intersections beyond the precision length
-tolerance and unresolved final separation return typed errors.
+particle contacts for that cloth. Those queries are discrete unless
+`continuous_rigid_collision` is also enabled. The latter checks primitive sweeps
+and correction batches, independently of self-collision. It uses a declared
+COM-linear/angular endpoint trajectory and rejects velocity-based commands reaching
+half a turn per external step. The existing kinematic motion budget also applies.
+Changed collider shapes/local poses, unsupported dynamic obstacles, unresolvable
+initial gaps and unresolved final separation return typed errors. See the
+[continuous rigid contact contract](integration.md#continuous-rigid-surface-collision)
+for numerical clearance, supported motion and retry requirements.
 
 Discrete self-contact
 checks nonincident vertex-face and edge-edge proximity, with a physical thickness
@@ -52,8 +56,8 @@ rejects preexisting intersections and fails on exhausted work/contact limits.
 Fast motion or constraint corrections can still cross between discrete queries.
 The additional `continuous_self_collision` option bounds accepted self-motion
 and the final linear substep sweep, with explicit convergence/work failures.
-This experimental path does not yet qualify the complete robotic folding task,
-continuous rigid-surface contact, or real-time performance.
+These experimental paths do not yet qualify the complete robotic folding task
+or real-time performance.
 
 Inconsistent winding, non-manifold edges, isolated vertices and zero-area triangles
 are rejected. Compliance values depend on the discrete setup; evaluate strain and

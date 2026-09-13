@@ -2,7 +2,8 @@ use crate::collision::{
     ClothContactSettings, CollisionBudgetKind, CollisionWork, self_collision::SelfCollision,
 };
 use crate::{
-    Cloth, ClothError, Contact, ContactSource, ContactStage, NoContacts, Real, StepReport, Vec3,
+    Cloth, ClothError, Contact, ContactMotion, ContactSource, ContactStage, NoContacts, Real,
+    StepReport, Vec3,
     constraints::{
         bend::{angle, angle_and_gradients, angle_difference},
         distance,
@@ -88,6 +89,7 @@ pub struct Solver {
     contact_settings: Option<ClothContactSettings>,
     surface_high_water: usize,
     external_collision_work: CollisionWork,
+    external_continuous_motion: bool,
     motion_start: Vec<Vec3>,
     motion_trial: Vec<Vec3>,
     motion_distance_lambda: Vec<Real>,
@@ -124,6 +126,7 @@ impl Solver {
         self.contact_settings = cloth.contact_settings;
         self.surface_high_water = 0;
         self.external_collision_work = CollisionWork::default();
+        self.external_continuous_motion = source.continuous_motion();
         if let Some(config) = cloth.contact_settings {
             config.validate()?;
             if config.self_collision {
@@ -207,7 +210,7 @@ impl Solver {
                     corrected = true;
                 }
             }
-            self.accept_motion()?;
+            self.accept_motion(source, ContactStage::Stabilization)?;
             if !corrected {
                 break;
             }
@@ -238,7 +241,7 @@ impl Solver {
         let bend_alpha = cloth.material.bend_compliance / (h * h);
         for _ in 0..settings.iterations {
             self.capture_motion();
-            if self.continuous_self_collision() {
+            if self.continuous_motion() {
                 self.motion_distance_lambda
                     .clone_from(&self.distance_lambda);
                 self.motion_bend_lambda.clone_from(&self.bend_lambda);
@@ -288,7 +291,7 @@ impl Solver {
                 self.target_lambda[j] += dl;
                 self.positions[i] += dl * self.weights[i];
             }
-            let fraction = self.accept_motion()?;
+            let fraction = self.accept_motion(source, ContactStage::Iteration)?;
             if fraction < 1.0 {
                 for (value, &before) in self
                     .distance_lambda
@@ -312,17 +315,12 @@ impl Solver {
             self.capture_motion();
             self.project_contacts(radius, settings.max_contacts)?;
             self.project_surface_contacts(h, settings.max_contacts)?;
-            self.accept_contact_motion()?;
+            self.accept_contact_motion(source)?;
         }
         // Also certify the observable substep's linear endpoint sweep, rather
         // than relying only on the piecewise path of accepted solver batches.
-        if self.continuous_self_collision()
-            && self
-                .self_collision
-                .as_mut()
-                .unwrap()
-                .motion_fraction(&cloth.positions, &self.positions)?
-                < 1.0
+        if self.continuous_motion()
+            && self.motion_fraction(source, ContactStage::Final, Some(&cloth.positions))? < 1.0
         {
             return Err(ClothError::UnresolvedContinuousCollision(
                 "final substep sweep is not clear",
@@ -445,7 +443,7 @@ impl Solver {
         }
         for t in &targets {
             let error = self.positions[t.particle as usize].distance(t.position);
-            if self.continuous_self_collision()
+            if self.continuous_motion()
                 && t.compliance == 0.0
                 && error > crate::math::LENGTH_EPSILON
             {
@@ -520,6 +518,45 @@ impl Solver {
         self.contact_settings
             .is_some_and(|s| s.continuous_self_collision)
     }
+    fn continuous_motion(&self) -> bool {
+        self.continuous_self_collision() || self.external_continuous_motion
+    }
+    fn motion_fraction(
+        &mut self,
+        source: &mut impl ContactSource,
+        stage: ContactStage,
+        initial: Option<&[Vec3]>,
+    ) -> Result<Real, ClothError> {
+        let start = initial.unwrap_or(&self.motion_start);
+        let mut fraction = if self.continuous_self_collision() {
+            self.self_collision
+                .as_mut()
+                .unwrap()
+                .motion_fraction(start, &self.positions)?
+        } else {
+            1.0
+        };
+        if self.external_continuous_motion {
+            let work = if self.contact_settings.is_some_and(|s| s.self_collision) {
+                &mut self.self_collision.as_mut().unwrap().work
+            } else {
+                &mut self.external_collision_work
+            };
+            let external = source.motion_fraction(
+                ContactMotion {
+                    start,
+                    end: &self.positions,
+                    stage,
+                },
+                work,
+            )?;
+            if !external.is_finite() || !(0.0..=1.0).contains(&external) {
+                return Err(ClothError::External("invalid motion fraction".into()));
+            }
+            fraction = fraction.min(external);
+        }
+        Ok(fraction)
+    }
     fn solve_prediction_contacts(
         &mut self,
         source: &mut impl ContactSource,
@@ -527,7 +564,7 @@ impl Solver {
         h: Real,
         settings: &SolverSettings,
     ) -> Result<(), ClothError> {
-        if !self.continuous_self_collision() {
+        if !self.continuous_motion() {
             self.query(source, None, radius, ContactStage::Prediction, settings)?;
             self.project_contacts(radius, settings.max_contacts)?;
             return self.project_surface_contacts(h, settings.max_contacts);
@@ -538,11 +575,7 @@ impl Solver {
         // zero friction, and lose part of the normal support impulse.
         for _ in 0..settings.iterations {
             self.motion_trial.clone_from(&self.positions);
-            let fraction = self
-                .self_collision
-                .as_mut()
-                .unwrap()
-                .motion_fraction(&self.motion_start, &self.positions)?;
+            let fraction = self.motion_fraction(source, ContactStage::Prediction, None)?;
             if fraction < 1.0 {
                 for (p, &start) in self.positions.iter_mut().zip(&self.motion_start) {
                     *p = start + (*p - start) * fraction;
@@ -552,13 +585,7 @@ impl Solver {
             self.positions.copy_from_slice(&self.motion_trial);
             self.project_contacts(radius, settings.max_contacts)?;
             self.project_surface_contacts(h, settings.max_contacts)?;
-            if self
-                .self_collision
-                .as_mut()
-                .unwrap()
-                .motion_fraction(&self.motion_start, &self.positions)?
-                == 1.0
-            {
+            if self.motion_fraction(source, ContactStage::Prediction, None)? == 1.0 {
                 return Ok(());
             }
         }
@@ -567,21 +594,24 @@ impl Solver {
         ))
     }
     fn capture_motion(&mut self) {
-        if self.continuous_self_collision() {
+        if self.continuous_motion() {
             self.motion_start.clone_from(&self.positions);
         }
     }
     /// A projection batch is a trial pose until its linear motion from the
     /// previous accepted pose is bounded. This includes stabilization,
     /// prediction/targets, elastic constraints and contact corrections.
-    fn accept_motion(&mut self) -> Result<Real, ClothError> {
-        if !self.continuous_self_collision() {
+    fn accept_motion(
+        &mut self,
+        source: &mut impl ContactSource,
+        stage: ContactStage,
+    ) -> Result<Real, ClothError> {
+        if !self.continuous_motion() {
             return Ok(1.0);
         }
-        let collision = self.self_collision.as_mut().unwrap();
         let mut total: Real = 1.0;
         for _ in 0..4 {
-            let fraction = collision.motion_fraction(&self.motion_start, &self.positions)?;
+            let fraction = self.motion_fraction(source, stage, None)?;
             if fraction == 1.0 {
                 return Ok(total);
             }
@@ -601,8 +631,8 @@ impl Solver {
             "rounded endpoint could not be certified",
         ))
     }
-    fn accept_contact_motion(&mut self) -> Result<(), ClothError> {
-        let fraction = self.accept_motion()?;
+    fn accept_contact_motion(&mut self, source: &mut impl ContactSource) -> Result<(), ClothError> {
+        let fraction = self.accept_motion(source, ContactStage::Iteration)?;
         if fraction == 1.0 {
             return Ok(());
         }

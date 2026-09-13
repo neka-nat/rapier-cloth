@@ -27,11 +27,40 @@ pub enum ContactStage {
     Final,
 }
 
+/// Proposed linear cloth motion. Prediction and Final span the source's whole
+/// physical substep. Stabilization uses its previous obstacle pose; Iteration
+/// holds obstacles at their current pose while cloth constraints are corrected.
+#[derive(Debug, Clone, Copy)]
+pub struct ContactMotion<'a> {
+    pub start: &'a [Vec3],
+    pub end: &'a [Vec3],
+    pub stage: ContactStage,
+}
+
 /// A narrow boundary for refreshing external constraints. Output is cleared
 /// by the solver before every call. Failure aborts the entire cloth substep.
 /// Every stage, including prediction, may be queried repeatedly for trial poses
 /// in the same substep. A source must retain unique keys when caching witnesses.
 pub trait ContactSource {
+    /// Enable external motion checks throughout the solve, independently of
+    /// built-in self-collision. The solver reads this once at substep start.
+    fn continuous_motion(&self) -> bool {
+        false
+    }
+
+    /// Return a certified prefix in [0,1], charging the shared collision budget.
+    /// This never advances physical time. A limited prediction may retain swept
+    /// witnesses for the next surface callback; express its rigid anchors at the
+    /// end-of-substep pose, so solving the full inertial trial respects rigid time.
+    /// Invalid fractions or inability to certify motion abort the whole substep.
+    fn motion_fraction(
+        &mut self,
+        _motion: ContactMotion<'_>,
+        _work: &mut CollisionWork,
+    ) -> Result<Real, ClothError> {
+        Ok(1.0)
+    }
+
     fn contacts(
         &mut self,
         previous: &[Vec3],

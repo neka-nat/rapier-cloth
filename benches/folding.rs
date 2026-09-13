@@ -6,6 +6,14 @@ mod oracle;
 use folding::*;
 use serde_json::json;
 use std::{fs, process::Command, time::Instant};
+
+#[derive(Default, Clone, Copy)]
+struct CollisionMode {
+    self_collision: bool,
+    continuous_self: bool,
+    rigid_surface: bool,
+    continuous_rigid: bool,
+}
 fn output(command: &str, args: &[&str]) -> String {
     Command::new(command)
         .args(args)
@@ -32,12 +40,9 @@ fn run(
     config: Config,
     variant: usize,
     verify: bool,
-    self_collision: bool,
-    continuous: bool,
-    rigid_surface: bool,
+    mode: CollisionMode,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let mut simulation =
-        configured_world(config, variant, self_collision, continuous, rigid_surface)?;
+    let mut simulation = configured_world(config, variant, mode)?;
     let rest: Vec<_> = simulation
         .world
         .cloth(simulation.cloth)?
@@ -143,11 +148,12 @@ fn run(
         .map(|p| (simulation.config.thickness * 0.5 - p[1]).max(0.0))
         .fold(0.0, f64::max);
     Ok(json!({
-        "status":if rigid_surface {"unqualified_rigid_surface_collision"} else if continuous {"unqualified_continuous_self_collision"} else if self_collision {"unqualified_discrete_self_collision"} else {"unqualified_particle_baseline"},
+        "status":if mode.continuous_rigid {"unqualified_continuous_rigid_collision"} else if mode.rigid_surface {"unqualified_rigid_surface_collision"} else if mode.continuous_self {"unqualified_continuous_self_collision"} else if mode.self_collision {"unqualified_discrete_self_collision"} else {"unqualified_particle_baseline"},
         "collision_settings":simulation.world.cloth(simulation.cloth)?.contact_settings().map(|s|json!({
             "thickness":s.thickness,"activation_margin":s.activation_margin,"self_collision":s.self_collision,
             "continuous_self_collision":s.continuous_self_collision,"ccd_minimum_separation":if s.continuous_self_collision {Some(s.thickness*0.9)} else {None},
             "rigid_surface_collision":s.rigid_surface_collision,"rigid_separation":if s.rigid_surface_collision {Some(s.thickness*0.5)} else {None},
+            "continuous_rigid_collision":s.continuous_rigid_collision,"rigid_ccd_minimum_separation":if s.continuous_rigid_collision {Some(s.thickness*0.45)} else {None},
             "static_friction":s.static_friction,"kinetic_friction":s.kinetic_friction,
             "limits":{"candidate_pairs":s.limits.candidate_pairs,"retained_contacts":s.limits.retained_contacts,"ccd_checks":s.limits.ccd_checks}})),
         "collision_work_max_per_substep":{"candidate_pairs":collision_work.candidate_pairs,"retained_contacts":collision_work.retained_contacts,"ccd_checks":collision_work.ccd_checks,"limited_advances":collision_work.limited_advances},
@@ -165,12 +171,10 @@ fn run(
 fn configured_world(
     config: Config,
     variant: usize,
-    self_collision: bool,
-    continuous: bool,
-    rigid_surface: bool,
+    mode: CollisionMode,
 ) -> Result<FoldingWorld, Box<dyn std::error::Error>> {
     let mut simulation = FoldingWorld::new(config, variant)?;
-    if self_collision || rigid_surface {
+    if mode.self_collision || mode.rigid_surface {
         simulation
             .world
             .cloth_mut(simulation.cloth)?
@@ -179,9 +183,10 @@ fn configured_world(
                 activation_margin: real(simulation.config.activation_margin),
                 static_friction: real(simulation.config.static_friction),
                 kinetic_friction: real(simulation.config.kinetic_friction),
-                continuous_self_collision: continuous,
-                self_collision,
-                rigid_surface_collision: rigid_surface,
+                continuous_self_collision: mode.continuous_self,
+                self_collision: mode.self_collision,
+                rigid_surface_collision: mode.rigid_surface,
+                continuous_rigid_collision: mode.continuous_rigid,
                 ..Default::default()
             }))?;
     }
@@ -192,9 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut directory = None;
     let mut repeats = 5;
     let mut verify = false;
-    let mut self_collision = false;
-    let mut continuous = false;
-    let mut rigid_surface = false;
+    let mut mode = CollisionMode::default();
     let mut config = Config::default();
     let mut fixture_version = 1;
     let mut bend_override = None;
@@ -228,11 +231,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .parse()?;
             }
             "--verify" => verify = true,
-            "--self-collision" => self_collision = true,
-            "--rigid-surface-collision" => rigid_surface = true,
+            "--self-collision" => mode.self_collision = true,
+            "--rigid-surface-collision" => mode.rigid_surface = true,
             "--continuous-self-collision" => {
-                self_collision = true;
-                continuous = true;
+                mode.self_collision = true;
+                mode.continuous_self = true;
+            }
+            "--continuous-rigid-collision" => {
+                mode.rigid_surface = true;
+                mode.continuous_rigid = true;
             }
             "--bench" => (),
             _ => return Err(format!("unknown argument {arg}").into()),
@@ -251,26 +258,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // not relabel the already-built benchmark at report-writing time.
     let source_commit = output("git", &["rev-parse", "HEAD"]);
     let source_dirty = !output("git", &["status", "--porcelain"]).is_empty();
-    let mut warmup = configured_world(
-        config.clone(),
-        variant,
-        self_collision,
-        continuous,
-        rigid_surface,
-    )?;
+    let mut warmup = configured_world(config.clone(), variant, mode)?;
     for _ in 0..120 {
         warmup.tick()?;
     }
     let mut runs = vec![];
     for _ in 0..repeats {
-        runs.push(run(
-            config.clone(),
-            variant,
-            verify,
-            self_collision,
-            continuous,
-            rigid_surface,
-        )?);
+        runs.push(run(config.clone(), variant, verify, mode)?);
     }
     let cpu = fs::read_to_string("/proc/cpuinfo")
         .ok()

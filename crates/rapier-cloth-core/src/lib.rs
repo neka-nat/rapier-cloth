@@ -25,7 +25,7 @@ pub mod solver;
 pub mod surface;
 pub use cloth::{Cloth, ClothHandle, ClothSet};
 pub use contact::{
-    Contact, ContactKey, ContactSource, ContactStage, NoContacts, SurfaceContact,
+    Contact, ContactKey, ContactMotion, ContactSource, ContactStage, NoContacts, SurfaceContact,
     SurfaceContactKey, SurfaceFeature,
 };
 pub use diagnostics::StepReport;

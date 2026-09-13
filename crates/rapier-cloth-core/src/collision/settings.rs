@@ -40,6 +40,9 @@ pub struct ClothContactSettings {
     /// Rapier bridge this replaces the legacy particle-radius collision path.
     /// Discrete only; continuous rigid motion is a separate capability.
     pub rigid_surface_collision: bool,
+    /// Ask supporting adapters to certify rigid-surface motion as well as query
+    /// contacts. Requires rigid_surface_collision; independent of self CCD.
+    pub continuous_rigid_collision: bool,
     pub static_friction: Real,
     pub kinetic_friction: Real,
     pub limits: CollisionLimits,
@@ -52,6 +55,7 @@ impl Default for ClothContactSettings {
             self_collision: true,
             continuous_self_collision: false,
             rigid_surface_collision: false,
+            continuous_rigid_collision: false,
             static_friction: 0.6,
             kinetic_friction: 0.5,
             limits: CollisionLimits::default(),
@@ -60,6 +64,11 @@ impl Default for ClothContactSettings {
 }
 impl ClothContactSettings {
     pub fn validate(&self) -> Result<(), ClothError> {
+        if self.continuous_rigid_collision && !self.rigid_surface_collision {
+            return Err(ClothError::InvalidParameter(
+                "continuous rigid collision requires surface contacts",
+            ));
+        }
         if self.continuous_self_collision && !self.self_collision {
             return Err(ClothError::InvalidParameter(
                 "continuous self-collision requires self-collision",

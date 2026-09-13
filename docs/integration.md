@@ -110,6 +110,7 @@ cloth.set_contact_settings(Some(ClothContactSettings {
     self_collision: true,
     continuous_self_collision: false,
     rigid_surface_collision: false,
+    continuous_rigid_collision: false,
     static_friction: 0.6,       // Reserved; static stick/slip is not implemented yet.
     kinetic_friction: 0.5,
     limits: CollisionLimits::default(),
@@ -186,8 +187,8 @@ Kinetic friction combines the new cloth coefficient with collider friction using
 their arithmetic mean; `friction_override` overrides both coefficients. The
 static coefficient remains reserved until static stick/slip is implemented.
 
-This adapter currently performs discrete queries. The continuous flag in the
-example applies to **self-collision only**; it does not add rigid-surface CCD.
+This configuration performs discrete rigid queries. The continuous flag in the
+example applies to **self-collision only**. Rigid CCD has a separate opt-in below.
 Kinematic sphere/box/capsule poses use the existing motion-budget contract, and
 pre-step poses are used for stabilization. Moving contact-point velocities include
 body rotation. Dynamic bodies and moving half-spaces remain unsupported.
@@ -197,8 +198,60 @@ Initial midsurface intersections deeper than the precision length tolerance
 `IntegrationError::InitialRigidIntersection`. A final separation below 90% of the
 half-thickness target returns `ClothError::UnresolvedSurfaceContact`. Contact/work
 overflow and infeasible fixed targets also fail atomically. The adapter has small
-primitive and moving-support regression tests; the complete fold, continuous
-rigid motion and CPU frame budget remain unqualified.
+primitive and moving-support regression tests; the complete fold and CPU frame
+budget remain unqualified.
+
+## Continuous rigid-surface collision
+
+Enable external motion checks independently of cloth self-collision:
+
+```rust
+cloth.set_contact_settings(Some(ClothContactSettings {
+    rigid_surface_collision: true,
+    continuous_rigid_collision: true,
+    self_collision: false,
+    ..Default::default()
+}))?;
+```
+
+Fixed half-spaces and fixed/kinematic spheres, boxes and capsules participate in
+prediction, stabilization, elastic/target/contact correction and the final sweep.
+The swept minimum is 90% of `thickness / 2`, with additional numerical clearance;
+contact projection still targets the full half-thickness. Swept contact anchors
+are transported to the ending rigid pose before solving the complete inertial
+prediction. The application still advances both worlds by exactly the same `h`.
+
+The declared continuous trajectory uses linear body center-of-mass translation
+and constant angular interpolation between the actual endpoint orientations;
+collider offsets therefore follow arcs. Rapier 0.34's serial velocity solver uses
+normalized linear quaternion increments, so its ending angle can differ from
+`angular_velocity * h`. The bridge validates that difference against the possible
+solver increment angles, including final velocity damping. Velocity-based angular
+commands reaching half a turn per external substep are rejected: endpoint
+quaternions cannot identify their path unambiguously. Reduce the application step
+and restore both worlds before retrying. The existing, normally much tighter
+kinematic motion budget also applies. These checks certify the declared path,
+not an arbitrary trajectory sharing the same endpoint poses.
+
+Keep collider geometry and its body-local pose unchanged between snapshot and
+solve. A changed shape, a moved fixed collider or inconsistent kinematic motion
+returns an error. Dynamic bodies and moving half-spaces remain unsupported;
+exclude unrelated unsupported colliders with the query filter.
+
+Initial swept gaps must exceed the minimum plus numerical clearance. Infeasible
+commands, unresolvable separation and exhausted work limits fail without committing
+cloth positions, velocities, contact history or attachment events. The primitive
+checks use at most 256 advancement iterations, charged distance queries and the
+shared collision budget. Small analytical, rotating-support, zero-friction and
+rollback tests exercise this experimental mode; they do not qualify a complete
+fold or a CPU frame budget.
+
+Custom core sources opt in through `ContactSource::continuous_motion` and implement
+`motion_fraction(ContactMotion, CollisionWork)`. Return a certified fraction in
+`[0, 1]`, charge work, and return an error if certification fails. Stabilization
+holds obstacles at their previous pose; iteration corrections hold their current
+pose. Prediction/final checks span the physical trajectory. The default methods
+preserve existing sources that only supply contact queries.
 
 ## Continuous self-collision
 
@@ -226,8 +279,8 @@ within the precision's length tolerance; infeasible commands fail atomically.
 
 This option covers cloth self-contact. The Rapier adapter uses particle contacts
 unless `rigid_surface_collision` separately enables discrete triangle contacts.
-Continuous moving/rotating rigid-shape coverage remains under development. Static
-friction, the complete folding task and its CPU budget are also not yet qualified.
+Enable `continuous_rigid_collision` as described above for bounded external checks.
+Static friction, the complete folding task and its CPU budget are not yet qualified.
 
 ## Attachments and grasping
 

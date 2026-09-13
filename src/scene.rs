@@ -35,6 +35,7 @@ pub struct SceneSnapshot {
     pub(crate) step: u64,
     pub(crate) bodies: BTreeMap<(u32, u32), Pose>,
     pub(crate) colliders: BTreeMap<(u32, u32), Pose>,
+    pub(crate) shapes: BTreeMap<(u32, u32), SharedShape>,
 }
 impl SceneSnapshot {
     pub fn capture(
@@ -60,6 +61,10 @@ impl SceneSnapshot {
                         .map_or(*c.position(), |(b, local)| b.position() * local);
                     (h.into_raw_parts(), pose)
                 })
+                .collect(),
+            shapes: colliders
+                .iter()
+                .map(|(h, c)| (h.into_raw_parts(), c.shared_shape().clone()))
                 .collect(),
         }
     }

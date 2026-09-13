@@ -9,6 +9,103 @@ use crate::{
     },
 };
 
+pub(super) struct TriangleContactQuery<'a> {
+    pub shape: &'a dyn crate::rapier::parry::shape::Shape,
+    pub collider: ColliderHandle,
+    pub body: Option<&'a RigidBody>,
+    pub pose: Pose,
+    pub output_pose: Pose,
+    pub indices: [u32; 3],
+    pub particle_count: usize,
+    pub face: u32,
+    pub points: [Vec3; 3],
+    pub stage: Option<ContactStage>,
+    pub activation: Real,
+    pub template: SurfaceContact,
+}
+impl TriangleContactQuery<'_> {
+    pub(super) fn generate(
+        &self,
+        manifold: &mut crate::rapier::parry::query::ContactManifold<(), ()>,
+        config: ClothContactSettings,
+        limit: usize,
+        excluded: &BTreeSet<(u32, (u32, u32))>,
+        out: &mut Vec<SurfaceContact>,
+        work: &mut CollisionWork,
+    ) -> Result<(), IntegrationError> {
+        let origin = self.points[0];
+        let triangle = Triangle::new(Vec3::ZERO, self.points[1] - origin, self.points[2] - origin);
+        let local_triangle = [triangle.a, triangle.b, triangle.c];
+        if closest_triangle(Vec3::ZERO, local_triangle).is_none() {
+            return Err(ClothError::DegenerateConstraint.into());
+        }
+        manifold.clear();
+        DefaultQueryDispatcher
+            .contact_manifold_convex_convex(
+                &self.pose.inv_mul(&Pose::from_translation(origin)),
+                self.shape,
+                &triangle,
+                None,
+                None,
+                self.activation,
+                manifold,
+            )
+            .map_err(|_| IntegrationError::UnsupportedCollision {
+                collider: self.collider,
+                reason: "Parry surface manifold query unsupported",
+            })?;
+        let normal = self.output_pose.rotation * manifold.local_n1;
+        for point in &manifold.points {
+            let witness = closest_triangle(point.local_p2, local_triangle)
+                .ok_or(ClothError::DegenerateConstraint)?;
+            let support =
+                SurfaceWitness::from_triangle(self.indices, self.face, witness.barycentric)?;
+            if support
+                .particles
+                .iter()
+                .zip(support.weights)
+                .all(|(&i, w)| w == 0.0 || excluded.contains(&(i, self.collider.into_raw_parts())))
+            {
+                continue;
+            }
+            let mut contact = self.template;
+            contact.key.features[0] = support.feature;
+            if let SurfaceFeature::External { feature, .. } = &mut contact.key.features[1] {
+                *feature = point.fid1.0;
+            }
+            contact.particles = [
+                support.particles[0],
+                support.particles[1],
+                support.particles[2],
+                0,
+            ];
+            contact.weights = [
+                support.weights[0],
+                support.weights[1],
+                support.weights[2],
+                0.0,
+            ];
+            contact.normal = normal;
+            contact.offset = self.output_pose.transform_point(point.local_p1);
+            contact.surface_velocity = self
+                .body
+                .filter(|b| b.is_kinematic())
+                .map_or(Vec3::ZERO, |b| b.velocity_at_point(contact.offset));
+            if let Some(stage) = self.stage {
+                check_distance(
+                    point.dist,
+                    contact.separation,
+                    stage,
+                    self.collider,
+                    support.feature,
+                )?;
+            }
+            push_contact(contact, self.particle_count, config, limit, out, work)?;
+        }
+        Ok(())
+    }
+}
+
 impl RapierContacts<'_, '_> {
     pub(super) fn generate_surface(
         &mut self,
@@ -27,6 +124,7 @@ impl RapierContacts<'_, '_> {
         }
         let separation = config.thickness * 0.5;
         let activation = separation + config.activation_margin;
+        out.extend_from_slice(&self.motion_contacts);
         let cloth_bounds = bounds(positions.iter().copied(), activation);
         self.candidate_queries += 1;
         // Previous-pose stabilization must find an obstacle even if its current
@@ -148,71 +246,28 @@ impl RapierContacts<'_, '_> {
                 }
                 work.charge(CollisionBudgetKind::CandidatePairs, 1, config.limits)?;
                 self.pair_queries += 1;
-                // Work in a translated frame for small contact gaps. The
-                // triangle changes on each query; never reuse another triangle's
-                // manifold or its contact-feature cache.
-                let origin = points[0];
-                let triangle = Triangle::new(Vec3::ZERO, points[1] - origin, points[2] - origin);
-                if closest_triangle(Vec3::ZERO, [triangle.a, triangle.b, triangle.c]).is_none() {
-                    return Err(ClothError::DegenerateConstraint.into());
+                TriangleContactQuery {
+                    shape,
+                    collider: handle,
+                    body,
+                    pose: *pose,
+                    output_pose: *pose,
+                    indices,
+                    particle_count: positions.len(),
+                    face: face as u32,
+                    points,
+                    stage: Some(stage),
+                    activation,
+                    template: contact,
                 }
-                let triangle_pose = Pose::from_translation(origin);
-                self.surface_manifold.clear();
-                DefaultQueryDispatcher
-                    .contact_manifold_convex_convex(
-                        &pose.inv_mul(&triangle_pose),
-                        shape,
-                        &triangle,
-                        None,
-                        None,
-                        activation,
-                        &mut self.surface_manifold,
-                    )
-                    .map_err(|_| IntegrationError::UnsupportedCollision {
-                        collider: handle,
-                        reason: "Parry surface manifold query unsupported",
-                    })?;
-                let normal = pose.rotation * self.surface_manifold.local_n1;
-                for point in &self.surface_manifold.points {
-                    let witness =
-                        closest_triangle(point.local_p2, [triangle.a, triangle.b, triangle.c])
-                            .ok_or(ClothError::DegenerateConstraint)?;
-                    let support =
-                        SurfaceWitness::from_triangle(indices, face as u32, witness.barycentric)?;
-                    if support
-                        .particles
-                        .iter()
-                        .zip(support.weights)
-                        .all(|(&i, w)| w == 0.0 || self.excluded_pairs.contains(&(i, raw)))
-                    {
-                        continue;
-                    }
-                    contact.key.features = [
-                        support.feature,
-                        SurfaceFeature::External {
-                            object: external,
-                            feature: point.fid1.0,
-                        },
-                    ];
-                    contact.particles = [
-                        support.particles[0],
-                        support.particles[1],
-                        support.particles[2],
-                        0,
-                    ];
-                    contact.weights = [
-                        support.weights[0],
-                        support.weights[1],
-                        support.weights[2],
-                        0.0,
-                    ];
-                    contact.normal = normal;
-                    contact.offset = pose.transform_point(point.local_p1);
-                    contact.surface_velocity =
-                        body.map_or(Vec3::ZERO, |b| b.velocity_at_point(contact.offset));
-                    check_distance(point.dist, separation, stage, handle, support.feature)?;
-                    push_contact(contact, positions.len(), config, self.limit, out, work)?;
-                }
+                .generate(
+                    &mut self.surface_manifold,
+                    config,
+                    self.limit,
+                    self.excluded_pairs,
+                    out,
+                    work,
+                )?;
             }
         }
         deduplicate(out, config, self.limit, work)?;
@@ -220,7 +275,7 @@ impl RapierContacts<'_, '_> {
     }
 }
 
-fn bounds(points: impl IntoIterator<Item = Vec3>, margin: Real) -> Aabb {
+pub(super) fn bounds(points: impl IntoIterator<Item = Vec3>, margin: Real) -> Aabb {
     let mut lo = Vec3::splat(Real::MAX);
     let mut hi = Vec3::splat(-Real::MAX);
     for p in points {
@@ -229,7 +284,7 @@ fn bounds(points: impl IntoIterator<Item = Vec3>, margin: Real) -> Aabb {
     }
     Aabb::new(lo - Vec3::splat(margin), hi + Vec3::splat(margin))
 }
-fn overlaps(a: &Aabb, b: &Aabb) -> bool {
+pub(super) fn overlaps(a: &Aabb, b: &Aabb) -> bool {
     a.mins.cmple(b.maxs).all() && b.mins.cmple(a.maxs).all()
 }
 fn check_distance(
@@ -250,7 +305,7 @@ fn check_distance(
     }
     Ok(())
 }
-fn push_contact(
+pub(super) fn push_contact(
     contact: SurfaceContact,
     particle_count: usize,
     config: ClothContactSettings,
@@ -265,7 +320,7 @@ fn push_contact(
     out.push(contact);
     Ok(())
 }
-fn deduplicate(
+pub(super) fn deduplicate(
     out: &mut Vec<SurfaceContact>,
     config: ClothContactSettings,
     limit: usize,
