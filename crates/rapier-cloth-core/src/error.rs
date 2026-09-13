@@ -15,6 +15,7 @@ pub enum ClothError {
     },
     InvalidSurfaceContact(&'static str),
     InfeasibleSurfaceContact,
+    UnresolvedContinuousCollision(&'static str),
     InitialSelfIntersection {
         triangles: [u32; 2],
     },
@@ -40,6 +41,10 @@ impl fmt::Display for ClothError {
             Self::InfeasibleSurfaceContact => {
                 write!(f, "surface contact conflicts with fixed targets")
             }
+            Self::UnresolvedContinuousCollision(reason) => write!(
+                f,
+                "continuous collision could not certify the proposed motion: {reason}"
+            ),
             Self::InitialSelfIntersection { triangles } => write!(
                 f,
                 "initial self-intersection between triangles {triangles:?}"

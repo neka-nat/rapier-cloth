@@ -46,8 +46,11 @@ self-collision can be enabled with
 `cloth.set_contact_settings(Some(ClothContactSettings::default()))?`.
 This separates nonincident vertex-face and edge-edge features using a physical
 thickness (default 1 mm). It rejects initial intersections and uses bounded,
-refitted candidate searches. It does not yet prevent continuous crossings between
-queries, provide static friction, or test entire triangles against rigid obstacles.
+refitted candidate searches. Setting `continuous_self_collision: true` also checks
+prediction, accepted constraint corrections and the final substep sweep. This
+experimental mode can return a typed failure when a safe advance cannot be found;
+it has not qualified the complete folding task or its real-time performance.
+Static friction and entire-triangle contacts against rigid obstacles are not implemented.
 Tearing is not implemented. Material compliance describes discrete constraints and requires
 tuning with the chosen grid, time step and iteration count.
 

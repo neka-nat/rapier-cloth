@@ -32,6 +32,10 @@ pub struct ClothContactSettings {
     /// Candidate activation distance in addition to physical separation.
     pub activation_margin: Real,
     pub self_collision: bool,
+    /// Bound every accepted self-contact motion, including solver corrections.
+    /// Experimental; rigid surface CCD is separate. Uses 90% of full thickness
+    /// as the minimum swept separation while projections target full thickness.
+    pub continuous_self_collision: bool,
     pub static_friction: Real,
     pub kinetic_friction: Real,
     pub limits: CollisionLimits,
@@ -42,6 +46,7 @@ impl Default for ClothContactSettings {
             thickness: 0.001,
             activation_margin: 0.0001,
             self_collision: true,
+            continuous_self_collision: false,
             static_friction: 0.6,
             kinetic_friction: 0.5,
             limits: CollisionLimits::default(),
@@ -50,6 +55,11 @@ impl Default for ClothContactSettings {
 }
 impl ClothContactSettings {
     pub fn validate(&self) -> Result<(), ClothError> {
+        if self.continuous_self_collision && !self.self_collision {
+            return Err(ClothError::InvalidParameter(
+                "continuous self-collision requires self-collision",
+            ));
+        }
         if !self.thickness.is_finite()
             || self.thickness <= 0.0
             || !self.activation_margin.is_finite()
@@ -81,6 +91,8 @@ pub struct CollisionWork {
     pub candidate_pairs: usize,
     pub retained_contacts: usize,
     pub ccd_checks: usize,
+    /// Number of motion checks that requested a displacement reduction.
+    pub limited_advances: usize,
 }
 impl CollisionWork {
     pub(crate) fn charge(

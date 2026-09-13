@@ -41,8 +41,9 @@ path with the frozen dual-gripper trajectory:
 cargo bench --locked --bench folding -- --self-collision --repeats 1 --output target/folding/discrete-01
 ```
 
-This is a diagnostic, not a qualified folding example: continuous collision,
-static friction and rigid triangle-surface contacts are still missing. The report
+This is a diagnostic, not a qualified folding example: static friction and rigid
+triangle-surface contacts are still missing. Replace `--self-collision` with
+`--continuous-self-collision` to exercise the experimental self-CCD path. The report
 records partial failures, exact collision settings, per-substep work high-water
 marks, geometry errors and four-substep timings. `--verify` enables an expensive
 independent geometry audit between timed substeps; run that separately from

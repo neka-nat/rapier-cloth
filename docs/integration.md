@@ -108,6 +108,7 @@ cloth.set_contact_settings(Some(ClothContactSettings {
     thickness: 0.001,           // Full physical thickness in metres.
     activation_margin: 0.0001,  // Extra candidate range, not extra thickness.
     self_collision: true,
+    continuous_self_collision: false,
     static_friction: 0.6,       // Reserved; static stick/slip is not implemented yet.
     kinetic_friction: 0.5,
     limits: CollisionLimits::default(),
@@ -146,6 +147,35 @@ with up to four particles and stable, unique `SurfaceContactKey` values. The
 existing particle-contact callback remains available. Invalid geometry, unresolved
 initial self-intersections and infeasible all-fixed surface contacts return errors
 without committing the cloth state.
+
+### Continuous self-collision
+
+Set `continuous_self_collision: true` together with `self_collision: true` to
+enable experimental continuous checks. The core bounds linear motion during
+prediction, stabilization, elastic/target projection and both contact projection
+paths. Internal trial corrections form batches; each accepted batch and the final
+substep's linear endpoint sweep are checked. No additional physical time steps are
+hidden inside this procedure.
+
+Sweeps retain at least 90% of physical thickness, while contact constraints target
+the full thickness. Thus a 1 mm cloth uses a 0.9 mm minimum swept separation.
+Initial geometry must have a resolvable gap above the swept minimum wherever
+advancement is needed. Conservative advancement uses a 10% clearance reserve,
+a 256-distance-evaluation limit per query and the configured cumulative CCD budget.
+Numerical clearance and convergence failures return `UnresolvedContinuousCollision`;
+budget exhaustion returns `CollisionBudgetExceeded`. Neither commits the cloth.
+
+Prediction uses swept witnesses to solve contacts against the full inertial
+prediction, preserving tangential motion at zero friction and normal support for
+kinetic friction. Elastic/contact trial corrections can be shortened together with
+their multiplier increments. Hard target commands are still required to be reached
+within the precision's length tolerance; infeasible commands fail atomically.
+`surface_collision.limited_advances` counts motion checks requesting a reduction.
+
+This option covers cloth self-contact. The Rapier adapter still uses its particle
+collision path for rigid obstacles; complete triangle-surface and moving/rotating
+rigid-shape coverage remain under development. Static friction, the complete
+folding task and its CPU budget are also not yet qualified.
 
 ## Attachments and grasping
 

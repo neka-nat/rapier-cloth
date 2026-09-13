@@ -1,5 +1,6 @@
 use super::{
     broad_phase::{Aabb, Hierarchy},
+    ccd::{CcdFeature, conservative_advance},
     geometry::{closest_segments, closest_triangle, triangles_intersect},
     settings::*,
 };
@@ -102,6 +103,23 @@ fn contact(
     positions: &[Vec3],
     settings: ClothContactSettings,
 ) -> Result<Option<SurfaceContact>, ClothError> {
+    feature_contact(
+        a,
+        b,
+        |i| previous[i as usize],
+        |i| positions[i as usize],
+        settings,
+        true,
+    )
+}
+fn feature_contact(
+    a: Witness,
+    b: Witness,
+    previous: impl Fn(u32) -> Vec3,
+    position: impl Fn(u32) -> Vec3,
+    settings: ClothContactSettings,
+    activation_only: bool,
+) -> Result<Option<SurfaceContact>, ClothError> {
     let mut entries = [(0u32, 0.0); 4];
     let mut count = 0;
     for (w, sign) in [(a, 1.0), (b, -1.0)] {
@@ -140,12 +158,18 @@ fn contact(
         static_friction: settings.static_friction,
         kinetic_friction: settings.kinetic_friction,
     };
-    let delta = c.relative(positions);
+    let delta = entries[..count]
+        .iter()
+        .map(|&(i, w)| position(i) * w)
+        .sum::<Vec3>();
     let distance = delta.length();
-    if distance > settings.thickness + settings.activation_margin {
+    if activation_only && distance > settings.thickness + settings.activation_margin {
         return Ok(None);
     }
-    let old_delta = c.relative(previous);
+    let old_delta = entries[..count]
+        .iter()
+        .map(|&(i, w)| previous(i) * w)
+        .sum::<Vec3>();
     c.normal = if distance > settings.thickness * 1.0e-6 {
         let n = delta / distance;
         if old_delta.dot(n) < -settings.thickness * 1.0e-6 {
@@ -161,6 +185,40 @@ fn contact(
             ))?
     };
     Ok(Some(c))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn swept_contact(
+    feature: CcdFeature,
+    ids: [u32; 4],
+    face: u32,
+    start: &[Vec3],
+    end: &[Vec3],
+    fraction: Real,
+    settings: ClothContactSettings,
+) -> Result<SurfaceContact, ClothError> {
+    let at = |i: u32| start[i as usize] + (end[i as usize] - start[i as usize]) * fraction;
+    let p = ids.map(at);
+    let (a, b) = match feature {
+        CcdFeature::VertexFace => {
+            let witness = closest_triangle(p[0], [p[1], p[2], p[3]])
+                .ok_or(ClothError::DegenerateConstraint)?;
+            (
+                Witness::vertex(ids[0]),
+                Witness::triangle([ids[1], ids[2], ids[3]], face, witness.barycentric),
+            )
+        }
+        CcdFeature::EdgeEdge => {
+            let witness = closest_segments([p[0], p[1]], [p[2], p[3]])
+                .ok_or(ClothError::DegenerateConstraint)?;
+            (
+                Witness::edge([ids[0], ids[1]], witness.parameters[0]),
+                Witness::edge([ids[2], ids[3]], witness.parameters[1]),
+            )
+        }
+    };
+    feature_contact(a, b, |i| start[i as usize], at, settings, false)?
+        .ok_or(ClothError::InvalidSurfaceContact("incident swept feature"))
 }
 
 fn retain_contact(
@@ -196,6 +254,7 @@ pub(crate) struct SelfCollision {
     stack: Vec<usize>,
     candidates: Vec<usize>,
     generated: Vec<SurfaceContact>,
+    motion_contacts: Vec<SurfaceContact>,
     initial_checked: bool,
 }
 impl SelfCollision {
@@ -213,6 +272,7 @@ impl SelfCollision {
             stack: vec![],
             candidates: vec![],
             generated: vec![],
+            motion_contacts: vec![],
             initial_checked: false,
         }
     }
@@ -224,6 +284,7 @@ impl SelfCollision {
         self.settings = settings;
         self.work = CollisionWork::default();
         self.initial_checked = false;
+        self.motion_contacts.clear();
     }
     fn refit(&mut self, positions: &[Vec3]) -> Result<(), ClothError> {
         self.triangle_bounds.clear();
@@ -247,6 +308,157 @@ impl SelfCollision {
             .edges
             .refit(&self.edge_bounds, &mut self.edge_nodes)?;
         Ok(())
+    }
+
+    /// All vertices follow the same linear fraction during this motion batch.
+    /// Swept boxes enclose both endpoints of every primitive; no static query
+    /// from before the projection is reused as a swept candidate envelope.
+    pub fn motion_fraction(&mut self, start: &[Vec3], end: &[Vec3]) -> Result<Real, ClothError> {
+        self.motion_contacts.clear();
+        if start.len() != self.mesh.rest_positions().len()
+            || end.len() != start.len()
+            || start.iter().chain(end).any(|p| !p.is_finite())
+        {
+            return Err(ClothError::NonFiniteState);
+        }
+        // Common translation preserves relative geometry. Compare local
+        // endpoint positions, avoiding cancellation of large displacements.
+        if start
+            .iter()
+            .zip(end)
+            .all(|(a, b)| *a - start[0] == *b - end[0])
+        {
+            return Ok(1.0);
+        }
+        let separation = self.settings.thickness * 0.9;
+        self.triangle_bounds.clear();
+        self.edge_bounds.clear();
+        self.triangle_bounds.extend(
+            self.mesh.triangles().iter().map(|t| {
+                Aabb::points(t.iter().flat_map(|&i| [start[i as usize], end[i as usize]]))
+            }),
+        );
+        self.edge_bounds.extend(self.mesh.edges().iter().map(|e| {
+            Aabb::points(
+                e.vertices
+                    .iter()
+                    .flat_map(|&i| [start[i as usize], end[i as usize]]),
+            )
+        }));
+        self.topology
+            .triangles
+            .refit(&self.triangle_bounds, &mut self.triangle_nodes)?;
+        self.topology
+            .edges
+            .refit(&self.edge_bounds, &mut self.edge_nodes)?;
+        let mut fraction: Real = 1.0;
+        for vertex in 0..start.len() {
+            self.topology.triangles.query(
+                Aabb::points([start[vertex], end[vertex]]).expanded(separation),
+                0,
+                &self.triangle_bounds,
+                &self.triangle_nodes,
+                &mut self.stack,
+                &mut self.candidates,
+                &mut self.work,
+                self.settings.limits,
+            )?;
+            for &face in &self.candidates {
+                let triangle = self.mesh.triangles()[face];
+                if triangle.contains(&(vertex as u32)) {
+                    continue;
+                }
+                let ids = [
+                    vertex,
+                    triangle[0] as usize,
+                    triangle[1] as usize,
+                    triangle[2] as usize,
+                ];
+                let next = conservative_advance(
+                    CcdFeature::VertexFace,
+                    ids.map(|i| start[i]),
+                    ids.map(|i| end[i]),
+                    separation,
+                    &mut self.work,
+                    self.settings.limits,
+                )?;
+                fraction = fraction.min(next.fraction());
+                if next.fraction() < 1.0 {
+                    let c = swept_contact(
+                        CcdFeature::VertexFace,
+                        ids.map(|i| i as u32),
+                        face as u32,
+                        start,
+                        end,
+                        next.fraction(),
+                        self.settings,
+                    )?;
+                    retain_contact(
+                        &mut self.motion_contacts,
+                        c,
+                        &mut self.work,
+                        self.settings.limits,
+                    )?;
+                }
+            }
+        }
+        for a in 0..self.mesh.edges().len() {
+            self.topology.edges.query(
+                self.edge_bounds[a].expanded(separation),
+                a + 1,
+                &self.edge_bounds,
+                &self.edge_nodes,
+                &mut self.stack,
+                &mut self.candidates,
+                &mut self.work,
+                self.settings.limits,
+            )?;
+            let ea = self.mesh.edges()[a].vertices;
+            for &b in &self.candidates {
+                let eb = self.mesh.edges()[b].vertices;
+                if ea.iter().any(|v| eb.contains(v)) {
+                    continue;
+                }
+                let ids = [ea[0], ea[1], eb[0], eb[1]].map(|i| i as usize);
+                let next = conservative_advance(
+                    CcdFeature::EdgeEdge,
+                    ids.map(|i| start[i]),
+                    ids.map(|i| end[i]),
+                    separation,
+                    &mut self.work,
+                    self.settings.limits,
+                )?;
+                fraction = fraction.min(next.fraction());
+                if next.fraction() < 1.0 {
+                    let c = swept_contact(
+                        CcdFeature::EdgeEdge,
+                        ids.map(|i| i as u32),
+                        0,
+                        start,
+                        end,
+                        next.fraction(),
+                        self.settings,
+                    )?;
+                    retain_contact(
+                        &mut self.motion_contacts,
+                        c,
+                        &mut self.work,
+                        self.settings.limits,
+                    )?;
+                }
+            }
+        }
+        if fraction < 1.0 {
+            self.work.limited_advances += 1;
+        }
+        self.motion_contacts.sort_by_key(|c| c.key);
+        self.motion_contacts.dedup_by_key(|c| c.key);
+        self.work.charge(
+            CollisionBudgetKind::RetainedContacts,
+            self.motion_contacts.len(),
+            self.settings.limits,
+        )?;
+        Ok(fraction)
     }
     fn validate_initial(&mut self, positions: &[Vec3]) -> Result<(), ClothError> {
         for a in 0..self.mesh.triangles().len() {
@@ -286,12 +498,16 @@ impl SelfCollision {
         previous: &[Vec3],
         positions: &[Vec3],
         out: &mut Vec<SurfaceContact>,
+        include_motion_contacts: bool,
     ) -> Result<(), ClothError> {
         self.refit(positions)?;
         if !self.initial_checked {
             self.validate_initial(positions)?;
         }
         self.generated.clear();
+        if include_motion_contacts {
+            self.generated.extend_from_slice(&self.motion_contacts);
+        }
         let activation = self.settings.thickness + self.settings.activation_margin;
         for (vertex, &p) in positions.iter().enumerate() {
             self.topology.triangles.query(
@@ -374,7 +590,8 @@ impl SelfCollision {
             + self.edge_nodes.capacity())
             * std::mem::size_of::<Aabb>()
             + (self.stack.capacity() + self.candidates.capacity()) * std::mem::size_of::<usize>()
-            + self.generated.capacity() * std::mem::size_of::<SurfaceContact>()
+            + (self.generated.capacity() + self.motion_contacts.capacity())
+                * std::mem::size_of::<SurfaceContact>()
     }
 }
 
@@ -397,7 +614,7 @@ mod tests {
         assert!(Arc::ptr_eq(&engine.topology, mesh.collision_topology()));
         let mut contacts = vec![];
         engine
-            .generate(&positions, &positions, &mut contacts)
+            .generate(&positions, &positions, &mut contacts, false)
             .unwrap();
         assert!(contacts.windows(2).all(|pair| pair[0].key < pair[1].key));
         for i in 0..4 {

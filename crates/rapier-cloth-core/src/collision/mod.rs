@@ -1,5 +1,6 @@
 //! Surface contact geometry, independent of any rigid-body engine.
 mod broad_phase;
+pub mod ccd;
 pub mod geometry;
 pub(crate) mod self_collision;
 mod settings;

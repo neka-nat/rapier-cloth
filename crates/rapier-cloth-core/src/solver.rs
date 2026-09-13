@@ -87,6 +87,11 @@ pub struct Solver {
     self_collision: Option<SelfCollision>,
     contact_settings: Option<ClothContactSettings>,
     surface_high_water: usize,
+    motion_start: Vec<Vec3>,
+    motion_trial: Vec<Vec3>,
+    motion_distance_lambda: Vec<Real>,
+    motion_bend_lambda: Vec<Real>,
+    motion_target_lambda: Vec<Vec3>,
 }
 
 impl Solver {
@@ -180,6 +185,7 @@ impl Solver {
                 ContactStage::Stabilization,
                 settings,
             )?;
+            self.capture_motion();
             let mut corrected = false;
             for c in &self.contacts {
                 let i = c.key.particle as usize;
@@ -199,11 +205,13 @@ impl Solver {
                     corrected = true;
                 }
             }
+            self.accept_motion()?;
             if !corrected {
                 break;
             }
         }
         self.reference.copy_from_slice(&self.positions);
+        self.capture_motion();
         let damp = (-cloth.material.damping * h).exp();
         for i in 0..self.positions.len() {
             self.velocities[i] = (cloth.velocities[i]
@@ -223,12 +231,17 @@ impl Solver {
         self.bend_lambda.fill(0.0);
         self.target_lambda.resize(targets.len(), Vec3::ZERO);
         self.target_lambda.fill(Vec3::ZERO);
-        self.query(source, None, radius, ContactStage::Prediction, settings)?;
-        self.project_contacts(radius, settings.max_contacts)?;
-        self.project_surface_contacts(h, settings.max_contacts)?;
+        self.solve_prediction_contacts(source, radius, h, settings)?;
         let stretch_alpha = cloth.material.stretch_compliance / (h * h);
         let bend_alpha = cloth.material.bend_compliance / (h * h);
         for _ in 0..settings.iterations {
+            self.capture_motion();
+            if self.continuous_self_collision() {
+                self.motion_distance_lambda
+                    .clone_from(&self.distance_lambda);
+                self.motion_bend_lambda.clone_from(&self.bend_lambda);
+                self.motion_target_lambda.clone_from(&self.target_lambda);
+            }
             for (i, e) in cloth.mesh.edges().iter().enumerate() {
                 if !distance::project(
                     &mut self.positions,
@@ -273,9 +286,45 @@ impl Solver {
                 self.target_lambda[j] += dl;
                 self.positions[i] += dl * self.weights[i];
             }
+            let fraction = self.accept_motion()?;
+            if fraction < 1.0 {
+                for (value, &before) in self
+                    .distance_lambda
+                    .iter_mut()
+                    .zip(&self.motion_distance_lambda)
+                {
+                    *value = before + (*value - before) * fraction;
+                }
+                for (value, &before) in self.bend_lambda.iter_mut().zip(&self.motion_bend_lambda) {
+                    *value = before + (*value - before) * fraction;
+                }
+                for (value, &before) in self
+                    .target_lambda
+                    .iter_mut()
+                    .zip(&self.motion_target_lambda)
+                {
+                    *value = before + (*value - before) * fraction;
+                }
+            }
             self.query(source, None, radius, ContactStage::Iteration, settings)?;
+            self.capture_motion();
             self.project_contacts(radius, settings.max_contacts)?;
             self.project_surface_contacts(h, settings.max_contacts)?;
+            self.accept_contact_motion()?;
+        }
+        // Also certify the observable substep's linear endpoint sweep, rather
+        // than relying only on the piecewise path of accepted solver batches.
+        if self.continuous_self_collision()
+            && self
+                .self_collision
+                .as_mut()
+                .unwrap()
+                .motion_fraction(&cloth.positions, &self.positions)?
+                < 1.0
+        {
+            return Err(ClothError::UnresolvedContinuousCollision(
+                "final substep sweep is not clear",
+            ));
         }
         for i in 0..self.positions.len() {
             if self.weights[i] == 0.0 {
@@ -393,9 +442,14 @@ impl Solver {
                 .max(angle_difference(angle, hinge.rest_angle).abs());
         }
         for t in &targets {
-            report.max_target_error = report
-                .max_target_error
-                .max(self.positions[t.particle as usize].distance(t.position));
+            let error = self.positions[t.particle as usize].distance(t.position);
+            if self.continuous_self_collision()
+                && t.compliance == 0.0
+                && error > crate::math::LENGTH_EPSILON
+            {
+                return Err(ClothError::ConflictingTarget(t.particle));
+            }
+            report.max_target_error = report.max_target_error.max(error);
         }
         for &[a, b, c] in cloth.mesh.triangles() {
             if (self.positions[b as usize] - self.positions[a as usize])
@@ -421,11 +475,16 @@ impl Solver {
             + self.prediction.capacity()
             + self.reference.capacity()
             + self.velocities.capacity()
+            + self.motion_start.capacity()
+            + self.motion_trial.capacity()
+            + self.motion_target_lambda.capacity()
             + self.target_lambda.capacity())
             * std::mem::size_of::<Vec3>()
             + (self.weights.capacity()
                 + self.distance_lambda.capacity()
                 + self.bend_lambda.capacity()
+                + self.motion_distance_lambda.capacity()
+                + self.motion_bend_lambda.capacity()
                 + self.stretches.capacity())
                 * std::mem::size_of::<Real>()
             + self.contacts.capacity() * std::mem::size_of::<Contact>()
@@ -453,6 +512,136 @@ impl Solver {
         std::mem::swap(&mut cloth.velocities, &mut self.velocities);
         std::mem::swap(&mut cloth.contact_history, &mut self.surface_states);
         Ok(report)
+    }
+
+    fn continuous_self_collision(&self) -> bool {
+        self.contact_settings
+            .is_some_and(|s| s.continuous_self_collision)
+    }
+    fn solve_prediction_contacts(
+        &mut self,
+        source: &mut impl ContactSource,
+        radius: Real,
+        h: Real,
+        settings: &SolverSettings,
+    ) -> Result<(), ClothError> {
+        if !self.continuous_self_collision() {
+            self.query(source, None, radius, ContactStage::Prediction, settings)?;
+            self.project_contacts(radius, settings.max_contacts)?;
+            return self.project_surface_contacts(h, settings.max_contacts);
+        }
+        // CCD supplies contact witnesses at an intermediate safe query pose.
+        // Solve those contacts against the full inertial prediction. Scaling the
+        // inertial displacement itself would damp tangential motion even with
+        // zero friction, and lose part of the normal support impulse.
+        for _ in 0..settings.iterations {
+            self.motion_trial.clone_from(&self.positions);
+            let fraction = self
+                .self_collision
+                .as_mut()
+                .unwrap()
+                .motion_fraction(&self.motion_start, &self.positions)?;
+            if fraction < 1.0 {
+                for (p, &start) in self.positions.iter_mut().zip(&self.motion_start) {
+                    *p = start + (*p - start) * fraction;
+                }
+            }
+            self.query(source, None, radius, ContactStage::Prediction, settings)?;
+            self.positions.copy_from_slice(&self.motion_trial);
+            self.project_contacts(radius, settings.max_contacts)?;
+            self.project_surface_contacts(h, settings.max_contacts)?;
+            if self
+                .self_collision
+                .as_mut()
+                .unwrap()
+                .motion_fraction(&self.motion_start, &self.positions)?
+                == 1.0
+            {
+                return Ok(());
+            }
+        }
+        Err(ClothError::UnresolvedContinuousCollision(
+            "prediction contact solve did not converge",
+        ))
+    }
+    fn capture_motion(&mut self) {
+        if self.continuous_self_collision() {
+            self.motion_start.clone_from(&self.positions);
+        }
+    }
+    /// A projection batch is a trial pose until its linear motion from the
+    /// previous accepted pose is bounded. This includes stabilization,
+    /// prediction/targets, elastic constraints and contact corrections.
+    fn accept_motion(&mut self) -> Result<Real, ClothError> {
+        if !self.continuous_self_collision() {
+            return Ok(1.0);
+        }
+        let collision = self.self_collision.as_mut().unwrap();
+        let mut total: Real = 1.0;
+        for _ in 0..4 {
+            let fraction = collision.motion_fraction(&self.motion_start, &self.positions)?;
+            if fraction == 1.0 {
+                return Ok(total);
+            }
+            if fraction <= 0.0 {
+                return Err(ClothError::UnresolvedContinuousCollision(
+                    "motion batch made no progress",
+                ));
+            }
+            for (position, &start) in self.positions.iter_mut().zip(&self.motion_start) {
+                *position = start + (*position - start) * fraction;
+            }
+            total *= fraction;
+            // Recheck the actual rounded endpoint before accepting it. World
+            // coordinate interpolation can round differently from local CCD.
+        }
+        Err(ClothError::UnresolvedContinuousCollision(
+            "rounded endpoint could not be certified",
+        ))
+    }
+    fn accept_contact_motion(&mut self) -> Result<(), ClothError> {
+        let fraction = self.accept_motion()?;
+        if fraction == 1.0 {
+            return Ok(());
+        }
+        // After the sorted-state swaps, the next_* arrays still contain the
+        // old states. Scale only this batch's multipliers, matching its accepted
+        // displacement, so clipped trials cannot inflate frictional support.
+        let mut old = self.next_contact_states.iter().peekable();
+        for state in &mut self.contact_states {
+            while old
+                .peek()
+                .is_some_and(|s| s.contact.key < state.contact.key)
+            {
+                old.next();
+            }
+            let base = old
+                .peek()
+                .filter(|s| {
+                    s.contact.key == state.contact.key
+                        && s.contact.normal.dot(state.contact.normal) >= 0.9
+                })
+                .map_or(0.0, |s| s.lambda);
+            state.lambda = base + (state.lambda - base) * fraction;
+        }
+        let mut old = self.next_surface_states.iter().peekable();
+        for state in &mut self.surface_states {
+            while old
+                .peek()
+                .is_some_and(|s| s.contact.key < state.contact.key)
+            {
+                old.next();
+            }
+            let base = old
+                .peek()
+                .filter(|s| {
+                    s.contact.key == state.contact.key
+                        && s.contact.normal.dot(state.contact.normal) >= 0.9
+                })
+                .map_or(0.0, |s| s.normal_lambda);
+            state.normal_lambda = base + (state.normal_lambda - base) * fraction;
+        }
+        Ok(())
     }
 
     fn query(
@@ -486,6 +675,10 @@ impl Solver {
                 previous.unwrap_or(&self.reference),
                 &self.positions,
                 &mut self.surface_contacts,
+                stage == ContactStage::Prediction
+                    && self
+                        .contact_settings
+                        .is_some_and(|s| s.continuous_self_collision),
             )?;
         }
         Self::check_surface_capacity(

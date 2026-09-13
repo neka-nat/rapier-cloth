@@ -33,8 +33,9 @@ fn run(
     variant: usize,
     verify: bool,
     self_collision: bool,
+    continuous: bool,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let mut simulation = configured_world(config, variant, self_collision)?;
+    let mut simulation = configured_world(config, variant, self_collision, continuous)?;
     let rest: Vec<_> = simulation
         .world
         .cloth(simulation.cloth)?
@@ -87,6 +88,9 @@ fn run(
                 collision_work.ccd_checks = collision_work
                     .ccd_checks
                     .max(r.surface_collision.ccd_checks);
+                collision_work.limited_advances = collision_work
+                    .limited_advances
+                    .max(r.surface_collision.limited_advances);
             }
             Err(e) => {
                 error = Some(e.to_string());
@@ -137,12 +141,13 @@ fn run(
         .map(|p| (simulation.config.thickness * 0.5 - p[1]).max(0.0))
         .fold(0.0, f64::max);
     Ok(json!({
-        "status":if self_collision {"unqualified_discrete_self_collision"} else {"unqualified_particle_baseline"},
+        "status":if continuous {"unqualified_continuous_self_collision"} else if self_collision {"unqualified_discrete_self_collision"} else {"unqualified_particle_baseline"},
         "collision_settings":simulation.world.cloth(simulation.cloth)?.contact_settings().map(|s|json!({
             "thickness":s.thickness,"activation_margin":s.activation_margin,"self_collision":s.self_collision,
+            "continuous_self_collision":s.continuous_self_collision,"ccd_minimum_separation":if s.continuous_self_collision {Some(s.thickness*0.9)} else {None},
             "static_friction":s.static_friction,"kinetic_friction":s.kinetic_friction,
             "limits":{"candidate_pairs":s.limits.candidate_pairs,"retained_contacts":s.limits.retained_contacts,"ccd_checks":s.limits.ccd_checks}})),
-        "collision_work_max_per_substep":{"candidate_pairs":collision_work.candidate_pairs,"retained_contacts":collision_work.retained_contacts,"ccd_checks":collision_work.ccd_checks},
+        "collision_work_max_per_substep":{"candidate_pairs":collision_work.candidate_pairs,"retained_contacts":collision_work.retained_contacts,"ccd_checks":collision_work.ccd_checks,"limited_advances":collision_work.limited_advances},
         "config":simulation.config,"variant":simulation.variant,
         "steps":simulation.step,"failure":error,"failure_next_step":error.as_ref().map(|_|simulation.step+1),
         "physics_frame":timing(frames),"physics_phases":frame_by_phase.into_iter().map(|(k,v)|(k,timing(v))).collect::<std::collections::BTreeMap<_,_>>(),
@@ -158,6 +163,7 @@ fn configured_world(
     config: Config,
     variant: usize,
     self_collision: bool,
+    continuous: bool,
 ) -> Result<FoldingWorld, Box<dyn std::error::Error>> {
     let mut simulation = FoldingWorld::new(config, variant)?;
     if self_collision {
@@ -169,6 +175,7 @@ fn configured_world(
                 activation_margin: real(simulation.config.activation_margin),
                 static_friction: real(simulation.config.static_friction),
                 kinetic_friction: real(simulation.config.kinetic_friction),
+                continuous_self_collision: continuous,
                 ..Default::default()
             }))?;
     }
@@ -180,6 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut repeats = 5;
     let mut verify = false;
     let mut self_collision = false;
+    let mut continuous = false;
     let mut config = Config::default();
     let mut variant = 0;
     while let Some(arg) = args.next() {
@@ -205,6 +213,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--verify" => verify = true,
             "--self-collision" => self_collision = true,
+            "--continuous-self-collision" => {
+                self_collision = true;
+                continuous = true;
+            }
             "--bench" => (),
             _ => return Err(format!("unknown argument {arg}").into()),
         }
@@ -212,13 +224,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if repeats == 0 || repeats > 100 {
         return Err("repeats must be in 1..=100".into());
     }
-    let mut warmup = configured_world(config.clone(), variant, self_collision)?;
+    // Capture source identity before a long run, so later workspace edits do
+    // not relabel the already-built benchmark at report-writing time.
+    let source_commit = output("git", &["rev-parse", "HEAD"]);
+    let source_dirty = !output("git", &["status", "--porcelain"]).is_empty();
+    let mut warmup = configured_world(config.clone(), variant, self_collision, continuous)?;
     for _ in 0..120 {
         warmup.tick()?;
     }
     let mut runs = vec![];
     for _ in 0..repeats {
-        runs.push(run(config.clone(), variant, verify, self_collision)?);
+        runs.push(run(
+            config.clone(),
+            variant,
+            verify,
+            self_collision,
+            continuous,
+        )?);
     }
     let cpu = fs::read_to_string("/proc/cpuinfo")
         .ok()
@@ -231,8 +253,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| output("sysctl", &["-n", "machdep.cpu.brand_string"]));
     let precision = if cfg!(feature = "f64") { "f64" } else { "f32" };
     let result = json!({"schema_version":1,"fixture_version":config.version,"precision":precision,"cpu":cpu,
-        "os":output("uname",&["-a"]),"rust":output("rustc",&["--version"]),"commit":output("git",&["rev-parse","HEAD"]),
-        "dirty":!output("git",&["status","--porcelain"]).is_empty(),"substeps_per_frame":4,"warmup_substeps":120,
+        "os":output("uname",&["-a"]),"rust":output("rustc",&["--version"]),"commit":source_commit,
+        "dirty":source_dirty,"substeps_per_frame":4,"warmup_substeps":120,
         "scope":"Rapier, snapshots, task transitions and cloth; excludes oracle, task metrics, rendering and output",
         "runs":runs});
     if let Some(directory) = directory {

@@ -30,7 +30,7 @@ The project does not promise bitwise determinism across CPUs or precisions.
 | Fixed obstacles | Spheres, boxes, capsules, half-spaces | Arbitrary triangle meshes and compound shapes |
 | Moving obstacles | Kinematic spheres, boxes and capsules within the motion budget | Dynamic obstacle contacts and unrestricted fast motion |
 | Coupling | One-way obstacle-to-cloth interaction | Cloth reaction forces on dynamic rigid bodies |
-| Cloth collision | Particle contacts, static particle sweeps and opt-in discrete self-contact | Cloth-to-cloth collision and edge/face CCD |
+| Cloth collision | Particle contacts, static particle sweeps and opt-in self-contact with optional continuous checks | Cloth-to-cloth collision and whole-triangle rigid-obstacle contacts/CCD |
 | Grasping | Pins and body-local attachment targets | Grasping based only on static friction |
 | Recovery | In-memory checkpoint of one cloth world | Public serialized checkpoints or automatic Rapier rollback |
 
@@ -40,8 +40,11 @@ particle collision does not test entire triangle interiors. Discrete self-contac
 checks nonincident vertex-face and edge-edge proximity, with a physical thickness
 independent of particle radius. It refreshes bounds after constraint iterations,
 rejects preexisting intersections and fails on exhausted work/contact limits.
-Fast motion or constraint corrections can still cross between queries; this mode
-does not yet qualify robotic folding or continuous non-penetration.
+Fast motion or constraint corrections can still cross between discrete queries.
+The additional `continuous_self_collision` option bounds accepted self-motion
+and the final linear substep sweep, with explicit convergence/work failures.
+This experimental path does not yet qualify the complete robotic folding task,
+continuous rigid-surface contact, or real-time performance.
 
 Inconsistent winding, non-manifold edges, isolated vertices and zero-area triangles
 are rejected. Compliance values depend on the discrete setup; evaluate strain and
