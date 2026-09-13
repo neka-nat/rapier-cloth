@@ -46,7 +46,7 @@ Generated from the canonical 16×16 fixture described in [examples](examples.ja.
 
 ## CPU real-time performance update — 2026-09-13
 
-[PR #2](https://github.com/neka-nat/rapier-cloth/pull/2) targets one 32×32 cloth at h=1/240s, four substeps/frame and eight iterations on CPU. The solver and bridge retain the original accuracy and failure gates. Closed-form bend gradients and sorted contact-state/sweep merges reduce the dominant costs. [Method, raw measurements and limitations](benchmarks.ja.md#32×321枚cpu60fpsへの改善) document three runs per precision and fixture, using clean pre-optimization `a603f02` and optimized `5d9ac1e` sources.
+[PR #2](https://github.com/neka-nat/rapier-cloth/pull/2) targets one 32×32 cloth at h=1/240s, four substeps/frame and eight iterations on CPU. The solver and bridge retain the original accuracy and failure gates. Closed-form bend gradients and sorted contact-state/sweep merges reduce the dominant costs. [Method, raw measurements and limitations](benchmarks.ja.md#realtime-cpu) document three runs per precision and fixture, using clean pre-optimization `a603f02` and optimized `5d9ac1e` sources.
 
 The local f32 physics-frame p95 stayed below 16.67ms in all nine measured cases (three fixtures × three runs); individual outliers are retained. f64 moving-sphere p95 exceeded that budget in two runs. Rendering, GPU uploads and normal updates are not measured. This establishes the scoped CPU physics result, not application-wide or browser rendering throughput.
 

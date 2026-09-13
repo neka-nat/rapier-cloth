@@ -40,6 +40,8 @@ Rapierの剛体step、記録JSON生成、描画はtotalに含まない。p50/p95
 
 生データ: [f32 JSON](evidence/cloth-scaling-f32.json) / [f64 JSON](evidence/cloth-scaling-f64.json) / [f32 CSV](evidence/cloth-scaling-f32.csv) / [f64 CSV](evidence/cloth-scaling-f64.csv)。各ファイルに誤差、接触数、配列容量と生成条件を含める。
 
+<a id="realtime-cpu"></a>
+
 ## 32×32・1枚・CPU・60fpsへの改善
 
 目標は1frameにつきh=1/240秒を4回、8反復、標準f32。曲げ拘束の解析勾配を簡潔な式にし、通常の角度差から不要な三角関数を除いた。接触状態とstatic sweepの保持は、木構造での検索・挿入から整列済み配列の線形マージへ変更。最大伸びとp95伸びは全ソートを使わず同じ定義で計算し、最終曲げ診断では勾配を生成しない。

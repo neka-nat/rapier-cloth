@@ -57,7 +57,7 @@ npm --prefix demos/viewer ci
 npm --prefix demos/viewer run dev
 ```
 
-CPU性能は32×32・1枚、1/240秒×4回・8反復を[実測](docs/benchmarks.ja.md#32×321枚cpu60fpsへの改善)しています。利用時はreleaseビルドで、描画も含むframe時間を確認してください。
+CPU性能は32×32・1枚、1/240秒×4回・8反復を[実測](docs/benchmarks.ja.md#realtime-cpu)しています。利用時はreleaseビルドで、描画も含むframe時間を確認してください。
 
 viewerはRustの記録を再生します。「記録を開く」で生成したJSONを選べます。
 
