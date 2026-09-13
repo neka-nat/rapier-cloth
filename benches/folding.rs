@@ -196,6 +196,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut continuous = false;
     let mut rigid_surface = false;
     let mut config = Config::default();
+    let mut fixture_version = 1;
+    let mut bend_override = None;
     let mut variant = 0;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -213,10 +215,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .parse::<usize>()?
             }
             "--bend-compliance" => {
-                config.bend_compliance = args
+                bend_override = Some(
+                    args.next()
+                        .ok_or("--bend-compliance requires a value")?
+                        .parse::<f64>()?,
+                );
+            }
+            "--fixture-version" => {
+                fixture_version = args
                     .next()
-                    .ok_or("--bend-compliance requires a value")?
-                    .parse()?
+                    .ok_or("--fixture-version requires 1 or 2")?
+                    .parse()?;
             }
             "--verify" => verify = true,
             "--self-collision" => self_collision = true,
@@ -231,6 +240,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if repeats == 0 || repeats > 100 {
         return Err("repeats must be in 1..=100".into());
+    }
+    if fixture_version != 1 {
+        config = Config::with_version(fixture_version)?;
+    }
+    if let Some(bend) = bend_override {
+        config.bend_compliance = bend;
     }
     // Capture source identity before a long run, so later workspace edits do
     // not relabel the already-built benchmark at report-writing time.

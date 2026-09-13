@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add folding fixture version 2, capturing grasp anchors after the final approach pose to avoid commanding settled cloth into the table. Version 1 remains available/default for historical replay; every trajectory sample, physical parameter and acceptance limit is preserved.
 - Add opt-in discrete whole-triangle contact against Rapier spheres, boxes, capsules and fixed half-spaces, with half-thickness offsets, canonical shared-feature witnesses, scoped patch exclusions and a shared self/rigid work budget. Continuous rigid-surface collision remains under development.
 - Add `ClothContactSettings::rigid_surface_collision`, `SurfaceWitness`, shared immutable mesh access and a defaulted budget-aware surface callback. Initial rigid intersections and unresolved final separation return typed errors; update exhaustive error matches and contact-settings literals as needed.
 - Fix cached static-sweep contact duplication when continuous prediction retries a trial pose. Repeated queries update the witness for each retained key without consuming extra contact capacity.

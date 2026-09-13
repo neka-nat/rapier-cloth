@@ -43,6 +43,90 @@ fn fixture_is_fixed_and_all_six_trajectories_are_bounded() {
     let total: rapier_cloth::Real = cloth.masses().iter().sum();
     assert!((total - real(0.05)).abs() < real(1.0e-6));
 }
+
+#[test]
+fn version_two_preserves_every_physical_parameter_and_commanded_trajectory() {
+    let v1 = Config::with_version(1).unwrap();
+    let v2 = Config::with_version(2).unwrap();
+    let mut old = serde_json::to_value(&v1).unwrap();
+    old["version"] = 2.into();
+    assert_eq!(old, serde_json::to_value(&v2).unwrap());
+    for variant in 0..v1.variants.len() {
+        let a = v1.for_variant(variant).unwrap();
+        let b = v2.for_variant(variant).unwrap();
+        for step in 0..=a.end_step {
+            for g in 0..2 {
+                assert_eq!(
+                    gripper_target(&a, &a.variants[variant], g, step, a.legacy_contact_radius),
+                    gripper_target(&b, &b.variants[variant], g, step, b.legacy_contact_radius)
+                );
+            }
+        }
+    }
+    assert!(Config::with_version(3).is_err());
+}
+
+#[test]
+fn grasp_after_final_approach_does_not_command_settled_patches_into_the_table() {
+    use rapier_cloth::{ClothContactSettings, ClothError, IntegrationError};
+    for version in [1, 2] {
+        let mut config = Config::with_version(version).unwrap();
+        // A small mesh isolates the event-order bug; full 32 x 32 trajectory
+        // correctness/performance belongs to the separate folding diagnostic.
+        config.grid = 4;
+        let mut simulation = FoldingWorld::new(config.clone(), 0).unwrap();
+        simulation
+            .world
+            .cloth_mut(simulation.cloth)
+            .unwrap()
+            .set_contact_settings(Some(ClothContactSettings {
+                self_collision: false,
+                rigid_surface_collision: true,
+                ..Default::default()
+            }))
+            .unwrap();
+        while simulation.step + 1 < config.attach_step {
+            simulation.tick().unwrap();
+        }
+        let last_approach = gripper_target(
+            &config,
+            &config.variants[0],
+            0,
+            config.attach_step - 1,
+            config.legacy_contact_radius,
+        ) - gripper_target(
+            &config,
+            &config.variants[0],
+            0,
+            config.attach_step,
+            config.legacy_contact_radius,
+        );
+        assert!(last_approach.y > real(1.0e-5) && last_approach.y < real(1.1e-5));
+        let before = simulation.positions();
+        if version == 1 {
+            assert!(matches!(
+                simulation.tick(),
+                Err(IntegrationError::Core(ClothError::InfeasibleSurfaceContact))
+            ));
+            assert_eq!(simulation.positions(), before);
+        } else {
+            let report = simulation.tick().unwrap();
+            assert_eq!(simulation.step, config.attach_step);
+            assert_eq!(simulation.world.attachments().count(), 2);
+            assert!(report.cloths[0].1.max_target_error < real(1.0e-6));
+            for g in 0..2 {
+                for i in simulation.corner_patch(g) {
+                    let p = simulation.positions()[i as usize];
+                    assert!((p[1] - before[i as usize][1]).abs() < 1.0e-8);
+                    assert!(p[1] >= config.thickness * 0.5 - 1.0e-8);
+                }
+            }
+            for _ in 0..12 {
+                simulation.tick().unwrap();
+            }
+        }
+    }
+}
 #[test]
 fn oracle_distinguishes_piercing_coplanar_and_separated_triangles() {
     let a = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];

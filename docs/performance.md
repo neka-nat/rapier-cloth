@@ -54,6 +54,17 @@ reproduce the legacy particle-contact baseline. An exit code of zero means the
 diagnostic wrote its report; inspect `failure`, `steps` and geometry/task metrics
 before interpreting the result as a completed trajectory.
 
+Use `--fixture-version 2` with surface-rigid contact. Version 2 captures grasp
+anchors after the final approach movement and before solving the cloth, avoiding
+a downward target jump into the table when grasping. Mesh, material, trajectories,
+phase times and acceptance limits are identical to version 1. The default remains
+version 1 for reproducing historical particle-contact baselines. Reports identify
+the fixture version; compare equivalent versions when attributing solver changes.
+
+```bash
+cargo bench --locked --bench folding -- --fixture-version 2 --rigid-surface-collision --continuous-self-collision --verify --repeats 1 --output target/folding/surface-v2-01
+```
+
 ## Resolution scaling
 
 ```bash

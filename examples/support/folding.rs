@@ -61,8 +61,25 @@ impl Default for Config {
     }
 }
 impl Config {
+    /// Version 1 preserves the original pre-motion attachment baseline. Version
+    /// 2 captures anchors after the final approach movement, before cloth solve.
+    /// Every physical parameter, trajectory sample and acceptance limit agrees.
+    pub fn with_version(version: u32) -> Result<Self, Box<dyn std::error::Error>> {
+        let text = match version {
+            1 => include_str!("fold_fixture.json"),
+            2 => include_str!("fold_fixture_v2.json"),
+            _ => return Err("unknown folding fixture version".into()),
+        };
+        let config: Self = serde_json::from_str(text)?;
+        config.validate()?;
+        Ok(config)
+    }
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.grid < 4 || self.grid > 1024 || self.version != 1 || self.variants.is_empty() {
+        if self.grid < 4
+            || self.grid > 1024
+            || !(1..=2).contains(&self.version)
+            || self.variants.is_empty()
+        {
             return Err("invalid fixture layout".into());
         }
         let times = [
@@ -326,30 +343,8 @@ impl FoldingWorld {
     }
     pub fn tick(&mut self) -> Result<WorldStepReport, IntegrationError> {
         let next = self.step + 1;
-        if next == self.config.attach_step {
-            for g in 0..2 {
-                let inverse = self.rigid.bodies[self.grippers[g]].position().inverse();
-                let points = self
-                    .corner_patch(g)
-                    .map(|particle| AttachmentPoint {
-                        particle,
-                        local_anchor: inverse.transform_point(
-                            self.world.cloth(self.cloth).unwrap().positions()[particle as usize],
-                        ),
-                    })
-                    .to_vec();
-                self.attachments[g] = Some(self.world.attach(
-                    AttachmentDesc {
-                        cloth: self.cloth,
-                        body: self.grippers[g],
-                        points,
-                        compliance: 0.0,
-                        excluded_colliders: vec![self.gripper_colliders[g]],
-                    },
-                    &self.rigid.bodies,
-                    &self.rigid.colliders,
-                )?);
-            }
+        if next == self.config.attach_step && self.config.version == 1 {
+            self.attach_grippers()?;
         }
         if next == self.config.release_step {
             for attachment in &mut self.attachments {
@@ -374,6 +369,12 @@ impl FoldingWorld {
             ));
         }
         self.rigid.step();
+        // The grasp starts at the completed approach pose. Capturing the old
+        // pose first would include the last downward approach increment in the
+        // newly attached targets, commanding a settled patch into the table.
+        if next == self.config.attach_step && self.config.version == 2 {
+            self.attach_grippers()?;
+        }
         let query = self.rigid.broad_phase.as_query_pipeline(
             self.rigid.narrow_phase.query_dispatcher(),
             &self.rigid.bodies,
@@ -386,6 +387,32 @@ impl FoldingWorld {
         )?;
         self.step = next;
         Ok(report)
+    }
+    fn attach_grippers(&mut self) -> Result<(), IntegrationError> {
+        for g in 0..2 {
+            let inverse = self.rigid.bodies[self.grippers[g]].position().inverse();
+            let points = self
+                .corner_patch(g)
+                .map(|particle| AttachmentPoint {
+                    particle,
+                    local_anchor: inverse.transform_point(
+                        self.world.cloth(self.cloth).unwrap().positions()[particle as usize],
+                    ),
+                })
+                .to_vec();
+            self.attachments[g] = Some(self.world.attach(
+                AttachmentDesc {
+                    cloth: self.cloth,
+                    body: self.grippers[g],
+                    points,
+                    compliance: 0.0,
+                    excluded_colliders: vec![self.gripper_colliders[g]],
+                },
+                &self.rigid.bodies,
+                &self.rigid.colliders,
+            )?);
+        }
+        Ok(())
     }
     pub fn positions(&self) -> Vec<[f64; 3]> {
         self.world
