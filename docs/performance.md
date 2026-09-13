@@ -41,8 +41,8 @@ path with the frozen dual-gripper trajectory:
 cargo bench --locked --bench folding -- --self-collision --repeats 1 --output target/folding/discrete-01
 ```
 
-This is a diagnostic, not a qualified folding example: persistent static friction
-and full-task qualification are still missing. Replace `--self-collision` with
+This is a diagnostic. Experimental persistent static/kinetic friction is implemented;
+full-task convergence and performance qualification remain open. Replace `--self-collision` with
 `--continuous-self-collision` to exercise the experimental self-CCD path. The report
 records partial failures, exact collision settings, per-substep work high-water
 marks, geometry errors and four-substep timings. `--verify` enables an expensive
@@ -75,6 +75,38 @@ cargo bench --locked --bench folding -- --fixture-version 2 --continuous-rigid-c
 # Separate timing run without the interleaved geometric oracle.
 cargo bench --locked --bench folding -- --fixture-version 2 --continuous-rigid-collision --continuous-self-collision --repeats 5 --output target/folding/continuous-timing-v2-01
 ```
+
+### Check a folding correctness report
+
+From a repository checkout, use Python 3.10 or newer to check an audited report:
+
+```bash
+bash scripts/check-folding.sh target/folding/continuous-v2-01/folding-f32.json
+
+# All six variants in both precisions from the same clean source revision.
+bash scripts/check-folding.sh --suite target/folding/correctness-*/folding-*.json
+```
+
+The checker requires schema 2, fixture 2, both continuous collision modes, and a
+complete `--verify` replay. It compares settings and limits with the checked-in
+fixture, rejects recorded failures and missing or non-finite measurements, and
+checks geometry, strain, tracking, fold shape and settling. A suite must include
+the nominal and all five perturbations in f32 and f64. Every supplied repetition
+must pass; incomplete reports and dirty-source reports are rejected.
+
+Schema 2 retains individual four-substep times in `physics_samples_ms`; the checker
+recomputes frame and phase percentiles from them. `task_audit` records penetration
+throughout the task, coverage of both grasps and the entire final five seconds,
+and target-free observations after release. `final_targets` includes vertex
+attachments, weighted surface attachments, pins, their target points and task
+grasp handles. Target counts cover the world inputs used by this task.
+
+A passing checker result establishes the recorded correctness gates only. The
+interleaved oracle affects the workload, so its times do not qualify CPU speed.
+Dedicated timing repetitions, total application memory, continuous-crossing
+regressions and a paced live run require their own evidence. Schema 1 reports lack
+the required coverage fields and must be regenerated. The current folding
+diagnostic may still stop before completion and be rejected by the checker.
 
 ## Resolution scaling
 

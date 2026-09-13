@@ -13,6 +13,7 @@ jobs:
         with:
           key: docs-examples
       - run: python3 scripts/check-docs.py
+      - run: python3 -m unittest discover -s scripts -p test_check_folding.py
       - run: cargo doc --locked --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings

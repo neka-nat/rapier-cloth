@@ -5,3 +5,4 @@
 /demos/viewer/dist/
 /demos/viewer/test-results/
 /demos/viewer/playwright-report/
+__pycache__/

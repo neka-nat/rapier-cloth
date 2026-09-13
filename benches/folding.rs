@@ -1,6 +1,8 @@
 //! Complete dual-gripper task timing, with optional independent offline geometry checks.
 #[path = "../examples/support/folding.rs"]
 mod folding;
+#[path = "../examples/support/folding_report.rs"]
+mod folding_report;
 #[path = "../examples/support/folding_oracle.rs"]
 mod oracle;
 use folding::*;
@@ -23,7 +25,8 @@ fn output(command: &str, args: &[&str]) -> String {
         .map(|r| String::from_utf8_lossy(&r.stdout).trim().to_string())
         .unwrap_or_else(|| "unknown".into())
 }
-fn timing(mut ms: Vec<f64>) -> serde_json::Value {
+fn timing(samples: &[f64]) -> serde_json::Value {
+    let mut ms = samples.to_vec();
     if ms.is_empty() {
         return serde_json::Value::Null;
     }
@@ -58,6 +61,13 @@ fn run(
         .mesh()
         .triangles()
         .to_vec();
+    let initial_audit = verify.then(|| {
+        oracle::audit_surface(
+            &simulation.positions(),
+            &triangles,
+            simulation.config.thickness,
+        )
+    });
     let mut frames = vec![];
     let mut frame_ms = 0.0;
     let mut frame_by_phase = std::collections::BTreeMap::<String, Vec<f64>>::new();
@@ -65,12 +75,12 @@ fn run(
     let mut max_p95: rapier_cloth::Real = 0.0;
     let mut max_target: rapier_cloth::Real = 0.0;
     let mut max_penetration: rapier_cloth::Real = 0.0;
+    let mut diagnostics_finite = true;
     let mut max_contacts = 0;
     let mut max_scratch = 0;
     let mut collision_work = rapier_cloth::CollisionWork::default();
     let mut error = None;
-    let mut settle_center = None;
-    let mut drift = 0.0_f64;
+    let mut task_audit = folding_report::TaskAudit::default();
     let mut audit = oracle::SurfaceAudit::default();
     let mut audit_steps = 0;
     while simulation.step < simulation.config.end_step {
@@ -80,6 +90,14 @@ fn run(
         match result {
             Ok(report) => {
                 let r = &report.cloths[0].1;
+                diagnostics_finite &= [
+                    r.max_stretch,
+                    r.p95_stretch,
+                    r.max_target_error,
+                    r.max_penetration,
+                ]
+                .iter()
+                .all(|v| v.is_finite());
                 max_strain = max_strain.max(r.max_stretch);
                 max_p95 = max_p95.max(r.p95_stretch);
                 max_target = max_target.max(r.max_target_error);
@@ -115,6 +133,7 @@ fn run(
                 .push(frame_ms);
             frame_ms = 0.0;
         }
+        task_audit.observe(&simulation)?;
         if verify {
             let next = oracle::audit_surface(
                 &simulation.positions(),
@@ -127,11 +146,6 @@ fn run(
                 .max(next.max_separation_deficit);
             audit.tested_pairs += next.tested_pairs;
             audit_steps += 1;
-        }
-        if simulation.step >= simulation.config.retract_end {
-            let center = simulation.center_of_mass();
-            let initial = settle_center.get_or_insert(center);
-            drift = drift.max((center[0] - initial[0]).hypot(center[2] - initial[2]));
         }
     }
     let positions = simulation.positions();
@@ -147,6 +161,13 @@ fn run(
         .iter()
         .map(|p| (simulation.config.thickness * 0.5 - p[1]).max(0.0))
         .fold(0.0, f64::max);
+    let final_targets = folding_report::target_counts(&simulation)?;
+    let mass: rapier_cloth::Real = simulation
+        .world
+        .cloth(simulation.cloth)?
+        .masses()
+        .iter()
+        .sum();
     Ok(json!({
         "status":if mode.continuous_rigid {"unqualified_continuous_rigid_collision"} else if mode.rigid_surface {"unqualified_rigid_surface_collision"} else if mode.continuous_self {"unqualified_continuous_self_collision"} else if mode.self_collision {"unqualified_discrete_self_collision"} else {"unqualified_particle_baseline"},
         "collision_settings":simulation.world.cloth(simulation.cloth)?.contact_settings().map(|s|json!({
@@ -157,15 +178,19 @@ fn run(
             "static_friction":s.static_friction,"kinetic_friction":s.kinetic_friction,
             "limits":{"candidate_pairs":s.limits.candidate_pairs,"retained_contacts":s.limits.retained_contacts,"ccd_checks":s.limits.ccd_checks}})),
         "collision_work_max_per_substep":{"candidate_pairs":collision_work.candidate_pairs,"retained_contacts":collision_work.retained_contacts,"ccd_checks":collision_work.ccd_checks,"limited_advances":collision_work.limited_advances},
-        "config":simulation.config,"variant":simulation.variant,
+        "config":simulation.config,"variant":simulation.variant,"verification_enabled":verify,
+        "physics_settings":{"h":simulation.rigid.integration_parameters.dt,"iterations":simulation.world.solver_settings.iterations,
+            "friction_model":if mode.self_collision || mode.rigid_surface {"persistent_material_coordinate"} else {"legacy_particle_kinetic"}},
+        "mesh":{"vertices":positions.len(),"triangles":triangles.len(),"total_mass":mass},
         "steps":simulation.step,"failure":error,"failure_next_step":error.as_ref().map(|_|simulation.step+1),
-        "physics_frame":timing(frames),"physics_phases":frame_by_phase.into_iter().map(|(k,v)|(k,timing(v))).collect::<std::collections::BTreeMap<_,_>>(),
+        "physics_frame":timing(&frames),"physics_samples_ms":frames,"physics_phases":frame_by_phase.into_iter().map(|(k,v)|(k,timing(&v))).collect::<std::collections::BTreeMap<_,_>>(),
         "max_strain":max_strain,"max_p95_strain":max_p95,"max_target_error":max_target,"max_particle_penetration":max_penetration,
         "final_table_penetration":table_penetration,"max_contacts":max_contacts,"max_scratch_array_bytes":max_scratch,
-        "fold":metrics,"settle_drift":drift,"final_surface_audit":final_audit,
+        "fold":metrics,"settle_drift":task_audit.settle_drift,"task_audit":task_audit,"initial_surface_audit":initial_audit,"final_surface_audit":final_audit,
         "all_substeps_audit":if verify {Some(audit)} else {None},"audited_substeps":audit_steps,
         "remaining_attachments":simulation.world.attachments().count(),"remaining_pins":simulation.world.cloth(simulation.cloth)?.pins().len(),
-        "finite":positions.iter().flatten().all(|x|x.is_finite())
+        "final_targets":final_targets,
+        "finite":positions.iter().flatten().all(|x|x.is_finite()),"diagnostics_finite":diagnostics_finite
     }))
 }
 fn configured_world(
@@ -276,7 +301,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .unwrap_or_else(|| output("sysctl", &["-n", "machdep.cpu.brand_string"]));
     let precision = if cfg!(feature = "f64") { "f64" } else { "f32" };
-    let result = json!({"schema_version":1,"fixture_version":config.version,"precision":precision,"cpu":cpu,
+    let result = json!({"schema_version":2,"fixture_version":config.version,"precision":precision,"cpu":cpu,
         "os":output("uname",&["-a"]),"rust":output("rustc",&["--version"]),"commit":source_commit,
         "dirty":source_dirty,"substeps_per_frame":4,"warmup_substeps":120,
         "scope":"Rapier, snapshots, task transitions and cloth; excludes oracle, task metrics, rendering and output",

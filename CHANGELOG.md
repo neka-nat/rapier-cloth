@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add schema-2 folding diagnostics with per-frame timing samples, initial and per-step audits, both attachment kinds, grasp/release coverage and explicit final-settling observations. Add a strict correctness report checker and six-variant f32/f64 suite validation. Full folding, CPU performance and live qualification remain open.
+
 - Differentiate self-friction in material coordinates, including support rotation during slip. Use the full tangent effective mass and retain actual per-vertex corrections through frame refresh, motion shortening and unloading. Add independent virtual-work, force/moment, weak-direction and atomic-error tests; complete folding and CPU qualification remain open.
 
 - Transport sticking self-contact anchors with the supporting material triangle, including rotation about the contact normal and incident vertex/edge supports. Preserve actual tangent impulse increments through frame changes and shortened motion, exclude overlap recovery from physical slip, and retain frame state through checkpoints. Degenerate supporting triangles fail atomically; dense folding and CPU qualification remain open.
