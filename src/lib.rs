@@ -13,7 +13,8 @@ pub use rapier_cloth_core::*;
 #[cfg(any(feature = "f32", feature = "f64"))]
 pub mod attachment;
 #[cfg(any(feature = "f32", feature = "f64"))]
-mod collision;
+#[path = "collision.rs"]
+mod rapier_collision;
 #[cfg(any(feature = "f32", feature = "f64"))]
 pub use attachment::{
     AttachmentDesc, AttachmentEvent, AttachmentEventKind, AttachmentHandle, AttachmentPoint,

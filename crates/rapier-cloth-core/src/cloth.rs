@@ -19,6 +19,7 @@ pub struct Cloth {
     pub(crate) inverse_masses: Vec<Real>,
     pub(crate) forces: Vec<Vec3>,
     pub(crate) pins: BTreeMap<u32, Vec3>,
+    pub(crate) contact_history: Vec<crate::contact::SurfaceContactState>,
 }
 
 impl Cloth {
@@ -49,6 +50,7 @@ impl Cloth {
             masses,
             forces: vec![Vec3::ZERO; n],
             pins: BTreeMap::new(),
+            contact_history: vec![],
         })
     }
     pub fn mesh(&self) -> &ClothMesh {
@@ -71,6 +73,10 @@ impl Cloth {
     }
     pub fn pins(&self) -> &BTreeMap<u32, Vec3> {
         &self.pins
+    }
+    /// Active surface contacts retained by the last successful substep.
+    pub fn contact_history_len(&self) -> usize {
+        self.contact_history.len()
     }
     pub fn surface(&self) -> SurfaceView<'_> {
         SurfaceView {
@@ -124,6 +130,7 @@ impl Cloth {
         self.positions.copy_from_slice(p);
         self.previous.copy_from_slice(p);
         self.velocities.fill(Vec3::ZERO);
+        self.contact_history.clear();
         Ok(())
     }
 }

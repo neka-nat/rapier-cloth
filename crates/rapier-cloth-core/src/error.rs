@@ -11,6 +11,8 @@ pub enum ClothError {
     DegenerateConstraint,
     NonFiniteState,
     ContactBudgetExceeded { limit: usize },
+    InvalidSurfaceContact(&'static str),
+    InfeasibleSurfaceContact,
     External(String),
 }
 
@@ -25,6 +27,10 @@ impl fmt::Display for ClothError {
             Self::DegenerateConstraint => write!(f, "constraint geometry became degenerate"),
             Self::NonFiniteState => write!(f, "non-finite simulation state; substep not committed"),
             Self::ContactBudgetExceeded { limit } => write!(f, "contact budget exceeded ({limit})"),
+            Self::InvalidSurfaceContact(s) => write!(f, "invalid surface contact: {s}"),
+            Self::InfeasibleSurfaceContact => {
+                write!(f, "surface contact conflicts with fixed targets")
+            }
             Self::External(s) => write!(f, "external contact error: {s}"),
         }
     }

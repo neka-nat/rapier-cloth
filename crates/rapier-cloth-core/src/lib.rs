@@ -17,12 +17,16 @@ pub use error::ClothError;
 pub use material::ClothMaterial;
 pub use mesh::{ClothMesh, GridBuilder};
 pub mod cloth;
+pub mod collision;
 pub mod contact;
 pub mod diagnostics;
 pub mod solver;
 pub mod surface;
 pub use cloth::{Cloth, ClothHandle, ClothSet};
-pub use contact::{Contact, ContactKey, ContactSource, ContactStage, NoContacts};
+pub use contact::{
+    Contact, ContactKey, ContactSource, ContactStage, NoContacts, SurfaceContact,
+    SurfaceContactKey, SurfaceFeature,
+};
 pub use diagnostics::StepReport;
 pub use solver::{Solver, SolverSettings, Target};
 pub use surface::SurfaceView;

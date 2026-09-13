@@ -1,6 +1,6 @@
 use crate::attachment::Attachments;
-use crate::collision::RapierContacts;
 use crate::rapier::prelude::*;
+use crate::rapier_collision::RapierContacts;
 use crate::{AttachmentDesc, AttachmentEvent, AttachmentEventKind, AttachmentHandle, Target};
 use crate::{
     Cloth, ClothError, ClothHandle, ClothSet, IntegrationError, RapierScene, Real, Solver,

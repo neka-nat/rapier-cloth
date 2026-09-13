@@ -4,7 +4,7 @@ use crate::{
         bend::{angle, angle_and_gradients, angle_difference},
         distance,
     },
-    contact::friction_velocity,
+    contact::{SurfaceContact, SurfaceContactState, friction_velocity},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -76,6 +76,10 @@ pub struct Solver {
     // inactive contacts retain their lambda without per-contact tree lookups.
     contact_states: Vec<ContactState>,
     next_contact_states: Vec<ContactState>,
+    surface_contacts: Vec<SurfaceContact>,
+    surface_states: Vec<SurfaceContactState>,
+    previous_surface_states: Vec<SurfaceContactState>,
+    next_surface_states: Vec<SurfaceContactState>,
     stretches: Vec<Real>,
 }
 
@@ -131,6 +135,17 @@ impl Solver {
         self.positions.clone_from(&cloth.positions);
         self.velocities.clone_from(&cloth.velocities);
         self.weights.clone_from(&cloth.inverse_masses);
+        self.surface_states.clear();
+        self.previous_surface_states
+            .clone_from(&cloth.contact_history);
+        for state in &mut self.previous_surface_states {
+            state.normal_lambda = 0.0;
+            state.tangent_lambda *= (h / state.h).powi(2);
+            state.h = h;
+            if !state.tangent_reference.is_finite() || !state.tangent_lambda.is_finite() {
+                return Err(ClothError::NonFiniteState);
+            }
+        }
         for t in &targets {
             if t.compliance == 0.0 {
                 self.weights[t.particle as usize] = 0.0;
@@ -161,6 +176,13 @@ impl Solver {
                     corrected = true;
                 }
             }
+            for c in &self.surface_contacts {
+                if c.gap(&self.positions) < -c.separation * 1.0e-4 {
+                    c.project_validated(&mut self.positions, &self.weights, &mut 0.0)?;
+                    report.stabilized_contacts += 1;
+                    corrected = true;
+                }
+            }
             if !corrected {
                 break;
             }
@@ -187,6 +209,7 @@ impl Solver {
         self.target_lambda.fill(Vec3::ZERO);
         self.query(source, None, radius, ContactStage::Prediction, settings)?;
         self.project_contacts(radius, settings.max_contacts)?;
+        self.project_surface_contacts(h, settings.max_contacts)?;
         let stretch_alpha = cloth.material.stretch_compliance / (h * h);
         let bend_alpha = cloth.material.bend_compliance / (h * h);
         for _ in 0..settings.iterations {
@@ -236,6 +259,7 @@ impl Solver {
             }
             self.query(source, None, radius, ContactStage::Iteration, settings)?;
             self.project_contacts(radius, settings.max_contacts)?;
+            self.project_surface_contacts(h, settings.max_contacts)?;
         }
         for i in 0..self.positions.len() {
             if self.weights[i] == 0.0 {
@@ -270,6 +294,42 @@ impl Solver {
                 c.friction,
             );
         }
+        for state in &self.surface_states {
+            let c = state.contact;
+            if self
+                .surface_contacts
+                .binary_search_by_key(&c.key, |contact| contact.key)
+                .is_err()
+            {
+                continue;
+            }
+            if c.gap(&self.positions) > c.separation * 0.01 {
+                continue;
+            }
+            let inverse_mass = c.inverse_mass(&self.weights);
+            if inverse_mass == 0.0 {
+                continue;
+            }
+            let relative = c.relative(&self.velocities) - c.surface_velocity;
+            let normal_speed = relative.dot(c.normal);
+            let normal_impulse = (-normal_speed).max(0.0) / inverse_mass;
+            c.apply(
+                &mut self.velocities,
+                &self.weights,
+                c.normal * normal_impulse,
+            );
+            let tangent = relative - c.normal * normal_speed;
+            let speed = tangent.length();
+            if speed > Real::MIN_POSITIVE {
+                let impulse = (c.kinetic_friction * (state.normal_lambda / h + normal_impulse))
+                    .min(speed / inverse_mass);
+                c.apply(
+                    &mut self.velocities,
+                    &self.weights,
+                    -tangent * (impulse / speed),
+                );
+            }
+        }
         self.query(source, None, radius, ContactStage::Final, settings)?;
         for c in &self.contacts {
             let i = c.key.particle as usize;
@@ -277,6 +337,13 @@ impl Solver {
             report.max_penetration = report.max_penetration.max(depth);
             if self.weights[i] == 0.0 && depth > radius * 0.2 {
                 return Err(ClothError::ConflictingTarget(i as u32));
+            }
+        }
+        for c in &self.surface_contacts {
+            let depth = (-c.gap(&self.positions)).max(0.0);
+            report.max_penetration = report.max_penetration.max(depth);
+            if c.inverse_mass(&self.weights) == 0.0 && depth > c.separation * 1.0e-4 {
+                return Err(ClothError::InfeasibleSurfaceContact);
             }
         }
         if self
@@ -323,7 +390,7 @@ impl Solver {
                 report.degenerate_faces += 1;
             }
         }
-        report.contacts = self.contact_states.len();
+        report.contacts = self.contact_states.len() + self.surface_states.len();
         report.iterations = settings.iterations;
         report.scratch_bytes = (self.positions.capacity()
             + self.prediction.capacity()
@@ -338,10 +405,24 @@ impl Solver {
                 * std::mem::size_of::<Real>()
             + self.contacts.capacity() * std::mem::size_of::<Contact>()
             + (self.contact_states.capacity() + self.next_contact_states.capacity())
-                * std::mem::size_of::<ContactState>();
+                * std::mem::size_of::<ContactState>()
+            + self.surface_contacts.capacity() * std::mem::size_of::<SurfaceContact>()
+            + (self.surface_states.capacity()
+                + self.previous_surface_states.capacity()
+                + self.next_surface_states.capacity())
+                * std::mem::size_of::<SurfaceContactState>();
+        // Persist only current, still touching features. A disappeared contact
+        // must not act as adhesion or consume history indefinitely.
+        self.surface_states.retain(|state| {
+            self.surface_contacts
+                .binary_search_by_key(&state.contact.key, |c| c.key)
+                .is_ok()
+                && state.contact.gap(&self.positions) <= state.contact.separation * 0.01
+        });
         cloth.previous.copy_from_slice(&cloth.positions);
         std::mem::swap(&mut cloth.positions, &mut self.positions);
         std::mem::swap(&mut cloth.velocities, &mut self.velocities);
+        std::mem::swap(&mut cloth.contact_history, &mut self.surface_states);
         Ok(report)
     }
 
@@ -357,6 +438,7 @@ impl Solver {
             return Err(ClothError::NonFiniteState);
         }
         self.contacts.clear();
+        self.surface_contacts.clear();
         source.contacts(
             previous.unwrap_or(&self.reference),
             &self.positions,
@@ -364,7 +446,13 @@ impl Solver {
             stage,
             &mut self.contacts,
         )?;
-        if self.contacts.len() > settings.max_contacts {
+        source.surface_contacts(
+            previous.unwrap_or(&self.reference),
+            &self.positions,
+            stage,
+            &mut self.surface_contacts,
+        )?;
+        if self.contacts.len() + self.surface_contacts.len() > settings.max_contacts {
             return Err(ClothError::ContactBudgetExceeded {
                 limit: settings.max_contacts,
             });
@@ -385,6 +473,59 @@ impl Solver {
                 return Err(ClothError::External("duplicate contact key".into()));
             }
         }
+        self.surface_contacts.sort_by_key(|c| c.key);
+        for (i, c) in self.surface_contacts.iter().enumerate() {
+            c.validate(self.positions.len())?;
+            if i > 0 && self.surface_contacts[i - 1].key == c.key {
+                return Err(ClothError::InvalidSurfaceContact("duplicate contact key"));
+            }
+        }
+        Ok(())
+    }
+    fn project_surface_contacts(&mut self, h: Real, limit: usize) -> Result<(), ClothError> {
+        self.next_surface_states.clear();
+        let mut old = self.surface_states.iter().peekable();
+        for &contact in &self.surface_contacts {
+            while old.peek().is_some_and(|s| s.contact.key < contact.key) {
+                self.next_surface_states.push(*old.next().unwrap());
+            }
+            let mut state = if old.peek().is_some_and(|s| s.contact.key == contact.key) {
+                *old.next().unwrap()
+            } else if let Ok(index) = self
+                .previous_surface_states
+                .binary_search_by_key(&contact.key, |state| state.contact.key)
+            {
+                self.previous_surface_states[index]
+            } else {
+                SurfaceContactState {
+                    contact,
+                    normal_lambda: 0.0,
+                    tangent_reference: contact.relative(&self.reference) - contact.offset,
+                    tangent_lambda: Vec3::ZERO,
+                    h,
+                }
+            };
+            if state.contact.normal.dot(contact.normal) < 0.9 {
+                state.normal_lambda = 0.0;
+                state.tangent_lambda = Vec3::ZERO;
+                state.tangent_reference = contact.relative(&self.reference) - contact.offset;
+            }
+            state.contact = contact;
+            contact.project_validated(
+                &mut self.positions,
+                &self.weights,
+                &mut state.normal_lambda,
+            )?;
+            self.next_surface_states.push(state);
+            if self.next_surface_states.len() + self.contact_states.len() > limit {
+                return Err(ClothError::ContactBudgetExceeded { limit });
+            }
+        }
+        self.next_surface_states.extend(old);
+        if self.next_surface_states.len() + self.contact_states.len() > limit {
+            return Err(ClothError::ContactBudgetExceeded { limit });
+        }
+        std::mem::swap(&mut self.surface_states, &mut self.next_surface_states);
         Ok(())
     }
     fn project_contacts(&mut self, radius: Real, limit: usize) -> Result<(), ClothError> {
