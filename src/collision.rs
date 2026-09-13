@@ -113,20 +113,14 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
                 .settings
                 .friction_override
                 .unwrap_or((self.material.friction + c.friction()) * 0.5);
-            if !friction.is_finite() || friction < 0.0 {
-                return Err(ClothError::InvalidParameter("collider friction").into());
-            }
+            let invalid_friction = !friction.is_finite() || friction < 0.0;
             // Only pre-existing overlap is stabilization. A kinematic body's
             // displacement this step must contribute physical contact impulse.
             let contact_pose =
                 if stage == ContactStage::Stabilization && body.is_some_and(|b| b.is_kinematic()) {
-                    self.scene
-                        .previous
-                        .colliders
-                        .get(&handle.into_raw_parts())
-                        .ok_or(IntegrationError::MissingPreviousPose(handle))?
+                    self.scene.previous.colliders.get(&handle.into_raw_parts())
                 } else {
-                    c.position()
+                    Some(c.position())
                 };
             let sweep = self.settings.static_sweep
                 && stage == ContactStage::Prediction
@@ -138,6 +132,13 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
                 {
                     continue;
                 }
+                // Compute invariant properties once, but retain pair exclusion
+                // semantics: fully excluded geometry is never validated here.
+                if invalid_friction {
+                    return Err(ClothError::InvalidParameter("collider friction").into());
+                }
+                let contact_pose =
+                    contact_pose.ok_or(IntegrationError::MissingPreviousPose(handle))?;
                 let key = ContactKey {
                     particle: i as u32,
                     external,
