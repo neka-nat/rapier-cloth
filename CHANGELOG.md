@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add a live Rust CPU demo with a Three.js UI, per-connection worlds, demand-driven WebSocket frames, draping/wind scenes, bounded obstacle controls, pause/reset/release and reconnection. Keep transport dependencies in an independent unpublished demo crate.
+- Add f32/f64 live browser tests against actual Rust responses and a one-command launcher.
+
 - Reduce CPU cloth cost with closed-form dihedral gradients, a fast path for unwrapped angle differences, angle-only diagnostics and linear-time strain quantiles.
 - Merge sorted contact states and cached sweep planes in linear time while preserving contact order, budgets, friction, atomic failure and attachment exclusions.
 - Add a 32×32 benchmark measuring four actual sequential physics substeps per frame, with before/after data for stationary contact, hanging cloth and a moving sphere.

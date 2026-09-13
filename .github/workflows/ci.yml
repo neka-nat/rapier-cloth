@@ -77,6 +77,43 @@ jobs:
           path: |
             target/ci-viewer/
             demos/viewer/test-results/
+  live:
+    name: Live demo ${{ matrix.precision }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        precision: [f32, f64]
+    env:
+      CLOTH_LIVE_PRECISION: ${{ matrix.precision }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: demos/live-server -> target
+          key: live-${{ matrix.precision }}
+      - run: cargo fmt --manifest-path demos/live-server/Cargo.toml -- --check
+      - run: cargo test --locked --manifest-path demos/live-server/Cargo.toml --no-default-features --features ${{ matrix.precision }}
+      - run: cargo clippy --locked --manifest-path demos/live-server/Cargo.toml --no-default-features --features ${{ matrix.precision }} --all-targets -- -D warnings
+      - run: cargo build --locked --release --manifest-path demos/live-server/Cargo.toml --no-default-features --features ${{ matrix.precision }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: demos/viewer/package-lock.json
+      - run: npm --prefix demos/viewer ci
+      - run: npx playwright install --with-deps chromium
+        working-directory: demos/viewer
+      - run: npm --prefix demos/viewer run test:live
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-demo-${{ matrix.precision }}
+          path: demos/viewer/test-results/
+
   packages:
     runs-on: ubuntu-latest
     steps:

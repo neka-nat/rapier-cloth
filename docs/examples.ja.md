@@ -1,5 +1,7 @@
 # 実行例とviewer
 
+物理計算と描画を同時に動かす場合は[ライブデモ](live-demo.ja.md)を使う。`npm --prefix demos/viewer run live` でローカルCPUサーバーと操作画面を起動できる。以下は従来のheadless実行例と記録再生の手順。
+
 ```bash
 cargo run --release --example hanging_cloth
 cargo run --release --example drape_static

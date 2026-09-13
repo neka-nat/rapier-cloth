@@ -1,0 +1,23 @@
+[package]
+name = "rapier-cloth-live"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[features]
+default = ["f32"]
+f32 = ["rapier-cloth/f32"]
+f64 = ["rapier-cloth/f64"]
+
+[dependencies]
+rapier-cloth = { path = "../..", default-features = false }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[profile.test]
+opt-level = 2
+
+[workspace]
