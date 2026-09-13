@@ -1,6 +1,23 @@
 use rapier_cloth_core::{collision::geometry::*, *};
 
 #[test]
+fn near_vertex_closest_point_keeps_nonnegative_barycentric_weights() {
+    // A rotating support produced these finite coordinates. The point is just
+    // inside the third vertex; subtracting two rounded weights from one used
+    // to return -5.96e-8 for the first weight in f32.
+    let triangle = [
+        Vec3::ZERO,
+        Vec3::new(-0.019999683, 0.0, 0.020000324),
+        Vec3::new(3.2782555e-7, 0.0, 0.02),
+    ];
+    let p = Vec3::new(3.2697687e-7, 0.0, 0.02);
+    let witness = closest_triangle(p, triangle).unwrap();
+    assert!(witness.barycentric.iter().all(|w| (0.0..=1.0).contains(w)));
+    assert!(witness.point.distance(p) < 1.0e-8);
+    SurfaceWitness::from_triangle([0, 1, 2], 0, witness.barycentric).unwrap();
+}
+
+#[test]
 fn canonical_surface_witnesses_match_shared_edges_and_validate_barycentrics() {
     let a = SurfaceWitness::from_triangle([7, 3, 2], 0, [0.25, 0.75, 0.0]).unwrap();
     let b = SurfaceWitness::from_triangle([3, 7, 9], 1, [0.75, 0.25, 0.0]).unwrap();

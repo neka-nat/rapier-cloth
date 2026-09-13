@@ -8,7 +8,7 @@ use crate::{
 };
 use std::{collections::BTreeSet, time::Instant};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CollisionSettings {
     pub static_sweep: bool,
     pub friction_override: Option<Real>,
@@ -49,6 +49,8 @@ pub struct RapierClothWorld {
     solver: Solver,
     attachments: Attachments,
     events: Vec<AttachmentEvent>,
+    surface_history_scene: Option<crate::SceneSnapshot>,
+    surface_history_settings: Option<CollisionSettings>,
     pub solver_settings: SolverSettings,
     pub collision_settings: CollisionSettings,
 }
@@ -62,6 +64,8 @@ impl RapierClothWorld {
             solver: Solver::new(),
             attachments: Attachments::new(),
             events: vec![],
+            surface_history_scene: None,
+            surface_history_settings: None,
             solver_settings: SolverSettings::default(),
             collision_settings: CollisionSettings::default(),
         }
@@ -116,6 +120,8 @@ impl RapierClothWorld {
             cloths: self.cloths.clone(),
             attachments: self.attachments.clone(),
             events: self.events.clone(),
+            surface_history_scene: self.surface_history_scene.clone(),
+            surface_history_settings: self.surface_history_settings.clone(),
             solver_settings: self.solver_settings,
             collision_settings: self.collision_settings.clone(),
         })
@@ -131,6 +137,8 @@ impl RapierClothWorld {
         self.cloths = checkpoint.cloths.clone();
         self.attachments = checkpoint.attachments.clone();
         self.events = checkpoint.events.clone();
+        self.surface_history_scene = checkpoint.surface_history_scene.clone();
+        self.surface_history_settings = checkpoint.surface_history_settings.clone();
         self.next_step = checkpoint.step;
         self.solver_settings = checkpoint.solver_settings;
         self.collision_settings = checkpoint.collision_settings.clone();
@@ -182,6 +190,7 @@ impl RapierClothWorld {
                 ));
             }
         }
+        self.cloths.get_mut(desc.cloth)?.clear_contact_history();
         Ok(self.attachments.insert(desc))
     }
     pub fn attachment(
@@ -211,6 +220,9 @@ impl RapierClothWorld {
             .ok_or(IntegrationError::InvalidAttachment(
                 "stale or foreign handle",
             ))?;
+        if let Ok(cloth) = self.cloths.get_mut(a.cloth) {
+            cloth.clear_contact_history();
+        }
         self.events.push(AttachmentEvent {
             handle,
             cloth: a.cloth,
@@ -305,6 +317,32 @@ impl RapierClothWorld {
             }
         }
         let mut staged = self.cloths.clone();
+        // Between-step teleports or shape/filter changes invalidate material
+        // anchors even if a regenerated manifold happens to reuse its key.
+        // Ordinary kinematic motion begins at the last committed rigid pose.
+        let context_changed = self
+            .surface_history_settings
+            .as_ref()
+            .is_some_and(|settings| settings != &self.collision_settings)
+            || self.surface_history_scene.as_ref().is_some_and(|last| {
+                last.colliders.iter().any(|(key, pose)| {
+                    scene.previous.colliders.get(key) != Some(pose)
+                        || last
+                            .shapes
+                            .get(key)
+                            .zip(scene.previous.shapes.get(key))
+                            .is_none_or(|(a, b)| !std::sync::Arc::ptr_eq(&a.0, &b.0))
+                })
+            });
+        if context_changed {
+            let handles: Vec<_> = staged.iter().map(|(h, _)| h).collect();
+            for handle in handles {
+                staged.get_mut(handle)?.clear_contact_history();
+            }
+        }
+        for event in &events {
+            staged.get_mut(event.cloth)?.clear_contact_history();
+        }
         let handles: Vec<_> = staged.iter().map(|(h, _)| h).collect();
         let mut report = WorldStepReport {
             step: self.next_step,
@@ -368,6 +406,22 @@ impl RapierClothWorld {
         self.cloths = staged;
         self.attachments = staged_attachments;
         self.events.extend(events);
+        if self.cloths.iter().any(|(_, cloth)| {
+            cloth
+                .contact_settings()
+                .is_some_and(|s| s.rigid_surface_collision)
+        }) {
+            self.surface_history_scene = Some(crate::SceneSnapshot::capture(
+                self.world,
+                self.next_step,
+                scene.query.bodies,
+                scene.query.colliders,
+            ));
+            self.surface_history_settings = Some(self.collision_settings.clone());
+        } else {
+            self.surface_history_scene = None;
+            self.surface_history_settings = None;
+        }
         Ok(report)
     }
     fn validate_motion(
@@ -440,6 +494,8 @@ pub struct ClothCheckpoint {
     cloths: ClothSet,
     attachments: Attachments,
     events: Vec<AttachmentEvent>,
+    surface_history_scene: Option<crate::SceneSnapshot>,
+    surface_history_settings: Option<CollisionSettings>,
     solver_settings: SolverSettings,
     collision_settings: CollisionSettings,
 }

@@ -1,5 +1,6 @@
 use crate::collision::{
-    ClothContactSettings, CollisionBudgetKind, CollisionWork, self_collision::SelfCollision,
+    ClothContactSettings, CollisionBudgetKind, CollisionWork, friction::FrictionState,
+    self_collision::SelfCollision,
 };
 use crate::{
     Cloth, ClothError, Contact, ContactMotion, ContactSource, ContactStage, NoContacts, Real,
@@ -168,9 +169,8 @@ impl Solver {
             .clone_from(&cloth.contact_history);
         for state in &mut self.previous_surface_states {
             state.normal_lambda = 0.0;
-            state.tangent_lambda *= (h / state.h).powi(2);
-            state.h = h;
-            if !state.tangent_reference.is_finite() || !state.tangent_lambda.is_finite() {
+            state.friction.lambda = Vec3::ZERO;
+            if !state.friction.anchor.is_finite() {
                 return Err(ClothError::NonFiniteState);
             }
         }
@@ -223,6 +223,11 @@ impl Solver {
             }
         }
         self.reference.copy_from_slice(&self.positions);
+        for state in &mut self.previous_surface_states {
+            // Initial-overlap recovery is not physical tangential motion.
+            state.friction.anchor += state.friction.support.relative(&self.reference)
+                - state.friction.support.relative(&cloth.positions);
+        }
         self.capture_motion();
         let damp = (-cloth.material.damping * h).exp();
         for i in 0..self.positions.len() {
@@ -306,7 +311,7 @@ impl Solver {
             self.tethers.project(&mut self.positions, &self.weights)?;
             self.query(source, None, radius, ContactStage::Iteration, settings)?;
             self.project_contacts(radius, settings.max_contacts)?;
-            self.project_surface_contacts(h, settings.max_contacts)?;
+            self.project_surface_contacts(source, h, settings.max_contacts)?;
             let fraction = self.accept_motion(source, ContactStage::Iteration)?;
             if fraction < 1.0 {
                 for (value, &before) in self
@@ -337,7 +342,7 @@ impl Solver {
                 self.query(source, None, radius, ContactStage::Iteration, settings)?;
                 self.capture_motion();
                 self.project_contacts(radius, settings.max_contacts)?;
-                self.project_surface_contacts(h, settings.max_contacts)?;
+                self.project_surface_contacts(source, h, settings.max_contacts)?;
                 let fraction = self.accept_motion(source, ContactStage::Iteration)?;
                 self.scale_contact_motion(fraction);
             }
@@ -411,8 +416,9 @@ impl Solver {
             let tangent = relative - c.normal * normal_speed;
             let speed = tangent.length();
             if speed > Real::MIN_POSITIVE {
-                let impulse = (c.kinetic_friction * (state.normal_lambda / h + normal_impulse))
-                    .min(speed / inverse_mass);
+                // Position friction already spent the positional normal load.
+                // Only a residual velocity-level impact supplies an extra load.
+                let impulse = (c.kinetic_friction * normal_impulse).min(speed / inverse_mass);
                 c.apply(
                     &mut self.velocities,
                     &self.weights,
@@ -533,6 +539,9 @@ impl Solver {
                 .is_ok()
                 && state.contact.gap(&self.positions) <= state.contact.separation * 0.01
         });
+        for state in &mut self.surface_states {
+            state.friction.finish(state.contact, &self.positions);
+        }
         cloth.previous.copy_from_slice(&cloth.positions);
         std::mem::swap(&mut cloth.positions, &mut self.positions);
         std::mem::swap(&mut cloth.velocities, &mut self.velocities);
@@ -593,7 +602,7 @@ impl Solver {
         if !self.continuous_motion() {
             self.query(source, None, radius, ContactStage::Prediction, settings)?;
             self.project_contacts(radius, settings.max_contacts)?;
-            return self.project_surface_contacts(h, settings.max_contacts);
+            return self.project_surface_contacts(source, h, settings.max_contacts);
         }
         // CCD supplies contact witnesses at an intermediate safe query pose.
         // Solve those contacts against the full inertial prediction. Scaling the
@@ -610,7 +619,7 @@ impl Solver {
             self.query(source, None, radius, ContactStage::Prediction, settings)?;
             self.positions.copy_from_slice(&self.motion_trial);
             self.project_contacts(radius, settings.max_contacts)?;
-            self.project_surface_contacts(h, settings.max_contacts)?;
+            self.project_surface_contacts(source, h, settings.max_contacts)?;
             if self.motion_fraction(source, ContactStage::Prediction, None)? == 1.0 {
                 return Ok(());
             }
@@ -697,6 +706,12 @@ impl Solver {
                 })
                 .map_or(0.0, |s| s.normal_lambda);
             state.normal_lambda = base + (state.normal_lambda - base) * fraction;
+            let tangent_base = old
+                .peek()
+                .filter(|s| s.contact.key == state.contact.key)
+                .map_or(Vec3::ZERO, |s| s.friction.lambda);
+            state.friction.lambda =
+                tangent_base + (state.friction.lambda - tangent_base) * fraction;
         }
     }
 
@@ -778,14 +793,20 @@ impl Solver {
         }
         Ok(())
     }
-    fn project_surface_contacts(&mut self, h: Real, limit: usize) -> Result<(), ClothError> {
+    fn project_surface_contacts(
+        &mut self,
+        source: &mut impl ContactSource,
+        h: Real,
+        limit: usize,
+    ) -> Result<(), ClothError> {
         self.next_surface_states.clear();
         let mut old = self.surface_states.iter().peekable();
         for &contact in &self.surface_contacts {
             while old.peek().is_some_and(|s| s.contact.key < contact.key) {
                 self.next_surface_states.push(*old.next().unwrap());
             }
-            let mut state = if old.peek().is_some_and(|s| s.contact.key == contact.key) {
+            let existing = old.peek().is_some_and(|s| s.contact.key == contact.key);
+            let mut state = if existing {
                 *old.next().unwrap()
             } else if let Ok(index) = self
                 .previous_surface_states
@@ -796,21 +817,43 @@ impl Solver {
                 SurfaceContactState {
                     contact,
                     normal_lambda: 0.0,
-                    tangent_reference: contact.relative(&self.reference) - contact.offset,
-                    tangent_lambda: Vec3::ZERO,
-                    h,
+                    friction: FrictionState::new(contact, &self.reference),
                 }
             };
+            if !existing {
+                if !state.friction.compatible(&contact, &self.reference) {
+                    state.friction = FrictionState::new(contact, &self.reference);
+                }
+                if state.friction.external() && contact.static_friction > 0.0 {
+                    let material_contact = SurfaceContact {
+                        particles: state.friction.support.particles,
+                        weights: state.friction.support.weights,
+                        ..contact
+                    };
+                    state.friction.anchor = source.transport_surface_anchor(
+                        &material_contact,
+                        state.friction.anchor,
+                        h,
+                    )?;
+                }
+                if !state.friction.anchor.is_finite() {
+                    return Err(ClothError::NonFiniteState);
+                }
+            }
             if state.contact.normal.dot(contact.normal) < 0.9 {
                 state.normal_lambda = 0.0;
-                state.tangent_lambda = Vec3::ZERO;
-                state.tangent_reference = contact.relative(&self.reference) - contact.offset;
             }
             state.contact = contact;
             contact.project_validated(
                 &mut self.positions,
                 &self.weights,
                 &mut state.normal_lambda,
+            )?;
+            state.friction.project(
+                &mut self.positions,
+                &self.weights,
+                contact.normal,
+                state.normal_lambda,
             )?;
             self.next_surface_states.push(state);
             Self::check_surface_capacity(

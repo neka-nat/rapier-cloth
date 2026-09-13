@@ -46,6 +46,23 @@ pub struct ContactMotion<'a> {
 /// Every stage, including prediction, may be queried repeatedly for trial poses
 /// in the same substep. A source must retain unique keys when caching witnesses.
 pub trait ContactSource {
+    /// Move a material point on an external surface from the previous physical
+    /// pose to the current pose. Called once when a friction anchor is adopted
+    /// for a substep, never once per solver iteration. The default describes a
+    /// uniformly translating surface using its contact velocity; rotating
+    /// sources must override it with their complete rigid transform.
+    ///
+    /// This callback is not used for built-in self contacts. A failure or a
+    /// non-finite result aborts the cloth substep without committing history.
+    fn transport_surface_anchor(
+        &mut self,
+        contact: &SurfaceContact,
+        previous_point: Vec3,
+        h: Real,
+    ) -> Result<Vec3, ClothError> {
+        Ok(previous_point + contact.surface_velocity * (h * contact.weights.iter().sum::<Real>()))
+    }
+
     /// Enable external motion checks throughout the solve, independently of
     /// built-in self-collision. The solver reads this once at substep start.
     fn continuous_motion(&self) -> bool {
@@ -282,9 +299,7 @@ impl SurfaceContact {
 pub(crate) struct SurfaceContactState {
     pub contact: SurfaceContact,
     pub normal_lambda: Real,
-    pub tangent_reference: Vec3,
-    pub tangent_lambda: Vec3,
-    pub h: Real,
+    pub friction: crate::collision::friction::FrictionState,
 }
 #[derive(Default)]
 pub struct NoContacts;

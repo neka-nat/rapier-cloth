@@ -153,9 +153,10 @@ pub fn closest_triangle(p: Vec3, triangle: [Vec3; 3]) -> Option<TriangleWitness>
                             [0.0, 1.0 - w, w]
                         } else {
                             let inv = 1.0 / (va + vb + vc);
-                            let v = vb * inv;
-                            let w = vc * inv;
-                            [1.0 - v - w, v, w]
+                            // Use all three signed areas. Subtracting rounded
+                            // v and w from one can produce a negative weight
+                            // beside a vertex even when every area is positive.
+                            [va * inv, vb * inv, vc * inv]
                         }
                     }
                 }

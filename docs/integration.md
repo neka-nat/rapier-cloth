@@ -113,7 +113,8 @@ kinematic motion is treated as physical contact correction.
 Friction acts on relative velocity at the contact point and uses the arithmetic
 mean of cloth and collider coefficients, or `friction_override` when set. Rapier's
 coefficient combination rule is not used. A Coulomb limit bounds the impulse and
-prevents reversing the remaining slip. There is no static-friction history.
+prevents reversing the remaining slip. This legacy particle mode has no
+static-friction history.
 
 ## Discrete self-collision
 
@@ -129,7 +130,7 @@ cloth.set_contact_settings(Some(ClothContactSettings {
     continuous_self_collision: false,
     rigid_surface_collision: false,
     continuous_rigid_collision: false,
-    static_friction: 0.6,       // Reserved; static stick/slip is not implemented yet.
+    static_friction: 0.6,       // Must be at least kinetic_friction.
     kinetic_friction: 0.5,
     limits: CollisionLimits::default(),
 }))?;
@@ -157,9 +158,40 @@ Contact history belongs to each cloth and participates in world checkpoints and
 atomic stepping. `set_positions` and changed contact settings invalidate it; an
 invalid setting or failed substep preserves the previous physical state. Reapplying
 identical settings preserves history. `contact_history_len()` reports retained
-touching surface contacts. The `static_friction` coefficient is validated but its
-static-cone/history behavior remains unimplemented; kinetic friction currently
-acts on relative velocity with equal-and-opposite updates on the two cloth features.
+touching surface contacts.
+
+Surface contacts use experimental persistent static/kinetic friction. A material
+anchor holds while the required tangential multiplier is inside the static
+Coulomb cone of the physical normal load. Outside that cone, the kinetic
+coefficient limits slip resistance. Tangential position corrections participate
+in the same continuous motion checks as other constraints; initial-overlap
+recovery supplies no friction load. The velocity solve uses only additional
+residual impact load, avoiding a second application of position friction.
+Deforming contact participants receive mass-weighted, equal-and-opposite impulses.
+
+Between substeps, closest-point refreshes keep sticking material weights when each witness
+stays within twice the separation distance and the normal dot product is at least
+0.9. Sliding resets the anchor for the next substep. Multipliers restart at zero
+each substep; physical anchors persist. Self-contact anchors follow changes of
+the normal by parallel transport. Rapier external anchors follow the complete
+previous-to-current rigid transform, including rotation about the normal.
+
+Separation, changed material/contact settings, cloth teleports and pin membership
+changes invalidate history. Attach/release and automatic attachment removal also
+clear the affected cloth's history. The Rapier world checkpoints its last surface
+scene; collider pose discontinuities, shape changes and collision-setting changes
+clear history before the next solve. These scene changes conservatively clear all
+cloth histories. For changes in a custom external model or filter that retains
+the same feature keys, call `Cloth::clear_contact_history()` explicitly.
+
+Analytical pull/incline, kinetic-load, moving-support and small stacked-patch
+tests exercise this mode. Complete garment manipulation, general deforming
+contact-frame transport and dense-fold performance remain unqualified.
+
+The position-level Coulomb model follows the approach described in
+[Unified Particle Physics, section 6.1](https://mmacklin.com/uppfrta_preprint.pdf).
+This implementation accumulates bounded multipliers and retains material anchors;
+the paper's performance results do not qualify this solver.
 
 Custom core collision adapters can implement the defaulted
 `ContactSource::surface_contacts` method, returning `SurfaceContact` constraints
@@ -167,6 +199,13 @@ with up to four particles and stable, unique `SurfaceContactKey` values. The
 existing particle-contact callback remains available. Invalid geometry, unresolved
 initial self-intersections and infeasible all-fixed surface contacts return errors
 without committing the cloth state.
+
+Rotating custom sources must override `ContactSource::transport_surface_anchor`.
+It advects the supplied material witness once per adopted substep anchor; its
+default is uniform translation from `surface_velocity`. For generalized weights
+the supplied point is their weighted sum, so translation scales by the weight
+sum. Rapier supplies its exact endpoint transform. A non-finite result or callback
+failure aborts the cloth substep and preserves committed history.
 
 For bounded external surface queries, override
 `ContactSource::surface_contacts_with_work` and charge each primitive candidate
@@ -201,9 +240,9 @@ Required rigid-surface separation is `thickness / 2`; activation adds only a
 candidate margin. For example, 1 mm full thickness rests with its midsurface
 0.5 mm above a plane. The legacy particle contact/sweep path is disabled for that
 cloth, so its numerical `contact_radius` does not inflate the surface offset.
-Kinetic friction combines the new cloth coefficient with collider friction using
-their arithmetic mean; `friction_override` overrides both coefficients. The
-static coefficient remains reserved until static stick/slip is implemented.
+Static and kinetic friction each combine the corresponding cloth coefficient
+with collider friction using their arithmetic mean; `friction_override` overrides
+both combined coefficients.
 
 This configuration performs discrete rigid queries. The continuous flag in the
 example applies to **self-collision only**. Rigid CCD has a separate opt-in below.
@@ -303,7 +342,7 @@ infeasible commands fail atomically.
 This option covers cloth self-contact. The Rapier adapter uses particle contacts
 unless `rigid_surface_collision` separately enables discrete triangle contacts.
 Enable `continuous_rigid_collision` as described above for bounded external checks.
-Static friction, the complete folding task and its CPU budget are not yet qualified.
+The complete folding task and its CPU budget are not yet qualified.
 
 ## Attachments and grasping
 

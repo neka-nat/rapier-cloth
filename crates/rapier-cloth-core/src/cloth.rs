@@ -85,6 +85,11 @@ impl Cloth {
     pub fn contact_history_len(&self) -> usize {
         self.contact_history.len()
     }
+    /// Discard material friction anchors after an external contact model or
+    /// filter change. Positions and velocities are preserved.
+    pub fn clear_contact_history(&mut self) {
+        self.contact_history.clear();
+    }
     pub fn contact_settings(&self) -> Option<crate::collision::ClothContactSettings> {
         self.contact_settings
     }
@@ -121,12 +126,16 @@ impl Cloth {
         if !target.is_finite() {
             return Err(ClothError::InvalidParameter("pin position"));
         }
-        self.pins.insert(i, target);
+        if self.pins.insert(i, target).is_none() {
+            self.contact_history.clear();
+        }
         Ok(())
     }
     pub fn unpin(&mut self, i: u32) -> Result<(), ClothError> {
         self.check_particle(i)?;
-        self.pins.remove(&i);
+        if self.pins.remove(&i).is_some() {
+            self.contact_history.clear();
+        }
         Ok(())
     }
     pub fn set_velocity(&mut self, i: u32, v: Vec3) -> Result<(), ClothError> {

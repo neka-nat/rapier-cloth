@@ -286,6 +286,22 @@ fn merge_sweep_contacts(
 }
 
 impl ContactSource for RapierContacts<'_, '_> {
+    fn transport_surface_anchor(
+        &mut self,
+        contact: &crate::SurfaceContact,
+        previous_point: Vec3,
+        _h: Real,
+    ) -> Result<Vec3, ClothError> {
+        let start = Instant::now();
+        let result = self.transport_anchor(contact, previous_point);
+        self.query_time_seconds += start.elapsed().as_secs_f64();
+        result.map_err(|e| {
+            let message = e.to_string();
+            self.error = Some(e);
+            ClothError::External(message)
+        })
+    }
+
     fn continuous_motion(&self) -> bool {
         self.surface_settings
             .is_some_and(|s| s.continuous_rigid_collision)

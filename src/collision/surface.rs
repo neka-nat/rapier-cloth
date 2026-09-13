@@ -107,6 +107,51 @@ impl TriangleContactQuery<'_> {
 }
 
 impl RapierContacts<'_, '_> {
+    pub(super) fn transport_anchor(
+        &self,
+        contact: &SurfaceContact,
+        previous_point: Vec3,
+    ) -> Result<Vec3, IntegrationError> {
+        let object = contact
+            .key
+            .features
+            .iter()
+            .find_map(|f| match f {
+                SurfaceFeature::External { object, .. } => Some(*object),
+                _ => None,
+            })
+            .ok_or(ClothError::InvalidSurfaceContact(
+                "missing external anchor identity",
+            ))?;
+        let raw = (object as u32, (object >> 32) as u32);
+        let handle = ColliderHandle::from_raw_parts(raw.0, raw.1);
+        let collider = self
+            .scene
+            .query
+            .colliders
+            .get(handle)
+            .ok_or(IntegrationError::MissingPreviousPose(handle))?;
+        if !collider
+            .parent()
+            .and_then(|h| self.scene.query.bodies.get(h))
+            .is_some_and(|body| body.is_kinematic())
+        {
+            // Fixed geometry has no prescribed physical trajectory. Discrete
+            // stabilization uses its current pose; a teleport is not frictional
+            // surface velocity. Continuous mode rejects that motion separately.
+            return Ok(previous_point);
+        }
+        let previous = self
+            .scene
+            .previous
+            .colliders
+            .get(&raw)
+            .ok_or(IntegrationError::MissingPreviousPose(handle))?;
+        let total: Real = contact.weights.iter().sum();
+        let local = previous.rotation.inverse() * (previous_point - previous.translation * total);
+        Ok(collider.position().rotation * local + collider.position().translation * total)
+    }
+
     pub(super) fn generate_surface(
         &mut self,
         _previous: &[Vec3],
