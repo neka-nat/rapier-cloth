@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Make the shared folding task transactional across Rapier, cloth/contact history, grasp/release commands, events and time. Failed substeps restore the last accepted state before returning the error; task checkpoint costs remain inside benchmark timings. Add grasp, partial-attachment, release and retry regressions in both precisions.
+
 - Add schema-2 folding diagnostics with per-frame timing samples, initial and per-step audits, both attachment kinds, grasp/release coverage and explicit final-settling observations. Add a strict correctness report checker and six-variant f32/f64 suite validation. Full folding, CPU performance and live qualification remain open.
 
 - Differentiate self-friction in material coordinates, including support rotation during slip. Use the full tangent effective mass and retain actual per-vertex corrections through frame refresh, motion shortening and unloading. Add independent virtual-work, force/moment, weak-direction and atomic-error tests; complete folding and CPU qualification remain open.

@@ -262,6 +262,52 @@ pub struct FoldingWorld {
     pub step: u64,
     pub base_height: f64,
 }
+
+/// Physical Rapier state for one task transaction. Pipeline buffers are scratch
+/// and are recreated only on rollback; collider clones retain shared shapes.
+struct RigidCheckpoint {
+    gravity: Vec3,
+    integration_parameters: IntegrationParameters,
+    islands: IslandManager,
+    broad_phase: BroadPhaseBvh,
+    narrow_phase: NarrowPhase,
+    bodies: RigidBodySet,
+    colliders: ColliderSet,
+    impulse_joints: ImpulseJointSet,
+    multibody_joints: MultibodyJointSet,
+    ccd_solver: CCDSolver,
+}
+impl RigidCheckpoint {
+    fn capture(world: &PhysicsWorld) -> Self {
+        Self {
+            gravity: world.gravity,
+            integration_parameters: world.integration_parameters,
+            islands: world.islands.clone(),
+            broad_phase: world.broad_phase.clone(),
+            narrow_phase: world.narrow_phase.clone(),
+            bodies: world.bodies.clone(),
+            colliders: world.colliders.clone(),
+            impulse_joints: world.impulse_joints.clone(),
+            multibody_joints: world.multibody_joints.clone(),
+            ccd_solver: world.ccd_solver.clone(),
+        }
+    }
+    fn restore(self, world: &mut PhysicsWorld) {
+        *world = PhysicsWorld {
+            gravity: self.gravity,
+            integration_parameters: self.integration_parameters,
+            physics_pipeline: PhysicsPipeline::new(),
+            islands: self.islands,
+            broad_phase: self.broad_phase,
+            narrow_phase: self.narrow_phase,
+            bodies: self.bodies,
+            colliders: self.colliders,
+            impulse_joints: self.impulse_joints,
+            multibody_joints: self.multibody_joints,
+            ccd_solver: self.ccd_solver,
+        };
+    }
+}
 impl FoldingWorld {
     /// F01 baseline intentionally retains the library's particle collision mode.
     pub fn new(config: Config, variant_index: usize) -> Result<Self, Box<dyn std::error::Error>> {
@@ -341,7 +387,26 @@ impl FoldingWorld {
             [n - 2, n - 1, 2 * n - 2, 2 * n - 1]
         }
     }
+    /// Commit one physical substep and its task events together. On error, the
+    /// caller may inspect the last accepted state, repair the cause, and retry.
+    /// Checkpoint cost belongs to the task's timed physics scope.
     pub fn tick(&mut self) -> Result<WorldStepReport, IntegrationError> {
+        let cloth = self.world.checkpoint()?;
+        let rigid = RigidCheckpoint::capture(&self.rigid);
+        let attachments = self.attachments;
+        let step = self.step;
+        match self.advance() {
+            Ok(report) => Ok(report),
+            Err(error) => {
+                rigid.restore(&mut self.rigid);
+                self.attachments = attachments;
+                self.step = step;
+                self.world.restore(&cloth)?;
+                Err(error)
+            }
+        }
+    }
+    fn advance(&mut self) -> Result<WorldStepReport, IntegrationError> {
         let next = self.step + 1;
         if next == self.config.attach_step && self.config.version == 1 {
             self.attach_grippers()?;

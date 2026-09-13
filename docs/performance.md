@@ -59,6 +59,13 @@ An exit code of zero means the
 diagnostic wrote its report; inspect `failure`, `steps` and geometry/task metrics
 before interpreting the result as a completed trajectory.
 
+Each shared folding-task substep checkpoints both worlds before moving grippers
+or changing grasps. A failed substep restores Rapier state, cloth/contact history,
+attachment handles, queued events and task time to the last accepted state.
+After correcting the cause, a retry consumes that same substep. These task
+checkpoint costs are included in the folding benchmark's physics-frame time;
+the core scratch counter does not include checkpoint or Rapier memory.
+
 Use `--fixture-version 2` with surface-rigid contact. Version 2 captures grasp
 anchors after the final approach movement and before solving the cloth, avoiding
 a downward target jump into the table when grasping. Mesh, material, trajectories,
