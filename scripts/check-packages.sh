@@ -73,6 +73,11 @@ assert math.isfinite(report['max_target_error']) and report['max_target_error'] 
 assert all(math.isfinite(b) and b > 0 for b in report['barycentric'])
 print(f'Verified: extracted {sys.argv[2]} surface_grasp example lifted and released.')
 PY
+  cargo build --offline --manifest-path "$unpacked/rapier-cloth-0.1.0/Cargo.toml" \
+    --config "patch.crates-io.rapier-cloth-core.path=\"$unpacked/rapier-cloth-core-0.1.0\"" \
+    --target-dir "$consumer/target" --no-default-features --features "$precision" --example fold_towel
+  python3 scripts/check-folding-example.py --binary "$consumer/target/debug/examples/fold_towel" \
+    --precision "$precision" --output "$package_check_dir/fold-$precision"
   cargo metadata --offline --format-version 1 --manifest-path "$consumer/Cargo.toml" > "$package_check_dir/metadata-$precision.json"
   python3 - "$package_check_dir/metadata-$precision.json" "$unpacked" <<'PY'
 import json, pathlib, sys

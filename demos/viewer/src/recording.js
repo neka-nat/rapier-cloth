@@ -34,5 +34,15 @@ export function validateRecording(record) {
     requireValue(Array.isArray(frame.anchors) && frame.anchors.length === frame.attached_particles.length && frame.anchors.every(p => finiteVector(p, 3)), 'anchors');
     requireValue(frame.diagnostics && ['max_stretch','p95_stretch','max_penetration','max_target_error','contacts'].every(key => Number.isFinite(frame.diagnostics[key]) && frame.diagnostics[key] >= 0), 'diagnostics');
   }
+  if (record.outcome !== undefined) {
+    const result = record.outcome;
+    requireValue(result && ['solver_error', 'step_limit', 'completed'].includes(result.stop_reason), 'outcome stop_reason');
+    requireValue(Number.isSafeInteger(result.steps) && result.steps === lastStep, 'outcome accepted steps');
+    requireValue(Number.isSafeInteger(result.end_step) && result.end_step > 0 && result.end_step >= result.steps, 'outcome end step');
+    requireValue((result.stop_reason === 'completed') === (result.steps === result.end_step), 'outcome completion');
+    requireValue(result.stop_reason === 'solver_error'
+      ? typeof result.failure === 'string' && result.failure.length > 0
+      : result.failure === null, 'outcome failure');
+  }
   return record;
 }

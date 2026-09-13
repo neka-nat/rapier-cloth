@@ -46,6 +46,12 @@ function load(data, name) {
   anchorPoints = makePoints('#f5a94d'); pinPoints = makePoints('#f898b2'); content.add(anchorPoints, pinPoints);
   $('timeline').max = record.frames.length - 1; $('play').disabled = false;
   $('precision').textContent = record.precision;
+  $('outcome').hidden = !record.outcome;
+  $('outcome').textContent = !record.outcome ? '' : ({
+    completed: 'Trajectory completed. Fold quality requires the audited summary.',
+    step_limit: `Partial recording: ${record.outcome.steps} of ${record.outcome.end_step} task steps.`,
+    solver_error: `Simulation stopped at step ${record.outcome.steps} of ${record.outcome.end_step}. ${record.outcome.failure}`,
+  })[record.outcome.stop_reason];
   $('mesh-info').textContent = `${name} · ${record.frames[0].positions.length} VERTICES · ${record.triangles.length} TRIANGLES`;
   $('error').textContent = ''; showFrame(0);
 }

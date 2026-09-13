@@ -57,6 +57,13 @@ through your shell on Windows. An existing Chromium executable can be selected w
 the actual Rust server on port 9174 and a production preview on port 4174. Screenshots
 and reports are written under `demos/viewer/test-results/`.
 
+Replay tests also build and run `fold_towel` in f32 and f64, then load the generated
+nine-step recordings through the browser file input. They check actual rendering
+buffers, both grippers and partial-run status; this is startup/replay coverage,
+not complete folding qualification. For a retained longer recording, set
+`CLOTH_FOLD_RECORDING_F32` or `CLOTH_FOLD_RECORDING_F64` to its absolute path.
+Unspecified precisions still generate their short recording normally.
+
 ## Documentation, examples and package checks
 
 ```bash

@@ -13,6 +13,7 @@ work and performance measurements. For a graphical simulation, start with the
 | [moving_anchor](../examples/moving_anchor.rs) | A particle attached to a kinematic body, then released | Released position and velocity after 1 second |
 | [surface_grasp](../examples/surface_grasp.rs) | Exposed triangle-interior selection, weighted lift and release | JSON tracking and release summary |
 | [pick_and_place](../examples/pick_and_place.rs) | Multi-vertex grasping, lifting, transport and release | JSON summary and optional recording |
+| [fold_towel](../examples/fold_towel.rs) | Experimental dual-gripper towel folding with continuous self/rigid contact | Audited summary and optional recording, including a partial result if the solver stops |
 
 ```bash
 cargo run --locked --release --example hanging_cloth
@@ -52,9 +53,52 @@ while moving at 0.2 m/s. The simulation ends at 6.5 s. Recording every four subs
 produces 391 frames including the initial state.
 
 Grasping uses explicit attachments. It does not model fingertip grasping through
-static friction. Self-intersection can occur because self-collision is unsupported.
+static friction. This example leaves self-collision disabled, so self-intersection can occur.
 The summary records motion and deformation diagnostics separately; see the
 [recording format](recording-format.md).
+
+## Experimental towel folding
+
+```bash
+cargo run --locked --release --example fold_towel -- --help
+cargo run --locked --release --example fold_towel -- --record target/fold-01/f32.json --summary target/fold-01/f32-summary.json
+cargo run --locked --release --no-default-features --features f64 --example fold_towel -- --record target/fold-01/f64.json --summary target/fold-01/f64-summary.json
+```
+
+The example runs [fixture 2](../examples/support/fold_fixture_v2.json): one 32×32,
+0.5 m towel, a fixed table and two kinematic grippers. It uses physical thickness
+of 1 mm, both continuous collision modes, eight solver iterations and four explicit
+1/240 s substeps per recorded frame. A separate 120-step warmup precedes the task.
+The nominal trajectory has 3,600 substeps and includes grasp, lift, half-fold,
+lowering, release and final settling. `--variant 0..5` selects a frozen trajectory.
+
+Complete folding and real-time performance are not yet qualified. The current
+solver can stop during lowering, before release. The example uses the same task,
+transactional step and independent audits as the [folding benchmark](performance.md#folding-development-trajectory).
+On a solver failure during the task it writes the failure summary and, when
+requested, a recording through the last accepted state. Loading that recording
+in the viewer shows both grippers and the reason the run stopped.
+
+For a short startup check, use a new output path:
+
+```bash
+cargo run --locked --release --example fold_towel -- --max-steps 9 --record target/fold-smoke-01.json
+```
+
+Exit **2** means the requested partial run ended; exit **1** means a solver or
+execution error; exit **0** means the trajectory completed. Completion alone does
+not certify fold quality. From a clean repository checkout, use the
+[correctness checker](performance.md#check-a-folding-correctness-report) on the
+summary. Partial runs are rejected by that checker. Existing output files are
+never overwritten; initialization or output errors may leave empty reserved files.
+
+The summary uses schema 2; replay uses schema 1 with optional outcome metadata.
+Recordings contain the initial state, every fourth accepted substep and the final
+accepted state, including an incomplete frame. They are inspection data, not
+checkpoints. Recordings currently support this task's vertex grasps; weighted
+surface attachments cannot be encoded in v1. The table displayed by the viewer
+is a finite box representing the physical half-space. This example is headless;
+the live server currently offers the drape and hanging scenes.
 
 ## Replay in the browser
 

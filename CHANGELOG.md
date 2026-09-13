@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add the experimental `fold_towel` headless example, sharing execution and audits with the folding benchmark. Preserve accepted frames on task solver failure, distinguish partial/completed/error outcomes, and show both grippers and stopping status in browser replay. Add CLI, recording, extracted-example and browser checks. Complete folding and CPU/live qualification remain open.
+
 - Make the shared folding task transactional across Rapier, cloth/contact history, grasp/release commands, events and time. Failed substeps restore the last accepted state before returning the error; task checkpoint costs remain inside benchmark timings. Add grasp, partial-attachment, release and retry regressions in both precisions.
 
 - Add schema-2 folding diagnostics with per-frame timing samples, initial and per-step audits, both attachment kinds, grasp/release coverage and explicit final-settling observations. Add a strict correctness report checker and six-variant f32/f64 suite validation. Full folding, CPU performance and live qualification remain open.

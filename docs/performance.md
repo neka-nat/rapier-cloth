@@ -66,6 +66,16 @@ After correcting the cause, a retry consumes that same substep. These task
 checkpoint costs are included in the folding benchmark's physics-frame time;
 the core scratch counter does not include checkpoint or Rapier memory.
 
+The [headless folding example](examples.md#experimental-towel-folding) shares the
+benchmark's execution and audit helper. Its `stop_reason` distinguishes completed,
+requested partial and solver-error results. Recording callbacks run outside the
+physics stopwatch. Their allocations and the interleaved task/oracle work can
+still affect the process workload, so recorded example timings are diagnostic.
+The source identity is taken from the checkout used to build the helper,
+independently of the launch directory. An extracted crate without that checkout
+reports unknown/unqualified source metadata; verify its archive provenance
+separately instead of presenting an unrelated enclosing checkout as its source.
+
 Use `--fixture-version 2` with surface-rigid contact. Version 2 captures grasp
 anchors after the final approach movement and before solving the cloth, avoiding
 a downward target jump into the table when grasping. Mesh, material, trajectories,
@@ -82,6 +92,10 @@ cargo bench --locked --bench folding -- --fixture-version 2 --continuous-rigid-c
 # Separate timing run without the interleaved geometric oracle.
 cargo bench --locked --bench folding -- --fixture-version 2 --continuous-rigid-collision --continuous-self-collision --repeats 5 --output target/folding/continuous-timing-v2-01
 ```
+
+Omitting `--verify` removes the per-substep geometric oracle; task metrics still
+run outside the stopwatch. Dedicated CPU qualification must account for this
+remaining interleaved work and measure complete runs on the target host.
 
 ### Check a folding correctness report
 

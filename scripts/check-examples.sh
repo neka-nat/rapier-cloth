@@ -26,7 +26,10 @@ assert recording['frames'][0]['positions'] != recording['frames'][-1]['positions
 assert all(math.isfinite(x) for frame in recording['frames'] for p in frame['positions'] for x in p)
 assert any(frame['attached_particles'] for frame in recording['frames'])
 assert recording['frames'][-1]['attached_particles'] == []
-print(f'All five {precision} examples ran; grasp, recording and stdout/file summary verified.')
+print(f'Five {precision} examples ran; grasp, recording and stdout/file summary verified.')
 PY
+  cargo build --locked --release --no-default-features --features "$precision" --example fold_towel
+  python3 scripts/check-folding-example.py --binary "${CARGO_TARGET_DIR:-target}/release/examples/fold_towel" \
+    --precision "$precision" --output "$example_check_dir/fold-$precision" --checkout "$PWD"
 done
 printf 'Example outputs: %s\n' "$example_check_dir"
