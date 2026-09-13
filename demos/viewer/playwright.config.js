@@ -1,6 +1,6 @@
 import { defineConfig } from '@playwright/test';
 export default defineConfig({
-  testDir:'./tests', timeout:30_000, fullyParallel:false,
+  testDir:'./tests', testMatch:'replay.spec.js', timeout:30_000, fullyParallel:false,
   use:{baseURL:'http://127.0.0.1:4173',headless:true,viewport:{width:1280,height:850},
     launchOptions:{...(process.env.CHROME_PATH ? {executablePath:process.env.CHROME_PATH}:{}),args:['--enable-unsafe-swiftshader']},
   },

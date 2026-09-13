@@ -52,14 +52,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 連成は一方向です。自己衝突、布の辺・面のCCD、動的剛体への反作用、任意TriMesh、静止摩擦だけによる把持は未対応です。初版の把持は明示的なattachmentを使います。
 
 ```bash
-cargo run --release --example pick_and_place -- --record target/run-01/cloth.json --summary target/run-01/summary.json
 npm --prefix demos/viewer ci
-npm --prefix demos/viewer run dev
+npm --prefix demos/viewer run live
 ```
+
+http://127.0.0.1:5173/live.html で、Rustがその場で計算する布を操作できます。球へのdrape、風、停止・再開、固定解除に対応します。初回はRustのreleaseビルドを行います。[ライブデモの使い方](docs/live-demo.ja.md)。
 
 CPU性能は32×32・1枚、1/240秒×4回・8反復を[実測](docs/benchmarks.ja.md#realtime-cpu)しています。利用時はreleaseビルドで、描画も含むframe時間を確認してください。
 
-viewerはRustの記録を再生します。「記録を開く」で生成したJSONを選べます。
+従来のviewerはRustの記録を再生します。[記録の生成と再生](docs/examples.ja.md)も利用できます。
 
 - [時間同期・接触・把持・失敗からの復元](docs/integration.ja.md)
 - [実行例と記録形式](docs/examples.ja.md) / [性能計測](docs/benchmarks.ja.md)

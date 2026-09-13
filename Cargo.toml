@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/rapier-cloth-core"]
-exclude = ["tests/consumers/f32", "tests/consumers/f64"]
+exclude = ["tests/consumers/f32", "tests/consumers/f64", "demos/live-server"]
 resolver = "2"
 
 [workspace.package]
