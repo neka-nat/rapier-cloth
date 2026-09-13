@@ -4,13 +4,6 @@ use super::{folding::*, folding_report, oracle};
 use serde_json::json;
 use std::{process::Command, time::Instant};
 
-#[derive(Default, Clone, Copy)]
-pub struct CollisionMode {
-    pub self_collision: bool,
-    pub continuous_self: bool,
-    pub rigid_surface: bool,
-    pub continuous_rigid: bool,
-}
 pub fn output(command: &str, args: &[&str]) -> String {
     Command::new(command)
         .args(args)
@@ -238,28 +231,4 @@ pub fn run_world(
         "final_targets":final_targets,
         "finite":positions.iter().flatten().all(|x|x.is_finite()),"diagnostics_finite":diagnostics_finite
     }))
-}
-pub fn configured_world(
-    config: Config,
-    variant: usize,
-    mode: CollisionMode,
-) -> Result<FoldingWorld, Box<dyn std::error::Error>> {
-    let mut simulation = FoldingWorld::new(config, variant)?;
-    if mode.self_collision || mode.rigid_surface {
-        simulation
-            .world
-            .cloth_mut(simulation.cloth)?
-            .set_contact_settings(Some(rapier_cloth::ClothContactSettings {
-                thickness: real(simulation.config.thickness),
-                activation_margin: real(simulation.config.activation_margin),
-                static_friction: real(simulation.config.static_friction),
-                kinetic_friction: real(simulation.config.kinetic_friction),
-                continuous_self_collision: mode.continuous_self,
-                self_collision: mode.self_collision,
-                rigid_surface_collision: mode.rigid_surface,
-                continuous_rigid_collision: mode.continuous_rigid,
-                ..Default::default()
-            }))?;
-    }
-    Ok(simulation)
 }

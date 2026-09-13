@@ -1,4 +1,8 @@
 //! Local, demand-driven demo transport. Each connection owns one simulation.
+#[path = "../../../examples/support/folding.rs"]
+mod folding;
+#[path = "../../../examples/support/folding_oracle.rs"]
+mod folding_oracle;
 mod simulation;
 use axum::{
     Router,
@@ -123,7 +127,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/health",
             get(|| async {
-                axum::Json(serde_json::json!({"name":"rapier-cloth-live","protocol":1}))
+                axum::Json(
+                    serde_json::json!({"name":"rapier-cloth-live","protocol":simulation::PROTOCOL}),
+                )
             }),
         )
         .route("/live/ws", get(upgrade))

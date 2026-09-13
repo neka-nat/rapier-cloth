@@ -18,7 +18,9 @@ npm --prefix demos/viewer run live
 
 Open **http://127.0.0.1:5173/live.html** to drape cloth over a sphere, adjust wind,
 move the obstacle and release pinned vertices. The launcher builds a local Rust
-CPU server and starts the browser UI. See the [live demo guide](docs/live-demo.md)
+CPU server and starts the browser UI. An experimental towel scene adds two scripted
+grippers and independent release controls; full folding and its real-time budget
+remain unqualified. See the [live demo guide](docs/live-demo.md)
 for controls and requirements.
 
 ## Use from Rust

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a live towel scene using the same initialized task and transactional substeps as `fold_towel`. Live protocol 2 carries both grippers, vertex/weighted grasp points, accepted substeps and stopped state; add independent gripper release and on-demand shape inspection. Preserve the accepted prefix of a failed request and latch further physics until reset. Full folding and CPU qualification remain open.
+
 - Add the experimental `fold_towel` headless example, sharing execution and audits with the folding benchmark. Preserve accepted frames on task solver failure, distinguish partial/completed/error outcomes, and show both grippers and stopping status in browser replay. Add CLI, recording, extracted-example and browser checks. Complete folding and CPU/live qualification remain open.
 
 - Make the shared folding task transactional across Rapier, cloth/contact history, grasp/release commands, events and time. Failed substeps restore the last accepted state before returning the error; task checkpoint costs remain inside benchmark timings. Add grasp, partial-attachment, release and retry regressions in both precisions.

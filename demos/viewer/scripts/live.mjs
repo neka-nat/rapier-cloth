@@ -37,7 +37,7 @@ try {
     let healthy = false;
     for (let attempt = 0; attempt < 100 && !stopping; attempt++) {
       await new Promise(resolve => setTimeout(resolve,100));
-      try { const res = await fetch(`http://127.0.0.1:${serverPort}/health`,{signal:AbortSignal.timeout(500)}); healthy = res.ok && (await res.json()).name === 'rapier-cloth-live'; } catch { /* wait for bind */ }
+      try { const res = await fetch(`http://127.0.0.1:${serverPort}/health`,{signal:AbortSignal.timeout(500)}); const status = await res.json(); healthy = res.ok && status.name === 'rapier-cloth-live' && status.protocol === 2; } catch { /* wait for bind */ }
       if (healthy) break;
     }
     if (!healthy || stopping) throw new Error('CPU server did not start');

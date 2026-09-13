@@ -64,6 +64,12 @@ not complete folding qualification. For a retained longer recording, set
 `CLOTH_FOLD_RECORDING_F32` or `CLOTH_FOLD_RECORDING_F64` to its absolute path.
 Unspecified precisions still generate their short recording normally.
 
+Live tests exercise both grippers, queued releases, shape inspection and reset.
+The nominal towel test runs to a solver stop or the end of the task and can take
+several minutes. It verifies application state delivery/recovery, not fold quality
+or a CPU budget; a solver stop remains a failed folding result. Retained terminal
+frames and screenshots are written to the test output directory.
+
 ## Documentation, examples and package checks
 
 ```bash

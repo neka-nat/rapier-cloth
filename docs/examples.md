@@ -97,8 +97,9 @@ Recordings contain the initial state, every fourth accepted substep and the fina
 accepted state, including an incomplete frame. They are inspection data, not
 checkpoints. Recordings currently support this task's vertex grasps; weighted
 surface attachments cannot be encoded in v1. The table displayed by the viewer
-is a finite box representing the physical half-space. This example is headless;
-the live server currently offers the drape and hanging scenes.
+is a finite box representing the physical half-space. The
+[live towel scene](live-demo.md#experimental-towel-task) uses the same task and
+provides independent gripper release and on-demand shape measurements.
 
 ## Replay in the browser
 

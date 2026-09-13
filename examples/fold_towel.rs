@@ -12,8 +12,8 @@ mod oracle;
 #[path = "support/recording.rs"]
 mod recording;
 
-use folding::Config;
-use folding_run::{CollisionMode, configured_world, output, run, source_identity};
+use folding::{CollisionMode, Config, configured_world};
+use folding_run::{output, run, source_identity};
 use std::{fs, io::Write, path::Path, process::ExitCode};
 
 fn reserve(path: Option<&str>) -> Result<Option<fs::File>, Box<dyn std::error::Error>> {
