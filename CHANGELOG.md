@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Complete elastic and contact projections as one trial before continuous motion checks. Restore contact thickness after a shortened trial with a separately checked correction, fixing edge-length recovery for compressed cloth supported by a surface.
+- Reuse exact unchanged self-contact queries and certified initial geometry. Invalidate derived caches on changed inputs, topology or settings, and preserve initial-intersection checks, retained-contact limits and scratch-memory accounting.
 - Add opt-in `continuous_rigid_collision` for bounded sphere/box/capsule/fixed-plane sweeps, including all solver correction stages with self-collision disabled. Add defaulted external motion callbacks, immutable shape snapshots, shared work limits and atomic failure tests. Update explicit contact-settings literals for the new field.
 - Validate the declared rigid trajectory against Rapier 0.34's normalized quaternion integration and damping. Reject ambiguous velocity-based rotations reaching half a turn per external step; existing motion limits still apply. Add transformed analytical crossings, offset arcs and moving/rotating support regressions.
 - Add `--continuous-rigid-collision` to the folding diagnostic, implying rigid-surface contacts and recording the actual swept minimum. Full folding and real-time performance remain unqualified.

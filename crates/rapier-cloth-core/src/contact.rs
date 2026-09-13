@@ -30,6 +30,10 @@ pub enum ContactStage {
 /// Proposed linear cloth motion. Prediction and Final span the source's whole
 /// physical substep. Stabilization uses its previous obstacle pose; Iteration
 /// holds obstacles at their current pose while cloth constraints are corrected.
+/// An iteration combines elastic, target and contact projections into a trial
+/// before checking it. A shortened trial may require a separately checked
+/// contact correction to restore thickness. Intermediate trials are not states
+/// committed to the cloth, and callback counts are not fixed per iteration.
 #[derive(Debug, Clone, Copy)]
 pub struct ContactMotion<'a> {
     pub start: &'a [Vec3],

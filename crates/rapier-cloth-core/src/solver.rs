@@ -291,6 +291,14 @@ impl Solver {
                 self.target_lambda[j] += dl;
                 self.positions[i] += dl * self.weights[i];
             }
+            // Elastic and contact projections together form one trial. A
+            // penetrated intermediate elastic pose is not an accepted motion:
+            // normal contact may restore separation while retaining tangential
+            // stretch recovery. Certify the completed trial from the previous
+            // accepted pose, and scale every contributing multiplier together.
+            self.query(source, None, radius, ContactStage::Iteration, settings)?;
+            self.project_contacts(radius, settings.max_contacts)?;
+            self.project_surface_contacts(h, settings.max_contacts)?;
             let fraction = self.accept_motion(source, ContactStage::Iteration)?;
             if fraction < 1.0 {
                 for (value, &before) in self
@@ -311,11 +319,20 @@ impl Solver {
                     *value = before + (*value - before) * fraction;
                 }
             }
-            self.query(source, None, radius, ContactStage::Iteration, settings)?;
-            self.capture_motion();
-            self.project_contacts(radius, settings.max_contacts)?;
-            self.project_surface_contacts(h, settings.max_contacts)?;
-            self.accept_contact_motion(source)?;
+            self.scale_contact_motion(fraction);
+            if fraction < 1.0 {
+                // A distant trial can pass beyond a feature's discrete contact
+                // margin before CCD shortens it. Refresh at the accepted prefix
+                // to restore full thickness; otherwise repeated elastic trials
+                // consume its small numerical clearance without ever activating
+                // normal contact. This correction has its own certified sweep.
+                self.query(source, None, radius, ContactStage::Iteration, settings)?;
+                self.capture_motion();
+                self.project_contacts(radius, settings.max_contacts)?;
+                self.project_surface_contacts(h, settings.max_contacts)?;
+                let fraction = self.accept_motion(source, ContactStage::Iteration)?;
+                self.scale_contact_motion(fraction);
+            }
         }
         // Also certify the observable substep's linear endpoint sweep, rather
         // than relying only on the piecewise path of accepted solver batches.
@@ -631,10 +648,9 @@ impl Solver {
             "rounded endpoint could not be certified",
         ))
     }
-    fn accept_contact_motion(&mut self, source: &mut impl ContactSource) -> Result<(), ClothError> {
-        let fraction = self.accept_motion(source, ContactStage::Iteration)?;
+    fn scale_contact_motion(&mut self, fraction: Real) {
         if fraction == 1.0 {
-            return Ok(());
+            return;
         }
         // After the sorted-state swaps, the next_* arrays still contain the
         // old states. Scale only this batch's multipliers, matching its accepted
@@ -673,7 +689,6 @@ impl Solver {
                 .map_or(0.0, |s| s.normal_lambda);
             state.normal_lambda = base + (state.normal_lambda - base) * fraction;
         }
-        Ok(())
     }
 
     fn query(

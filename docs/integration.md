@@ -273,8 +273,13 @@ budget exhaustion returns `CollisionBudgetExceeded`. Neither commits the cloth.
 Prediction uses swept witnesses to solve contacts against the full inertial
 prediction, preserving tangential motion at zero friction and normal support for
 kinetic friction. Elastic/contact trial corrections can be shortened together with
-their multiplier increments. Hard target commands are still required to be reached
-within the precision's length tolerance; infeasible commands fail atomically.
+their multiplier increments. Each solver iteration completes elastic, target and
+contact projections before checking their combined displacement. If that trial
+must be shortened, contacts are refreshed at the accepted pose and their thickness
+correction is checked separately. This lets a supported patch recover its edge
+lengths without accepting a penetrated intermediate elastic pose. Hard target
+commands are still required to be reached within the precision's length tolerance;
+infeasible commands fail atomically.
 `surface_collision.limited_advances` counts motion checks requesting a reduction.
 
 This option covers cloth self-contact. The Rapier adapter uses particle contacts

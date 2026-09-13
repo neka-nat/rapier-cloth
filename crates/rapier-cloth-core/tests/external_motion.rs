@@ -83,15 +83,15 @@ fn source_checks_all_stages_without_builtin_self_collision() {
                 .count(),
             2
         );
-        // Every iteration certifies both the elastic/target batch and the
-        // subsequent contact batch, including an empty external contact set.
+        // Every iteration certifies the completed elastic/target/contact trial
+        // from the previous accepted pose, including an empty contact set.
         assert_eq!(
             source
                 .stages
                 .iter()
                 .filter(|s| **s == ContactStage::Iteration)
                 .count(),
-            settings.iterations * 2
+            settings.iterations
         );
         assert_eq!(report.surface_collision.ccd_checks, source.stages.len());
     }

@@ -197,6 +197,10 @@ pub(crate) struct SelfCollision {
     generated: Vec<SurfaceContact>,
     motion_contacts: Vec<SurfaceContact>,
     initial_checked: bool,
+    checked_initial_positions: Vec<Vec3>,
+    cached_positions: Vec<Vec3>,
+    cached_previous: Vec<Vec3>,
+    contact_cache_valid: bool,
 }
 impl SelfCollision {
     pub fn new(mesh: Arc<ClothMesh>, settings: ClothContactSettings) -> Self {
@@ -215,9 +219,17 @@ impl SelfCollision {
             generated: vec![],
             motion_contacts: vec![],
             initial_checked: false,
+            checked_initial_positions: vec![],
+            cached_positions: vec![],
+            cached_previous: vec![],
+            contact_cache_valid: false,
         }
     }
     pub fn begin(&mut self, mesh: Arc<ClothMesh>, settings: ClothContactSettings) {
+        if !Arc::ptr_eq(&mesh, &self.mesh) || settings != self.settings {
+            self.contact_cache_valid = false;
+            self.checked_initial_positions.clear();
+        }
         if !Arc::ptr_eq(&mesh, &self.mesh) {
             self.topology = mesh.collision_topology().clone();
             self.mesh = mesh;
@@ -432,6 +444,8 @@ impl SelfCollision {
             }
         }
         self.initial_checked = true;
+        self.checked_initial_positions.clear();
+        self.checked_initial_positions.extend_from_slice(positions);
         Ok(())
     }
     pub fn generate(
@@ -441,9 +455,37 @@ impl SelfCollision {
         out: &mut Vec<SurfaceContact>,
         include_motion_contacts: bool,
     ) -> Result<(), ClothError> {
-        self.refit(positions)?;
+        let mut refitted = false;
         if !self.initial_checked {
-            self.validate_initial(positions)?;
+            if positions == self.checked_initial_positions {
+                self.initial_checked = true;
+            } else {
+                self.refit(positions)?;
+                refitted = true;
+                self.validate_initial(positions)?;
+            }
+        }
+        // Exact pose reuse only: there is no movement tolerance or stale BVH
+        // envelope. An empty discrete result does not depend on old orientation;
+        // nonempty contacts also require the same previous witness positions.
+        // Motion seeds are query-specific and never become a cached result.
+        if !include_motion_contacts
+            && self.contact_cache_valid
+            && positions == self.cached_positions
+            && (self.generated.is_empty() || previous == self.cached_previous)
+        {
+            self.work.charge(
+                CollisionBudgetKind::RetainedContacts,
+                self.generated.len(),
+                self.settings.limits,
+            )?;
+            out.extend_from_slice(&self.generated);
+            return Ok(());
+        }
+        // Invalidate before mutating a result, including on any failing query.
+        self.contact_cache_valid = false;
+        if !refitted {
+            self.refit(positions)?;
         }
         self.generated.clear();
         if include_motion_contacts {
@@ -521,6 +563,13 @@ impl SelfCollision {
             self.generated.len(),
             self.settings.limits,
         )?;
+        if !include_motion_contacts {
+            self.cached_positions.clear();
+            self.cached_positions.extend_from_slice(positions);
+            self.cached_previous.clear();
+            self.cached_previous.extend_from_slice(previous);
+            self.contact_cache_valid = true;
+        }
         out.extend_from_slice(&self.generated);
         Ok(())
     }
@@ -533,6 +582,10 @@ impl SelfCollision {
             + (self.stack.capacity() + self.candidates.capacity()) * std::mem::size_of::<usize>()
             + (self.generated.capacity() + self.motion_contacts.capacity())
                 * std::mem::size_of::<SurfaceContact>()
+            + (self.checked_initial_positions.capacity()
+                + self.cached_positions.capacity()
+                + self.cached_previous.capacity())
+                * std::mem::size_of::<Vec3>()
     }
 }
 
@@ -540,6 +593,175 @@ impl SelfCollision {
 mod tests {
     use super::*;
     use crate::GridBuilder;
+
+    fn compare_contacts(a: &[SurfaceContact], b: &[SurfaceContact]) {
+        assert_eq!(a.len(), b.len());
+        for (a, b) in a.iter().zip(b) {
+            assert_eq!(
+                (
+                    a.key,
+                    a.particles,
+                    a.weights,
+                    a.normal,
+                    a.offset,
+                    a.surface_velocity,
+                    a.separation,
+                    a.static_friction,
+                    a.kinetic_friction
+                ),
+                (
+                    b.key,
+                    b.particles,
+                    b.weights,
+                    b.normal,
+                    b.offset,
+                    b.surface_velocity,
+                    b.separation,
+                    b.static_friction,
+                    b.kinetic_friction
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn exact_contact_reuse_matches_fresh_geometry_and_invalidates_changed_inputs() {
+        let grid = GridBuilder::new(2, 2).size(0.1, 0.1).build().unwrap();
+        let mut positions = grid.rest_positions().to_vec();
+        positions.extend(grid.rest_positions().iter().map(|p| *p + Vec3::Y * 0.001));
+        let mut triangles = grid.triangles().to_vec();
+        triangles.extend(grid.triangles().iter().map(|t| t.map(|i| i + 4)));
+        let mesh = Arc::new(ClothMesh::new(positions.clone(), triangles).unwrap());
+        let config = ClothContactSettings::default();
+        let mut engine = SelfCollision::new(mesh.clone(), config);
+        let mut original = vec![];
+        engine
+            .generate(&positions, &positions, &mut original, false)
+            .unwrap();
+        assert!(!original.is_empty());
+        let work = engine.work.candidate_pairs;
+        let mut cached = vec![];
+        engine
+            .generate(&positions, &positions, &mut cached, false)
+            .unwrap();
+        compare_contacts(&original, &cached);
+        assert_eq!(engine.work.candidate_pairs, work);
+        engine.begin(mesh.clone(), config);
+        cached.clear();
+        engine
+            .generate(&positions, &positions, &mut cached, false)
+            .unwrap();
+        assert_eq!(engine.work.candidate_pairs, 0);
+        assert_eq!(engine.work.retained_contacts, original.len());
+        compare_contacts(&original, &cached);
+        for change in 0..4 {
+            let mut previous = positions.clone();
+            let mut current = positions.clone();
+            let mut settings = config;
+            let mut query_mesh = mesh.clone();
+            match change {
+                0 => previous[4..].iter_mut().for_each(|p| p.y -= 0.01),
+                1 => current[4..].iter_mut().for_each(|p| p.y += 0.00001),
+                2 => {
+                    settings.kinetic_friction = 0.25;
+                    settings.static_friction = 0.5;
+                }
+                _ => {
+                    // Identical vertex coordinates do not imply identical
+                    // topology or feature identities on another cloth.
+                    let mut triangles = mesh.triangles().to_vec();
+                    triangles.reverse();
+                    query_mesh = Arc::new(ClothMesh::new(current.clone(), triangles).unwrap());
+                }
+            }
+            engine.begin(query_mesh.clone(), settings);
+            cached.clear();
+            engine
+                .generate(&previous, &current, &mut cached, false)
+                .unwrap();
+            let mut fresh = vec![];
+            SelfCollision::new(query_mesh, settings)
+                .generate(&previous, &current, &mut fresh, false)
+                .unwrap();
+            compare_contacts(&cached, &fresh);
+            assert!(engine.work.candidate_pairs > 0);
+        }
+    }
+
+    #[test]
+    fn failed_refresh_and_motion_queries_cannot_reuse_a_partial_contact_result() {
+        let mesh = Arc::new(GridBuilder::new(3, 3).build().unwrap());
+        let positions = mesh.rest_positions();
+        let settings = ClothContactSettings::default();
+        let mut engine = SelfCollision::new(mesh.clone(), settings);
+        engine
+            .generate(positions, positions, &mut vec![], false)
+            .unwrap();
+        let mut changed = positions.to_vec();
+        changed[0].y += 0.01;
+        engine.work.candidate_pairs = settings.limits.candidate_pairs;
+        assert!(matches!(
+            engine.generate(positions, &changed, &mut vec![], false),
+            Err(ClothError::CollisionBudgetExceeded { .. })
+        ));
+        assert!(!engine.contact_cache_valid);
+        engine.begin(mesh.clone(), settings);
+        let mut actual = vec![];
+        engine
+            .generate(positions, positions, &mut actual, false)
+            .unwrap();
+        assert!(engine.work.candidate_pairs > 0);
+        let mut expected = vec![];
+        SelfCollision::new(mesh.clone(), settings)
+            .generate(positions, positions, &mut expected, false)
+            .unwrap();
+        compare_contacts(&actual, &expected);
+
+        // Even at exactly the same query pose, a prediction with motion seeds
+        // must perform its own query and must not populate the discrete cache.
+        engine.begin(mesh.clone(), settings);
+        engine.motion_fraction(positions, &changed).unwrap();
+        let before = engine.work.candidate_pairs;
+        actual.clear();
+        engine
+            .generate(positions, positions, &mut actual, true)
+            .unwrap();
+        assert!(engine.work.candidate_pairs > before);
+        assert!(!engine.contact_cache_valid);
+        compare_contacts(&actual, &expected);
+    }
+
+    #[test]
+    fn an_uncertified_trial_cannot_bypass_next_substeps_initial_intersection_check() {
+        let intersecting = vec![
+            Vec3::new(-1.0, 0.0, -1.0),
+            Vec3::new(1.0, 0.0, -1.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, -1.0, -0.3),
+            Vec3::new(0.0, 1.0, -0.3),
+            Vec3::new(0.0, 1.0, 0.3),
+        ];
+        let mut initial = intersecting.clone();
+        initial[3..].iter_mut().for_each(|p| p.x += 3.0);
+        let mesh = Arc::new(ClothMesh::new(initial.clone(), vec![[0, 1, 2], [3, 4, 5]]).unwrap());
+        let config = ClothContactSettings::default();
+        let mut engine = SelfCollision::new(mesh.clone(), config);
+        engine
+            .generate(&initial, &initial, &mut vec![], false)
+            .unwrap();
+        let mut trial = vec![];
+        engine
+            .generate(&initial, &intersecting, &mut trial, false)
+            .unwrap();
+        // A discrete VF/EE query can miss edges piercing a triangle interior;
+        // neither that empty result nor a failed caller certifies an initial pose.
+        assert!(trial.is_empty());
+        engine.begin(mesh, config);
+        assert!(matches!(
+            engine.generate(&intersecting, &intersecting, &mut vec![], false),
+            Err(ClothError::InitialSelfIntersection { .. })
+        ));
+    }
 
     #[test]
     fn boundary_features_deduplicate_and_topology_is_shared() {

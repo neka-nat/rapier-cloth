@@ -163,6 +163,69 @@ fn continuous_plane_contact_keeps_tangent_and_full_gravity_load() {
 }
 
 #[test]
+fn a_supported_compressed_triangle_recovers_its_edge_lengths_with_ccd() {
+    // One shortened, tilted edge pushes a table-supported vertex downward in
+    // the elastic trial. That intermediate correction must not suppress the
+    // independent stretch recovery once normal contact has completed the trial.
+    for continuous in [false, true] {
+        let mut world = TestWorld::new();
+        world.rigid.gravity = Vec3::ZERO;
+        world
+            .rigid
+            .colliders
+            .insert(ColliderBuilder::new(SharedShape::halfspace(Vec3::Y)).friction(0.0));
+        let mut cloth = Cloth::new(
+            ClothMesh::new(
+                vec![
+                    Vec3::new(0.0, 0.0005, 0.0),
+                    Vec3::new(0.1, 0.0005, 0.0),
+                    Vec3::new(0.0, 0.0005, 0.1),
+                ],
+                vec![[0, 2, 1]],
+            )
+            .unwrap(),
+            ClothMaterial {
+                damping: 0.0,
+                friction: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        cloth
+            .set_contact_settings(Some(ClothContactSettings {
+                self_collision: false,
+                rigid_surface_collision: true,
+                continuous_rigid_collision: continuous,
+                static_friction: 0.0,
+                kinetic_friction: 0.0,
+                ..Default::default()
+            }))
+            .unwrap();
+        let mut positions = cloth.positions().to_vec();
+        positions[1] = Vec3::new(0.07, 0.0105, 0.0);
+        positions[2].z = 0.14;
+        cloth.set_positions(&positions).unwrap();
+        let handle = world.cloth.add_cloth(cloth);
+        world.tick().unwrap();
+        let cloth = world.cloth.cloth(handle).unwrap();
+        let error = cloth
+            .mesh()
+            .edges()
+            .iter()
+            .map(|edge| {
+                let [a, b] = edge.vertices.map(|i| cloth.positions()[i as usize]);
+                (a.distance(b) / edge.rest_length - 1.0).abs()
+            })
+            .fold(0.0, Real::max);
+        assert!(
+            error < 0.01,
+            "CCD={continuous}, relative edge error={error}"
+        );
+        assert!(cloth.positions().iter().all(|p| p.y >= 0.00045));
+    }
+}
+
+#[test]
 fn moving_primitives_use_the_whole_substep_and_push_the_surface() {
     for (kind, shape) in shapes().into_iter().enumerate() {
         let mut world = TestWorld::new();
