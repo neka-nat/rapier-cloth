@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{ClothError, Real, Vec3};
 
-/// Vertex-face uses vertex 0 and triangle [1,2,3]. Edge-edge uses [0,1] and [2,3].
+/// Vertex-face uses vertex 0 and triangle `[1,2,3]`. Edge-edge uses `[0,1]` and `[2,3]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CcdFeature {
     VertexFace,

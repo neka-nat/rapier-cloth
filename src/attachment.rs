@@ -1,5 +1,8 @@
-use crate::{ClothHandle, Real, Vec3, rapier::prelude::*};
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::{ClothHandle, ClothMesh, Real, SurfacePoint, Vec3, rapier::prelude::*};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, AtomicU64, Ordering},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AttachmentHandle {
@@ -33,6 +36,56 @@ pub struct AttachmentDesc {
     pub excluded_colliders: Vec<ColliderHandle>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SurfaceAttachmentPoint {
+    pub point: SurfacePoint,
+    pub local_anchor: Vec3,
+}
+
+#[derive(Debug, Clone)]
+pub struct SurfaceAttachmentDesc {
+    pub cloth: ClothHandle,
+    pub body: RigidBodyHandle,
+    pub points: Vec<SurfaceAttachmentPoint>,
+    pub compliance: Real,
+    /// Exclude only the nonzero support vertices against these owned colliders.
+    pub excluded_colliders: Vec<ColliderHandle>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum Attachment {
+    Vertices(AttachmentDesc),
+    Surface(SurfaceAttachmentDesc),
+}
+impl Attachment {
+    pub fn cloth(&self) -> ClothHandle {
+        match self {
+            Self::Vertices(a) => a.cloth,
+            Self::Surface(a) => a.cloth,
+        }
+    }
+    pub fn body(&self) -> RigidBodyHandle {
+        match self {
+            Self::Vertices(a) => a.body,
+            Self::Surface(a) => a.body,
+        }
+    }
+    pub fn uses_particle(&self, particle: u32, mesh: &ClothMesh) -> bool {
+        match self {
+            Self::Vertices(a) => a.points.iter().any(|p| p.particle == particle),
+            Self::Surface(a) => a.points.iter().any(|p| {
+                mesh.triangles()
+                    .get(p.point.triangle() as usize)
+                    .is_some_and(|tri| {
+                        tri.iter()
+                            .zip(p.point.barycentric())
+                            .any(|(&i, b)| i == particle && b != 0.0)
+                    })
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentEventKind {
     Released,
@@ -52,13 +105,15 @@ pub struct AttachmentEvent {
 #[derive(Debug, Clone)]
 struct Slot {
     generation: u32,
-    value: Option<AttachmentDesc>,
+    value: Option<Attachment>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Attachments {
     pub identity: u64,
     slots: Vec<Slot>,
+    // Allocation identity is deliberately not rewound by a checkpoint clone.
+    next_generation: Arc<AtomicU32>,
 }
 static NEXT_ARENA: AtomicU64 = AtomicU64::new(1);
 impl Attachments {
@@ -68,9 +123,10 @@ impl Attachments {
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
                 .expect("attachment arena exhausted"),
             slots: vec![],
+            next_generation: Arc::new(AtomicU32::new(0)),
         }
     }
-    pub fn insert(&mut self, desc: AttachmentDesc) -> AttachmentHandle {
+    pub fn insert(&mut self, desc: Attachment) -> AttachmentHandle {
         let index = self
             .slots
             .iter()
@@ -83,6 +139,10 @@ impl Attachments {
                 value: None,
             });
         }
+        self.slots[index].generation = self
+            .next_generation
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
+            .expect("attachment generation space exhausted");
         self.slots[index].value = Some(desc);
         AttachmentHandle {
             arena: self.identity,
@@ -90,7 +150,7 @@ impl Attachments {
             generation: self.slots[index].generation,
         }
     }
-    pub fn get(&self, h: AttachmentHandle) -> Option<&AttachmentDesc> {
+    pub fn get(&self, h: AttachmentHandle) -> Option<&Attachment> {
         if h.arena != self.identity {
             return None;
         }
@@ -99,14 +159,14 @@ impl Attachments {
             .filter(|s| s.generation == h.generation)
             .and_then(|s| s.value.as_ref())
     }
-    pub fn remove(&mut self, h: AttachmentHandle) -> Option<AttachmentDesc> {
+    pub fn remove(&mut self, h: AttachmentHandle) -> Option<Attachment> {
         self.get(h)?;
         let slot = &mut self.slots[h.index as usize];
         let value = slot.value.take();
         slot.generation = slot.generation.saturating_add(1);
         value
     }
-    pub fn iter(&self) -> impl Iterator<Item = (AttachmentHandle, &AttachmentDesc)> {
+    pub fn iter(&self) -> impl Iterator<Item = (AttachmentHandle, &Attachment)> {
         self.slots.iter().enumerate().filter_map(|(i, s)| {
             s.value.as_ref().map(|v| {
                 (

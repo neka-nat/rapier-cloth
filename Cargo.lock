@@ -390,6 +390,7 @@ dependencies = [
 name = "rapier-cloth"
 version = "0.1.0"
 dependencies = [
+ "parry3d-f64",
  "rapier-cloth-core",
  "rapier3d",
  "rapier3d-f64",

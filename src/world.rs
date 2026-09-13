@@ -1,4 +1,4 @@
-use crate::attachment::Attachments;
+use crate::attachment::{Attachment, Attachments};
 use crate::rapier::prelude::*;
 use crate::rapier_collision::RapierContacts;
 use crate::{AttachmentDesc, AttachmentEvent, AttachmentEventKind, AttachmentHandle, Target};
@@ -45,9 +45,9 @@ pub struct RapierClothWorld {
     world: WorldId,
     next_step: u64,
     desynchronized: bool,
-    cloths: ClothSet,
+    pub(crate) cloths: ClothSet,
     solver: Solver,
-    attachments: Attachments,
+    pub(crate) attachments: Attachments,
     events: Vec<AttachmentEvent>,
     surface_history_scene: Option<crate::SceneSnapshot>,
     surface_history_settings: Option<CollisionSettings>,
@@ -96,7 +96,7 @@ impl RapierClothWorld {
         let handles: Vec<_> = self
             .attachments
             .iter()
-            .filter(|(_, a)| a.cloth == h)
+            .filter(|(_, a)| a.cloth() == h)
             .map(|(h, _)| h)
             .collect();
         for handle in handles {
@@ -174,7 +174,7 @@ impl RapierClothWorld {
             if !particles.insert(p.particle)
                 || cloth.pins().contains_key(&p.particle)
                 || self.attachments.iter().any(|(_, a)| {
-                    a.cloth == desc.cloth && a.points.iter().any(|q| q.particle == p.particle)
+                    a.cloth() == desc.cloth && a.uses_particle(p.particle, cloth.mesh())
                 })
             {
                 return Err(ClothError::ConflictingTarget(p.particle).into());
@@ -191,7 +191,7 @@ impl RapierClothWorld {
             }
         }
         self.cloths.get_mut(desc.cloth)?.clear_contact_history();
-        Ok(self.attachments.insert(desc))
+        Ok(self.attachments.insert(Attachment::Vertices(desc)))
     }
     pub fn attachment(
         &self,
@@ -199,12 +199,19 @@ impl RapierClothWorld {
     ) -> Result<&AttachmentDesc, IntegrationError> {
         self.attachments
             .get(handle)
+            .and_then(|a| match a {
+                Attachment::Vertices(a) => Some(a),
+                Attachment::Surface(_) => None,
+            })
             .ok_or(IntegrationError::InvalidAttachment(
-                "stale or foreign handle",
+                "stale, foreign or surface attachment handle",
             ))
     }
     pub fn attachments(&self) -> impl Iterator<Item = (AttachmentHandle, &AttachmentDesc)> {
-        self.attachments.iter()
+        self.attachments.iter().filter_map(|(h, a)| match a {
+            Attachment::Vertices(a) => Some((h, a)),
+            Attachment::Surface(_) => None,
+        })
     }
     pub fn release(&mut self, handle: AttachmentHandle) -> Result<(), IntegrationError> {
         self.release_with_reason(handle, AttachmentEventKind::Released)
@@ -220,13 +227,13 @@ impl RapierClothWorld {
             .ok_or(IntegrationError::InvalidAttachment(
                 "stale or foreign handle",
             ))?;
-        if let Ok(cloth) = self.cloths.get_mut(a.cloth) {
+        if let Ok(cloth) = self.cloths.get_mut(a.cloth()) {
             cloth.clear_contact_history();
         }
         self.events.push(AttachmentEvent {
             handle,
-            cloth: a.cloth,
-            body: a.body,
+            cloth: a.cloth(),
+            body: a.body(),
             kind,
         });
         Ok(())
@@ -296,7 +303,7 @@ impl RapierClothWorld {
         let mut staged_attachments = self.attachments.clone();
         let mut events = vec![];
         for (handle, a) in self.attachments.iter() {
-            let reason = match scene.query.bodies.get(a.body) {
+            let reason = match scene.query.bodies.get(a.body()) {
                 None => Some(AttachmentEventKind::BodyRemoved),
                 Some(b) if !b.is_enabled() => Some(AttachmentEventKind::BodyDisabled),
                 Some(b) if b.is_dynamic() => {
@@ -310,8 +317,8 @@ impl RapierClothWorld {
                 staged_attachments.remove(handle);
                 events.push(AttachmentEvent {
                     handle,
-                    cloth: a.cloth,
-                    body: a.body,
+                    cloth: a.cloth(),
+                    body: a.body(),
                     kind,
                 });
             }
@@ -352,22 +359,47 @@ impl RapierClothWorld {
         for handle in handles {
             let cloth = staged.get_mut(handle)?;
             let mut targets = vec![];
+            let mut surface_targets = vec![];
             let mut excluded_pairs = BTreeSet::new();
-            for (_, a) in staged_attachments.iter().filter(|(_, a)| a.cloth == handle) {
-                let body = &scene.query.bodies[a.body];
-                if scene.previous.body_pose(a.body).is_none() {
+            for (_, a) in staged_attachments
+                .iter()
+                .filter(|(_, a)| a.cloth() == handle)
+            {
+                let body = &scene.query.bodies[a.body()];
+                if scene.previous.body_pose(a.body()).is_none() {
                     return Err(IntegrationError::InvalidAttachment(
                         "missing previous body pose",
                     ));
                 }
-                for p in &a.points {
-                    targets.push(Target {
-                        particle: p.particle,
-                        position: body.position().transform_point(p.local_anchor),
-                        compliance: a.compliance,
-                    });
-                    for c in &a.excluded_colliders {
-                        excluded_pairs.insert((p.particle, c.into_raw_parts()));
+                match a {
+                    Attachment::Vertices(a) => {
+                        for p in &a.points {
+                            targets.push(Target {
+                                particle: p.particle,
+                                position: body.position().transform_point(p.local_anchor),
+                                compliance: a.compliance,
+                            });
+                            for c in &a.excluded_colliders {
+                                excluded_pairs.insert((p.particle, c.into_raw_parts()));
+                            }
+                        }
+                    }
+                    Attachment::Surface(a) => {
+                        for p in &a.points {
+                            surface_targets.push(crate::SurfaceTarget {
+                                point: p.point,
+                                position: body.position().transform_point(p.local_anchor),
+                                compliance: a.compliance,
+                            });
+                            let triangle = cloth.mesh().triangles()[p.point.triangle() as usize];
+                            for (i, b) in triangle.into_iter().zip(p.point.barycentric()) {
+                                if b != 0.0 {
+                                    for c in &a.excluded_colliders {
+                                        excluded_pairs.insert((i, c.into_raw_parts()));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -380,12 +412,13 @@ impl RapierClothWorld {
             )
             .with_surface(cloth);
             let solver_start = Instant::now();
-            let result = self.solver.step_with_contacts(
+            let result = self.solver.step_with_surface_targets(
                 cloth,
                 h,
                 scene.gravity,
                 &self.solver_settings,
                 &targets,
+                &surface_targets,
                 &mut source,
             );
             report.core_time_seconds +=

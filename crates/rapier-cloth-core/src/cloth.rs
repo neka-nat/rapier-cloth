@@ -3,7 +3,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
 };
 
@@ -193,6 +193,7 @@ struct Slot {
 pub struct ClothSet {
     identity: u64,
     slots: Vec<Slot>,
+    next_generation: Arc<AtomicU32>,
 }
 static NEXT_SET: AtomicU64 = AtomicU64::new(1);
 impl Default for ClothSet {
@@ -208,6 +209,7 @@ impl ClothSet {
         Self {
             identity,
             slots: Vec::new(),
+            next_generation: Arc::new(AtomicU32::new(0)),
         }
     }
     pub fn insert(&mut self, cloth: Cloth) -> ClothHandle {
@@ -223,6 +225,10 @@ impl ClothSet {
                 value: None,
             });
         }
+        self.slots[i].generation = self
+            .next_generation
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
+            .expect("cloth generation space exhausted");
         self.slots[i].value = Some(cloth);
         ClothHandle {
             set: self.identity,

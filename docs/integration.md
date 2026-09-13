@@ -346,6 +346,9 @@ The complete folding task and its CPU budget are not yet qualified.
 
 ## Attachments and grasping
 
+For exposed-layer selection, connected patches and weighted triangle-point
+targets, see [surface selection and grasping](grasping.md).
+
 Call `world.attach(desc, &bodies, &colliders)` with an `AttachmentDesc` containing a
 cloth handle, body handle, compliance and a list of
 `AttachmentPoint { particle, local_anchor }`. Anchors use the body's local frame,
@@ -387,6 +390,8 @@ When `is_desynchronized()` becomes true, stop stepping. To retry with a differen
 
 Checkpoints are in-memory state for the same cloth world, not a public serialization
 format. Discard handles and events created after the checkpoint. The repository's
+allocation generations are not rewound, preventing discarded handles from
+aliasing later allocations. Existing checkpoint handles remain valid. The
 checkpoint tests use a fixed-world fixture; a general application must also preserve
 controllers and other external state. A demo may instead recreate both worlds on reset.
 

@@ -8,6 +8,12 @@ pub enum ClothError {
     InvalidHandle,
     InvalidParticle(u32),
     ConflictingTarget(u32),
+    ConflictingSurfaceTarget {
+        triangle: u32,
+    },
+    SurfaceQueryBudgetExceeded {
+        limit: usize,
+    },
     DegenerateConstraint,
     NonFiniteState,
     ContactBudgetExceeded {
@@ -35,6 +41,13 @@ impl fmt::Display for ClothError {
             Self::InvalidHandle => write!(f, "invalid or expired cloth handle"),
             Self::InvalidParticle(i) => write!(f, "invalid particle index {i}"),
             Self::ConflictingTarget(i) => write!(f, "conflicting targets on particle {i}"),
+            Self::ConflictingSurfaceTarget { triangle } => write!(
+                f,
+                "surface target on triangle {triangle} could not be satisfied"
+            ),
+            Self::SurfaceQueryBudgetExceeded { limit } => {
+                write!(f, "surface query budget exceeded ({limit})")
+            }
             Self::DegenerateConstraint => write!(f, "constraint geometry became degenerate"),
             Self::NonFiniteState => write!(f, "non-finite simulation state; substep not committed"),
             Self::ContactBudgetExceeded { limit } => write!(f, "contact budget exceeded ({limit})"),

@@ -81,7 +81,8 @@ bodies and arbitrary collision meshes are not implemented. Experimental
 [continuous rigid-surface checks](docs/integration.md#continuous-rigid-surface-collision)
 cover bounded primitive motion and solver corrections; complete folding and its
 real-time CPU budget are not yet qualified.
-Use explicit attachments for grasping; static friction alone is not a grasp model.
+Use [surface queries and grasp attachments](docs/grasping.md) to select exposed
+cloth layers and command a point or patch; static friction alone is not a grasp model.
 Read the [compatibility and limitations](docs/compatibility.md) before integrating.
 
 ## Documentation

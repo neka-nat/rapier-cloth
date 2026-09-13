@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add bounded ray, sphere-approach and closest-surface queries, generational cloth-associated material points, rest-edge-path patch selection and a runnable `surface_grasp` example. Preserve nearby-layer ordering for long rays in f32 and reject invalid or over-budget queries instead of returning partial selections.
+- Add weighted surface targets and body-local point grasps alongside existing vertex attachments. Preserve support masses, integrate corrections/multipliers into CCD and reject overlapping supports. Both attachment kinds participate in release/removal events, filtering and atomic checkpoints.
+- Keep cloth and attachment allocation generations monotonic across checkpoint clones so handles from discarded simulation time cannot reconnect to later allocations. Add surface-target and surface-query budget error variants; update exhaustive matches as needed.
 - Add experimental persistent static/kinetic surface friction with material witnesses, physical normal-load limits, equal-and-opposite deformable updates and continuous checks for position corrections. Preserve legacy particle friction and avoid applying the position-level kinetic load twice.
 - Transport Rapier material anchors with the complete rigid transform; add a defaulted `ContactSource::transport_surface_anchor` callback for custom sources and `Cloth::clear_contact_history` for external model changes. Include anchor/context state in checkpoints and invalidate it on separation, pin/grasp changes, teleports, shapes and collision-setting changes.
 - Compute all three closest-triangle face weights from signed areas, avoiding a negative weight caused by cancellation near a vertex. Keep strict public witness validation.

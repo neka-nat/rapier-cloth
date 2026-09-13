@@ -24,10 +24,11 @@ pub mod diagnostics;
 pub mod solver;
 pub mod surface;
 pub use cloth::{Cloth, ClothHandle, ClothSet};
+pub use constraints::target::SurfaceTarget;
 pub use contact::{
     Contact, ContactKey, ContactMotion, ContactSource, ContactStage, NoContacts, SurfaceContact,
     SurfaceContactKey, SurfaceFeature,
 };
 pub use diagnostics::StepReport;
 pub use solver::{Solver, SolverSettings, Target};
-pub use surface::SurfaceView;
+pub use surface::{SurfaceHit, SurfacePoint, SurfaceQueryLimits, SurfaceRay, SurfaceView};

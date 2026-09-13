@@ -11,12 +11,14 @@ work and performance measurements. For a graphical simulation, start with the
 | [hanging_cloth](../examples/hanging_cloth.rs) | A 32×32 sheet pinned along one edge, using the core solver | Strain and pin error after 10 simulated seconds |
 | [drape_static](../examples/drape_static.rs) | A 24×24 sheet falling onto a fixed sphere and floor | Strain, penetration and contact count after 5 seconds |
 | [moving_anchor](../examples/moving_anchor.rs) | A particle attached to a kinematic body, then released | Released position and velocity after 1 second |
+| [surface_grasp](../examples/surface_grasp.rs) | Exposed triangle-interior selection, weighted lift and release | JSON tracking and release summary |
 | [pick_and_place](../examples/pick_and_place.rs) | Multi-vertex grasping, lifting, transport and release | JSON summary and optional recording |
 
 ```bash
 cargo run --locked --release --example hanging_cloth
 cargo run --locked --release --example drape_static
 cargo run --locked --release --example moving_anchor
+cargo run --locked --release --example surface_grasp
 cargo run --locked --release --example pick_and_place
 ```
 

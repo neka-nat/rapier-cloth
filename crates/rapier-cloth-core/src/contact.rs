@@ -69,7 +69,7 @@ pub trait ContactSource {
         false
     }
 
-    /// Return a certified prefix in [0,1], charging the shared collision budget.
+    /// Return a certified prefix in `[0,1]`, charging the shared collision budget.
     /// This never advances physical time. A limited prediction may retain swept
     /// witnesses for the next surface callback; express its rigid anchors at the
     /// end-of-substep pose, so solving the full inertial trial respects rigid time.

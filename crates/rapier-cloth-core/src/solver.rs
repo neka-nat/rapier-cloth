@@ -8,6 +8,7 @@ use crate::{
     constraints::{
         bend::{angle, angle_and_gradients, angle_difference},
         distance,
+        target::{ResolvedSurfaceTarget, SurfaceTarget},
         tether::Tethers,
     },
     contact::{SurfaceContact, SurfaceContactState, friction_velocity},
@@ -77,6 +78,7 @@ pub struct Solver {
     distance_lambda: Vec<Real>,
     bend_lambda: Vec<Real>,
     target_lambda: Vec<Vec3>,
+    surface_target_lambda: Vec<Vec3>,
     tethers: Tethers,
     contacts: Vec<Contact>,
     // Sorted by key. Merge each query with the cumulative substep states, so
@@ -98,6 +100,7 @@ pub struct Solver {
     motion_distance_lambda: Vec<Real>,
     motion_bend_lambda: Vec<Real>,
     motion_target_lambda: Vec<Vec3>,
+    motion_surface_target_lambda: Vec<Vec3>,
 }
 
 impl Solver {
@@ -120,6 +123,24 @@ impl Solver {
         gravity: Vec3,
         settings: &SolverSettings,
         external_targets: &[Target],
+        source: &mut impl ContactSource,
+    ) -> Result<StepReport, ClothError> {
+        self.step_with_surface_targets(cloth, h, gravity, settings, external_targets, &[], source)
+    }
+
+    /// Add material-point targets to the existing particle-target/contact path.
+    /// Nonzero supports may not overlap another target or pin. Hard surface
+    /// targets constrain only their weighted point; support inverse masses stay
+    /// physical. Every correction and multiplier participates in motion checks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_surface_targets(
+        &mut self,
+        cloth: &mut Cloth,
+        h: Real,
+        gravity: Vec3,
+        settings: &SolverSettings,
+        external_targets: &[Target],
+        surface_targets: &[SurfaceTarget],
         source: &mut impl ContactSource,
     ) -> Result<StepReport, ClothError> {
         settings.validate(h)?;
@@ -158,6 +179,20 @@ impl Solver {
             }
             if i > 0 && targets[i - 1].particle == t.particle {
                 return Err(ClothError::ConflictingTarget(t.particle));
+            }
+        }
+        let mut resolved_surface_targets = Vec::with_capacity(surface_targets.len());
+        if !surface_targets.is_empty() {
+            let mut occupied: std::collections::BTreeSet<_> =
+                targets.iter().map(|t| t.particle).collect();
+            for &target in surface_targets {
+                let resolved = ResolvedSurfaceTarget::new(target, &cloth.mesh)?;
+                for (&i, b) in resolved.vertices.iter().zip(target.point.barycentric()) {
+                    if b != 0.0 && !occupied.insert(i) {
+                        return Err(ClothError::ConflictingTarget(i));
+                    }
+                }
+                resolved_surface_targets.push(resolved);
             }
         }
         self.reference.clone_from(&cloth.positions);
@@ -248,6 +283,17 @@ impl Solver {
         self.bend_lambda.fill(0.0);
         self.target_lambda.resize(targets.len(), Vec3::ZERO);
         self.target_lambda.fill(Vec3::ZERO);
+        self.surface_target_lambda
+            .resize(surface_targets.len(), Vec3::ZERO);
+        self.surface_target_lambda.fill(Vec3::ZERO);
+        for (target, lambda) in resolved_surface_targets
+            .iter()
+            .zip(&mut self.surface_target_lambda)
+        {
+            if target.target.compliance == 0.0 {
+                target.project(&mut self.positions, &self.weights, h, lambda)?;
+            }
+        }
         self.solve_prediction_contacts(source, radius, h, settings)?;
         let stretch_alpha = cloth.material.stretch_compliance / (h * h);
         let bend_alpha = cloth.material.bend_compliance / (h * h);
@@ -258,6 +304,8 @@ impl Solver {
                     .clone_from(&self.distance_lambda);
                 self.motion_bend_lambda.clone_from(&self.bend_lambda);
                 self.motion_target_lambda.clone_from(&self.target_lambda);
+                self.motion_surface_target_lambda
+                    .clone_from(&self.surface_target_lambda);
             }
             for (i, e) in cloth.mesh.edges().iter().enumerate() {
                 if !distance::project(
@@ -303,12 +351,18 @@ impl Solver {
                 self.target_lambda[j] += dl;
                 self.positions[i] += dl * self.weights[i];
             }
+            self.tethers.project(&mut self.positions, &self.weights)?;
+            for (target, lambda) in resolved_surface_targets
+                .iter()
+                .zip(&mut self.surface_target_lambda)
+            {
+                target.project(&mut self.positions, &self.weights, h, lambda)?;
+            }
             // Elastic and contact projections together form one trial. A
             // penetrated intermediate elastic pose is not an accepted motion:
             // normal contact may restore separation while retaining tangential
             // stretch recovery. Certify the completed trial from the previous
             // accepted pose, and scale every contributing multiplier together.
-            self.tethers.project(&mut self.positions, &self.weights)?;
             self.query(source, None, radius, ContactStage::Iteration, settings)?;
             self.project_contacts(radius, settings.max_contacts)?;
             self.project_surface_contacts(source, h, settings.max_contacts)?;
@@ -318,6 +372,13 @@ impl Solver {
                     .distance_lambda
                     .iter_mut()
                     .zip(&self.motion_distance_lambda)
+                {
+                    *value = before + (*value - before) * fraction;
+                }
+                for (value, &before) in self
+                    .surface_target_lambda
+                    .iter_mut()
+                    .zip(&self.motion_surface_target_lambda)
                 {
                     *value = before + (*value - before) * fraction;
                 }
@@ -482,6 +543,20 @@ impl Solver {
             }
             report.max_target_error = report.max_target_error.max(error);
         }
+        for target in &resolved_surface_targets {
+            let error = target
+                .position(&self.positions)
+                .distance(target.target.position);
+            if !error.is_finite() {
+                return Err(ClothError::NonFiniteState);
+            }
+            if target.target.compliance == 0.0 && error > crate::math::LENGTH_EPSILON {
+                return Err(ClothError::ConflictingSurfaceTarget {
+                    triangle: target.target.point.triangle(),
+                });
+            }
+            report.max_target_error = report.max_target_error.max(error);
+        }
         for &[a, b, c] in cloth.mesh.triangles() {
             if (self.positions[b as usize] - self.positions[a as usize])
                 .cross(self.positions[c as usize] - self.positions[a as usize])
@@ -509,6 +584,8 @@ impl Solver {
             + self.motion_start.capacity()
             + self.motion_trial.capacity()
             + self.motion_target_lambda.capacity()
+            + self.motion_surface_target_lambda.capacity()
+            + self.surface_target_lambda.capacity()
             + self.target_lambda.capacity())
             * std::mem::size_of::<Vec3>()
             + (self.weights.capacity()
