@@ -23,6 +23,8 @@ pub struct ClothMesh {
     edges: Vec<Edge>,
     hinges: Vec<Hinge>,
     vertex_areas: Vec<Real>,
+    vertex_faces: Vec<u32>,
+    edge_opposites: Vec<u32>,
     area: Real,
     collision_topology: OnceLock<Arc<CollisionTopology>>,
 }
@@ -35,14 +37,20 @@ impl ClothMesh {
                 "at least three vertices and one triangle are required",
             ));
         }
+        if triangles.len() > u32::MAX as usize {
+            return Err(invalid(
+                "triangle count exceeds material feature index range",
+            ));
+        }
         if positions.iter().any(|p| !p.is_finite()) {
             return Err(invalid("non-finite vertex"));
         }
         let mut face_keys = BTreeSet::new();
         let mut adjacency: BTreeMap<[u32; 2], Vec<[u32; 3]>> = BTreeMap::new();
         let mut vertex_areas = vec![0.0; positions.len()];
+        let mut vertex_faces = vec![u32::MAX; positions.len()];
         let mut area = 0.0;
-        for &tri in &triangles {
+        for (face, &tri) in triangles.iter().enumerate() {
             if tri.iter().any(|&i| i as usize >= positions.len()) {
                 return Err(invalid("triangle index out of bounds"));
             }
@@ -64,6 +72,9 @@ impl ClothMesh {
             area += face_area;
             for i in tri {
                 vertex_areas[i as usize] += face_area / 3.0;
+                if vertex_faces[i as usize] == u32::MAX {
+                    vertex_faces[i as usize] = face as u32;
+                }
             }
             for [i, j, k] in [
                 [tri[0], tri[1], tri[2]],
@@ -89,6 +100,7 @@ impl ClothMesh {
             return Err(invalid("isolated vertex or invalid accumulated area"));
         }
         let mut edges = Vec::with_capacity(adjacency.len());
+        let mut edge_opposites = Vec::with_capacity(adjacency.len());
         let mut hinges = Vec::new();
         for (vertices, faces) in adjacency {
             let rest_length =
@@ -100,6 +112,7 @@ impl ClothMesh {
                 vertices,
                 rest_length,
             });
+            edge_opposites.push(faces[0][2]);
             if faces.len() == 2 {
                 let ids = [faces[0][0], faces[0][1], faces[0][2], faces[1][2]];
                 let (rest_angle, _) = angle_and_gradients(ids.map(|i| positions[i as usize]))
@@ -116,6 +129,8 @@ impl ClothMesh {
             edges,
             hinges,
             vertex_areas,
+            vertex_faces,
+            edge_opposites,
             area,
             collision_topology: OnceLock::new(),
         })
@@ -123,6 +138,23 @@ impl ClothMesh {
 
     pub fn rest_positions(&self) -> &[Vec3] {
         &self.positions
+    }
+    /// A fixed material triangle supplies orientation at vertex/edge contacts.
+    /// The immutable topology avoids scanning incident faces during each solve.
+    pub(crate) fn material_triangle(&self, particles: &[u32]) -> Option<[u32; 3]> {
+        if particles.len() >= 3 {
+            return Some([particles[0], particles[1], particles[2]]);
+        }
+        if let [a, b] = *particles {
+            let vertices = [a.min(b), a.max(b)];
+            let index = self
+                .edges
+                .binary_search_by_key(&vertices, |e| e.vertices)
+                .ok()?;
+            return Some([vertices[0], vertices[1], self.edge_opposites[index]]);
+        }
+        let face = *self.vertex_faces.get(*particles.first()? as usize)?;
+        self.triangles.get(face as usize).copied()
     }
     pub(crate) fn collision_topology(&self) -> &Arc<CollisionTopology> {
         self.collision_topology

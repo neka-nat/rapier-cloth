@@ -2,6 +2,7 @@
 mod broad_phase;
 pub mod ccd;
 pub(crate) mod friction;
+mod friction_frame;
 pub mod geometry;
 pub(crate) mod normal_block;
 pub(crate) mod self_collision;

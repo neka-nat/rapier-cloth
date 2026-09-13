@@ -172,9 +172,13 @@ Deforming contact participants receive mass-weighted, equal-and-opposite impulse
 Between substeps, closest-point refreshes keep sticking material weights when each witness
 stays within twice the separation distance and the normal dot product is at least
 0.9. Sliding resets the anchor for the next substep. Multipliers restart at zero
-each substep; physical anchors persist. Self-contact anchors follow changes of
-the normal by parallel transport. Rapier external anchors follow the complete
-previous-to-current rigid transform, including rotation about the normal.
+each substep; physical anchors persist. Self-contact anchors follow the rotation
+of a material triangle on the supporting cloth side, including spin about the
+contact normal. Vertex and edge supports use a fixed incident triangle. Changing
+the contact normal alone does not move the material witnesses. A degenerate
+supporting triangle returns an error without committing the substep.
+Rapier external anchors follow the complete previous-to-current rigid transform,
+including rotation about the normal.
 
 Separation, changed material/contact settings, cloth teleports and pin membership
 changes invalidate history. Attach/release and automatic attachment removal also
@@ -184,9 +188,10 @@ clear history before the next solve. These scene changes conservatively clear al
 cloth histories. For changes in a custom external model or filter that retains
 the same feature keys, call `Cloth::clear_contact_history()` explicitly.
 
-Analytical pull/incline, kinetic-load, moving-support and small stacked-patch
-tests exercise this mode. Complete garment manipulation, general deforming
-contact-frame transport and dense-fold performance remain unqualified.
+Analytical pull/incline, kinetic-load, common-rotation, moving-support and small
+stacked-patch tests exercise this mode. Rotating self-support tests also cover
+checkpoint replay and release after separation. Complete garment manipulation,
+large support deformations and dense-fold performance remain unqualified.
 
 The position-level Coulomb model follows the approach described in
 [Unified Particle Physics, section 6.1](https://mmacklin.com/uppfrta_preprint.pdf).

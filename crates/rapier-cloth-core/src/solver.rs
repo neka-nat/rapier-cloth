@@ -257,8 +257,9 @@ impl Solver {
         self.reference.copy_from_slice(&self.positions);
         for state in &mut self.previous_surface_states {
             // Initial-overlap recovery is not physical tangential motion.
-            state.friction.anchor += state.friction.support.relative(&self.reference)
-                - state.friction.support.relative(&cloth.positions);
+            state
+                .friction
+                .restore_reference(&cloth.positions, &self.reference)?;
         }
         self.capture_motion();
         let damp = (-cloth.material.damping * h).exp();
@@ -291,7 +292,7 @@ impl Solver {
                 target.project(&mut self.positions, &self.weights, h, lambda)?;
             }
         }
-        self.solve_prediction_contacts(source, radius, h, settings)?;
+        self.solve_prediction_contacts(source, radius, h, settings, &cloth.mesh)?;
         let stretch_alpha = cloth.material.stretch_compliance / (h * h);
         let bend_alpha = cloth.material.bend_compliance / (h * h);
         for _ in 0..settings.iterations {
@@ -362,7 +363,7 @@ impl Solver {
             // accepted pose, and scale every contributing multiplier together.
             self.query(source, None, radius, ContactStage::Iteration, settings)?;
             self.project_contacts(radius, settings.max_contacts)?;
-            self.project_surface_contacts(source, h, settings.max_contacts)?;
+            self.project_surface_contacts(source, h, settings.max_contacts, &cloth.mesh)?;
             let fraction = self.accept_motion(source, ContactStage::Iteration)?;
             if fraction < 1.0 {
                 for (value, &before) in self
@@ -400,7 +401,7 @@ impl Solver {
                 self.query(source, None, radius, ContactStage::Iteration, settings)?;
                 self.capture_motion();
                 self.project_contacts(radius, settings.max_contacts)?;
-                self.project_surface_contacts(source, h, settings.max_contacts)?;
+                self.project_surface_contacts(source, h, settings.max_contacts, &cloth.mesh)?;
                 let fraction = self.accept_motion(source, ContactStage::Iteration)?;
                 self.scale_contact_motion(fraction);
             }
@@ -618,7 +619,9 @@ impl Solver {
                 && state.contact.gap(&self.positions) <= state.contact.separation * 0.01
         });
         for state in &mut self.surface_states {
-            state.friction.finish(state.contact, &self.positions);
+            state
+                .friction
+                .finish(state.contact, &self.positions, &cloth.mesh)?;
         }
         cloth.previous.copy_from_slice(&cloth.positions);
         std::mem::swap(&mut cloth.positions, &mut self.positions);
@@ -676,11 +679,12 @@ impl Solver {
         radius: Real,
         h: Real,
         settings: &SolverSettings,
+        mesh: &crate::ClothMesh,
     ) -> Result<(), ClothError> {
         if !self.continuous_motion() {
             self.query(source, None, radius, ContactStage::Prediction, settings)?;
             self.project_contacts(radius, settings.max_contacts)?;
-            return self.project_surface_contacts(source, h, settings.max_contacts);
+            return self.project_surface_contacts(source, h, settings.max_contacts, mesh);
         }
         // CCD supplies contact witnesses at an intermediate safe query pose.
         // Solve those contacts against the full inertial prediction. Scaling the
@@ -697,7 +701,7 @@ impl Solver {
             self.query(source, None, radius, ContactStage::Prediction, settings)?;
             self.positions.copy_from_slice(&self.motion_trial);
             self.project_contacts(radius, settings.max_contacts)?;
-            self.project_surface_contacts(source, h, settings.max_contacts)?;
+            self.project_surface_contacts(source, h, settings.max_contacts, mesh)?;
             if self.motion_fraction(source, ContactStage::Prediction, None)? == 1.0 {
                 return Ok(());
             }
@@ -943,6 +947,7 @@ impl Solver {
         source: &mut impl ContactSource,
         h: Real,
         limit: usize,
+        mesh: &crate::ClothMesh,
     ) -> Result<(), ClothError> {
         self.next_surface_states.clear();
         self.surface_solve_order.clear();
@@ -972,6 +977,9 @@ impl Solver {
                 if !state.friction.compatible(&contact, &self.reference) {
                     state.friction = FrictionState::new(contact, &self.reference);
                 }
+                state
+                    .friction
+                    .ensure_material_frame(mesh, &self.reference)?;
                 if state.friction.external() && contact.static_friction > 0.0 {
                     let material_contact = SurfaceContact {
                         particles: state.friction.support.particles,
@@ -1140,6 +1148,120 @@ mod contact_state_tests {
     use super::*;
     use crate::ContactKey;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn clipped_material_friction_retains_only_the_applied_force_increment() {
+        // A synthetic motion callback isolates the solver's shortening contract;
+        // geometric CCD coverage is tested by the continuous-collision fixtures.
+        struct ShortenOnce(bool);
+        impl ContactSource for ShortenOnce {
+            fn contacts(
+                &mut self,
+                _: &[Vec3],
+                _: &[Vec3],
+                _: Real,
+                _: ContactStage,
+                _: &mut Vec<Contact>,
+            ) -> Result<(), ClothError> {
+                Ok(())
+            }
+            fn motion_fraction(
+                &mut self,
+                _: crate::ContactMotion<'_>,
+                _: &mut CollisionWork,
+            ) -> Result<Real, ClothError> {
+                Ok(if std::mem::replace(&mut self.0, false) {
+                    0.25
+                } else {
+                    1.0
+                })
+            }
+        }
+        let reference = vec![
+            Vec3::new(0.004, 0.01, 0.003),
+            Vec3::new(-0.02, 0.0, -0.02),
+            Vec3::new(0.02, 0.0, -0.02),
+            Vec3::new(0.0, 0.0, 0.02),
+        ];
+        let mesh = crate::ClothMesh::new(reference.clone(), vec![[1, 2, 3], [0, 3, 2]]).unwrap();
+        let contact = SurfaceContact {
+            key: crate::SurfaceContactKey {
+                other_cloth: None,
+                features: [
+                    crate::SurfaceFeature::Vertex(0),
+                    crate::SurfaceFeature::Face(0),
+                ],
+            },
+            particles: [0, 1, 2, 3],
+            weights: [1.0, -0.2, -0.3, -0.5],
+            normal: Vec3::Y,
+            offset: Vec3::ZERO,
+            surface_velocity: Vec3::ZERO,
+            separation: 0.01,
+            static_friction: 0.5,
+            kinetic_friction: 0.2,
+        };
+        for slip in [0.0001, 0.02] {
+            let mut solver = Solver::new();
+            solver.reference = reference.clone();
+            solver.positions = reference.clone();
+            solver.weights = vec![0.5, 1.0 / 3.0, 0.2, 1.0 / 7.0];
+            solver.external_continuous_motion = true;
+            solver.positions[0].x += slip;
+            let mut friction = FrictionState::new(contact, &reference);
+            friction
+                .project(&mut solver.positions, &solver.weights, Vec3::Y, 0.01)
+                .unwrap();
+            friction.finish(contact, &solver.positions, &mesh).unwrap();
+            let before = SurfaceContactState {
+                contact,
+                normal_lambda: 0.01,
+                friction,
+            };
+            solver.surface_states.push(before);
+            solver.surface_contacts.push(contact);
+            solver.capture_motion();
+
+            // Represent a preceding elastic/support correction in the same batch.
+            solver.positions[0].x += slip;
+            let (sin, cos) = (0.15 as Real).sin_cos();
+            for p in &mut solver.positions[1..] {
+                *p = Vec3::new(cos * p.x + sin * p.z, p.y, -sin * p.x + cos * p.z);
+            }
+            let unconstrained = solver.positions.clone();
+            solver
+                .project_surface_contacts(&mut NoContacts, 1.0 / 240.0, 16, &mesh)
+                .unwrap();
+            let fraction = solver
+                .accept_motion(&mut ShortenOnce(true), ContactStage::Iteration)
+                .unwrap();
+            assert_eq!(fraction, 0.25);
+            solver.scale_contact_motion(fraction);
+            let after = solver.surface_states[0];
+            let force_increment = contact.normal * (after.normal_lambda - before.normal_lambda)
+                + after.friction.lambda
+                - before.friction.lambda;
+            assert!(force_increment.length() > 1e-6);
+            for (i, unconstrained) in unconstrained.iter().enumerate() {
+                let free =
+                    solver.motion_start[i] + (*unconstrained - solver.motion_start[i]) * fraction;
+                let applied_force = (solver.positions[i] - free) / solver.weights[i];
+                assert!(applied_force.distance(force_increment * contact.weights[i]) < 1e-7);
+            }
+
+            // Transport through the rejected trial must compose to the same
+            // accepted material frame as direct transport from the old pose.
+            let mut direct = before.friction;
+            direct.sliding = false;
+            direct.finish(contact, &solver.positions, &mesh).unwrap();
+            let mut through_trial = after.friction;
+            through_trial.sliding = false;
+            through_trial
+                .finish(contact, &solver.positions, &mesh)
+                .unwrap();
+            assert!(through_trial.anchor.distance(direct.anchor) < 1e-7);
+        }
+    }
 
     #[test]
     fn sorted_states_match_tree_oracle_with_changing_contacts() {

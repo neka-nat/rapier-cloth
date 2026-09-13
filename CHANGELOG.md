@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Transport sticking self-contact anchors with the supporting material triangle, including rotation about the contact normal and incident vertex/edge supports. Preserve actual tangent impulse increments through frame changes and shortened motion, exclude overlap recovery from physical slip, and retain frame state through checkpoints. Degenerate supporting triangles fail atomically; dense folding and CPU qualification remain open.
 - Use coupled rigid supports during initial surface-gap restoration, with fresh normal multipliers and no friction/history updates. This prevents unresolved overlap from producing a spurious velocity in the subsequent physical prediction.
 - Couple deforming surface normal contacts with independent single-particle rigid supports. Solve their local complementarity conditions together, preserve free particle motion and retract friction when a support unloads. This repairs supported-fold prediction regressions without increasing substeps or solver iterations; full folding and CPU qualification remain open.
 - Bound fixed-plane CCD endpoint distances independently so movement away from a plane cannot consume the starting point's numerical clearance. Zero-clearance starts still fail atomically.
