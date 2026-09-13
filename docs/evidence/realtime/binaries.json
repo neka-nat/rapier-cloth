@@ -1,0 +1,22 @@
+[
+  {
+    "variant": "before",
+    "precision": "f32",
+    "sha256": "0c26134f1dae34e9b8c805c8c20eedc7c61704ed48e8ac4f232cb03b351e21df"
+  },
+  {
+    "variant": "before",
+    "precision": "f64",
+    "sha256": "e8d97c9328af49befafbbd508c81af1036db198c78b5d9bb2023993c0e4bd1c4"
+  },
+  {
+    "variant": "after",
+    "precision": "f32",
+    "sha256": "8dec4e6107783a0c09174b68a728ec219a617ba9e3bdd0682faadee99c3f3eca"
+  },
+  {
+    "variant": "after",
+    "precision": "f64",
+    "sha256": "934233aa4cf4ebbd4fd8569788801525619240f08c0a1ed2a81078deb9551b83"
+  }
+]

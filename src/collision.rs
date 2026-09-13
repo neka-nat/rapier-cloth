@@ -9,10 +9,7 @@ use crate::{
     ClothError, ClothMaterial, CollisionSettings, Contact, ContactKey, ContactSource, ContactStage,
     IntegrationError, RapierScene, Real, Vec3,
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Instant,
-};
+use std::{collections::BTreeSet, time::Instant};
 
 pub(crate) struct RapierContacts<'a, 'b> {
     scene: &'a RapierScene<'b>,
@@ -20,7 +17,8 @@ pub(crate) struct RapierContacts<'a, 'b> {
     material: ClothMaterial,
     limit: usize,
     excluded_pairs: &'a BTreeSet<(u32, (u32, u32))>,
-    sweeps: BTreeMap<ContactKey, Contact>,
+    sweeps: Vec<Contact>,
+    merged: Vec<Contact>,
     pub error: Option<IntegrationError>,
     pub ignored: BTreeSet<(u32, u32)>,
     pub candidate_queries: usize,
@@ -41,7 +39,8 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
             material,
             limit,
             excluded_pairs,
-            sweeps: BTreeMap::new(),
+            sweeps: Vec::new(),
+            merged: Vec::new(),
             error: None,
             ignored: BTreeSet::new(),
             candidate_queries: 0,
@@ -110,6 +109,22 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
             }
             let (index, generation) = handle.into_raw_parts();
             let external = ((generation as u64) << 32) | index as u64;
+            let friction = self
+                .settings
+                .friction_override
+                .unwrap_or((self.material.friction + c.friction()) * 0.5);
+            let invalid_friction = !friction.is_finite() || friction < 0.0;
+            // Only pre-existing overlap is stabilization. A kinematic body's
+            // displacement this step must contribute physical contact impulse.
+            let contact_pose =
+                if stage == ContactStage::Stabilization && body.is_some_and(|b| b.is_kinematic()) {
+                    self.scene.previous.colliders.get(&handle.into_raw_parts())
+                } else {
+                    Some(c.position())
+                };
+            let sweep = self.settings.static_sweep
+                && stage == ContactStage::Prediction
+                && !body.is_some_and(|b| b.is_kinematic());
             for (i, &p) in positions.iter().enumerate() {
                 if self
                     .excluded_pairs
@@ -117,32 +132,19 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
                 {
                     continue;
                 }
+                // Compute invariant properties once, but retain pair exclusion
+                // semantics: fully excluded geometry is never validated here.
+                if invalid_friction {
+                    return Err(ClothError::InvalidParameter("collider friction").into());
+                }
+                let contact_pose =
+                    contact_pose.ok_or(IntegrationError::MissingPreviousPose(handle))?;
                 let key = ContactKey {
                     particle: i as u32,
                     external,
                     feature: 0,
                 };
-                let friction = self
-                    .settings
-                    .friction_override
-                    .unwrap_or((self.material.friction + c.friction()) * 0.5);
-                if !friction.is_finite() || friction < 0.0 {
-                    return Err(ClothError::InvalidParameter("collider friction").into());
-                }
                 self.pair_queries += 1;
-                // Only pre-existing overlap is stabilization. A kinematic body's
-                // displacement this step must contribute physical contact impulse.
-                let contact_pose = if stage == ContactStage::Stabilization
-                    && body.is_some_and(|b| b.is_kinematic())
-                {
-                    self.scene
-                        .previous
-                        .colliders
-                        .get(&handle.into_raw_parts())
-                        .ok_or(IntegrationError::MissingPreviousPose(handle))?
-                } else {
-                    c.position()
-                };
                 let current = contact(
                     contact_pose,
                     shape,
@@ -161,10 +163,7 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
                     surface_velocity: body.map_or(Vec3::ZERO, |b| b.velocity_at_point(ct.point1)),
                     friction,
                 });
-                if self.settings.static_sweep
-                    && stage == ContactStage::Prediction
-                    && !body.is_some_and(|b| b.is_kinematic())
-                {
+                if sweep {
                     let movement = p - previous[i];
                     if movement.length_squared() > Real::MIN_POSITIVE {
                         self.pair_queries += 1;
@@ -199,14 +198,11 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
                                     surface_velocity: Vec3::ZERO,
                                     friction,
                                 };
-                                self.sweeps.insert(key, swept);
+                                self.sweeps.push(swept);
                                 geometry = Some(swept);
                             }
                         }
                     }
-                }
-                if let Some(swept) = self.sweeps.get(&key) {
-                    geometry = Some(*swept);
                 }
                 if let Some(contact) = geometry {
                     if out.len() >= self.limit {
@@ -218,18 +214,45 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
         }
         // Keep sweep planes even if constraint projection moves the particle
         // outside the source collider's candidate AABB during this substep.
-        let present: BTreeSet<_> = out.iter().map(|c| c.key).collect();
-        for (key, c) in &self.sweeps {
-            if !present.contains(key) {
-                if out.len() >= self.limit {
-                    return Err(ClothError::ContactBudgetExceeded { limit: self.limit }.into());
-                }
-                out.push(*c);
-            }
+        // Prediction is queried once per substep; its unique sweep keys remain
+        // sorted for all subsequent iterations. Linear union also replaces a
+        // matching discrete contact with its cached sweep plane.
+        if stage == ContactStage::Prediction {
+            self.sweeps.sort_unstable_by_key(|c| c.key);
+        }
+        if !self.sweeps.is_empty() {
+            merge_sweep_contacts(out, &self.sweeps, &mut self.merged, self.limit)?;
         }
         Ok(())
     }
 }
+
+fn merge_sweep_contacts(
+    out: &mut Vec<Contact>,
+    sweeps: &[Contact],
+    merged: &mut Vec<Contact>,
+    limit: usize,
+) -> Result<(), ClothError> {
+    out.sort_unstable_by_key(|c| c.key);
+    merged.clear();
+    let mut discrete = out.iter().peekable();
+    for swept in sweeps {
+        while discrete.peek().is_some_and(|c| c.key < swept.key) {
+            merged.push(*discrete.next().unwrap());
+        }
+        if discrete.peek().is_some_and(|c| c.key == swept.key) {
+            discrete.next();
+        }
+        merged.push(*swept);
+    }
+    merged.extend(discrete);
+    if merged.len() > limit {
+        return Err(ClothError::ContactBudgetExceeded { limit });
+    }
+    std::mem::swap(out, merged);
+    Ok(())
+}
+
 impl ContactSource for RapierContacts<'_, '_> {
     fn contacts(
         &mut self,
@@ -247,5 +270,62 @@ impl ContactSource for RapierContacts<'_, '_> {
             self.error = Some(e);
             ClothError::External(message)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sweep_planes_override_current_geometry_and_survive_missing_candidates() {
+        let contact = |particle, external, normal| Contact {
+            key: ContactKey {
+                particle,
+                external,
+                feature: 0,
+            },
+            normal,
+            point: Vec3::ZERO,
+            surface_velocity: Vec3::ZERO,
+            friction: 0.3,
+        };
+        // Source order is collider-first; the solver order is particle-first.
+        let original = vec![
+            contact(1, 0, Vec3::Y),
+            contact(0, 1, Vec3::Y),
+            contact(1, 1, Vec3::Y),
+        ];
+        let sweeps = vec![
+            contact(0, 0, Vec3::X),
+            contact(1, 0, Vec3::X),
+            contact(2, 0, Vec3::X),
+        ];
+        let mut out = original.clone();
+        let mut scratch = vec![];
+        merge_sweep_contacts(&mut out, &sweeps, &mut scratch, 5).unwrap();
+        assert_eq!(
+            out.iter()
+                .map(|c| (c.key.particle, c.key.external))
+                .collect::<Vec<_>>(),
+            [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)]
+        );
+        assert_eq!(
+            out.iter().map(|c| c.normal).collect::<Vec<_>>(),
+            [Vec3::X, Vec3::Y, Vec3::X, Vec3::Y, Vec3::X]
+        );
+        // Later projection removes all discrete candidates. The cached hit
+        // planes must still constrain the same particles through this step.
+        out.clear();
+        merge_sweep_contacts(&mut out, &sweeps, &mut scratch, 5).unwrap();
+        assert_eq!(
+            out.iter().map(|c| c.key).collect::<Vec<_>>(),
+            sweeps.iter().map(|c| c.key).collect::<Vec<_>>()
+        );
+        out = original;
+        assert!(matches!(
+            merge_sweep_contacts(&mut out, &sweeps, &mut scratch, 4),
+            Err(ClothError::ContactBudgetExceeded { limit: 4 })
+        ));
     }
 }

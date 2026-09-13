@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "cpu": "13th Gen Intel(R) Core(TM) i9-13900H",
+  "os": "linux 6.8.0-139-generic",
+  "rust": "rustc 1.93.0 (254b59607 2026-01-19)",
+  "commit": "a603f02ed4d03fde25fc6ff55c709dca6d8148b1",
+  "dirty": false,
+  "precision": "f64",
+  "grid": 32,
+  "cloths": 1,
+  "h": 0.004166666666666667,
+  "iterations": 8,
+  "warmup_substeps": 100,
+  "measured_substeps": 1000,
+  "substeps_per_frame": 4,
+  "frame_budget_ms": 16.666666666666668,
+  "samples": [
+    {
+      "fixture": "flat-halfspace",
+      "core_substep": {
+        "p50_ms": 3.855336,
+        "p95_ms": 4.846525,
+        "max_ms": 5.046234999999999
+      },
+      "query_substep": {
+        "p50_ms": 1.611841,
+        "p95_ms": 2.033608,
+        "max_ms": 2.3890819999999997
+      },
+      "cloth_substep": {
+        "p50_ms": 5.4752860000000005,
+        "p95_ms": 6.897096,
+        "max_ms": 7.438873
+      },
+      "physics_frame": {
+        "p50_ms": 21.854492999999998,
+        "p95_ms": 27.505614,
+        "max_ms": 28.093231
+      },
+      "frames_over_budget": 250,
+      "max_penetration": 0.0,
+      "max_stretch": 0.0,
+      "max_p95_stretch": 0.0,
+      "max_target_error": 0.0,
+      "max_contacts": 1024,
+      "final_corner": [
+        1.0,
+        0.005,
+        1.0
+      ]
+    },
+    {
+      "fixture": "hanging",
+      "core_substep": {
+        "p50_ms": 4.083975,
+        "p95_ms": 5.081459,
+        "max_ms": 6.218724
+      },
+      "query_substep": {
+        "p50_ms": 0.027305999999999993,
+        "p95_ms": 0.033929,
+        "max_ms": 0.041447
+      },
+      "cloth_substep": {
+        "p50_ms": 4.115494,
+        "p95_ms": 5.120585,
+        "max_ms": 6.2662070000000005
+      },
+      "physics_frame": {
+        "p50_ms": 16.454254000000002,
+        "p95_ms": 20.550866,
+        "max_ms": 23.805531000000002
+      },
+      "frames_over_budget": 80,
+      "max_penetration": 0.0,
+      "max_stretch": 0.23479577140066366,
+      "max_p95_stretch": 0.05768567837369587,
+      "max_target_error": 0.0,
+      "max_contacts": 0,
+      "final_corner": [
+        0.9329812055312773,
+        0.46421830309965173,
+        -0.8108417396764281
+      ]
+    },
+    {
+      "fixture": "moving-sphere",
+      "core_substep": {
+        "p50_ms": 4.357842,
+        "p95_ms": 4.596657999999999,
+        "max_ms": 5.004408
+      },
+      "query_substep": {
+        "p50_ms": 1.3548639999999998,
+        "p95_ms": 2.304756,
+        "max_ms": 2.4234699999999996
+      },
+      "cloth_substep": {
+        "p50_ms": 5.855308,
+        "p95_ms": 6.409419000000001,
+        "max_ms": 7.022927
+      },
+      "physics_frame": {
+        "p50_ms": 23.351101,
+        "p95_ms": 25.461775999999997,
+        "max_ms": 27.303496
+      },
+      "frames_over_budget": 250,
+      "max_penetration": 2.177077962350893e-16,
+      "max_stretch": 0.07676879407585391,
+      "max_p95_stretch": 0.038606756162645084,
+      "max_target_error": 0.0,
+      "max_contacts": 1024,
+      "final_corner": [
+        0.27230379997999493,
+        0.005,
+        1.0496103610850858
+      ]
+    }
+  ]
+}

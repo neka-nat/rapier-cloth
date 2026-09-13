@@ -1,13 +1,11 @@
 use crate::{
-    Cloth, ClothError, Contact, ContactKey, ContactSource, ContactStage, NoContacts, Real,
-    StepReport, Vec3,
+    Cloth, ClothError, Contact, ContactSource, ContactStage, NoContacts, Real, StepReport, Vec3,
     constraints::{
-        bend::{angle_and_gradients, angle_difference},
+        bend::{angle, angle_and_gradients, angle_difference},
         distance,
     },
     contact::friction_velocity,
 };
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SolverSettings {
@@ -15,6 +13,7 @@ pub struct SolverSettings {
     pub max_substep: Real,
     pub max_contacts: usize,
 }
+
 impl Default for SolverSettings {
     fn default() -> Self {
         Self {
@@ -54,7 +53,7 @@ pub struct Target {
     pub compliance: Real,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct ContactState {
     contact: Contact,
     lambda: Real,
@@ -73,7 +72,10 @@ pub struct Solver {
     bend_lambda: Vec<Real>,
     target_lambda: Vec<Vec3>,
     contacts: Vec<Contact>,
-    contact_states: BTreeMap<ContactKey, ContactState>,
+    // Sorted by key. Merge each query with the cumulative substep states, so
+    // inactive contacts retain their lambda without per-contact tree lookups.
+    contact_states: Vec<ContactState>,
+    next_contact_states: Vec<ContactState>,
     stretches: Vec<Real>,
 }
 
@@ -247,7 +249,7 @@ impl Solver {
         }
         // Position solve impulses plus any residual inward normal velocity.
         // Stabilization never contributed to these lambdas.
-        for state in self.contact_states.values() {
+        for state in &self.contact_states {
             let c = state.contact;
             let i = c.key.particle as usize;
             if self.weights[i] == 0.0 {
@@ -293,15 +295,16 @@ impl Solver {
                 - 1.0)
                 .max(0.0);
             self.stretches.push(strain);
+            report.max_stretch = report.max_stretch.max(strain);
         }
-        self.stretches.sort_unstable_by(Real::total_cmp);
-        report.max_stretch = self.stretches.last().copied().unwrap_or(0.0);
-        report.p95_stretch = self.stretches
-            [((self.stretches.len() as Real * 0.95).ceil() as usize).saturating_sub(1)];
+        let rank = ((self.stretches.len() as Real * 0.95).ceil() as usize).saturating_sub(1);
+        report.p95_stretch = *self
+            .stretches
+            .select_nth_unstable_by(rank, Real::total_cmp)
+            .1;
         for hinge in cloth.mesh.hinges() {
-            let (angle, _) =
-                angle_and_gradients(hinge.vertices.map(|i| self.positions[i as usize]))
-                    .ok_or(ClothError::DegenerateConstraint)?;
+            let angle = angle(hinge.vertices.map(|i| self.positions[i as usize]))
+                .ok_or(ClothError::DegenerateConstraint)?;
             report.max_bend_error = report
                 .max_bend_error
                 .max(angle_difference(angle, hinge.rest_angle).abs());
@@ -333,7 +336,9 @@ impl Solver {
                 + self.bend_lambda.capacity()
                 + self.stretches.capacity())
                 * std::mem::size_of::<Real>()
-            + self.contacts.capacity() * std::mem::size_of::<Contact>();
+            + self.contacts.capacity() * std::mem::size_of::<Contact>()
+            + (self.contact_states.capacity() + self.next_contact_states.capacity())
+                * std::mem::size_of::<ContactState>();
         cloth.previous.copy_from_slice(&cloth.positions);
         std::mem::swap(&mut cloth.positions, &mut self.positions);
         std::mem::swap(&mut cloth.velocities, &mut self.velocities);
@@ -383,18 +388,27 @@ impl Solver {
         Ok(())
     }
     fn project_contacts(&mut self, radius: Real, limit: usize) -> Result<(), ClothError> {
+        self.next_contact_states.clear();
+        let mut old = self.contact_states.iter().peekable();
         for &c in &self.contacts {
             let i = c.key.particle as usize;
             if self.weights[i] == 0.0 {
                 continue;
             }
-            if self.contact_states.len() >= limit && !self.contact_states.contains_key(&c.key) {
+            while old.peek().is_some_and(|s| s.contact.key < c.key) {
+                self.next_contact_states.push(*old.next().unwrap());
+            }
+            if self.next_contact_states.len() >= limit {
                 return Err(ClothError::ContactBudgetExceeded { limit });
             }
-            let state = self.contact_states.entry(c.key).or_insert(ContactState {
-                contact: c,
-                lambda: 0.0,
-            });
+            let mut state = if old.peek().is_some_and(|s| s.contact.key == c.key) {
+                *old.next().unwrap()
+            } else {
+                ContactState {
+                    contact: c,
+                    lambda: 0.0,
+                }
+            };
             if state.contact.normal.dot(c.normal) < 0.9 {
                 state.lambda = 0.0;
             }
@@ -403,10 +417,92 @@ impl Solver {
             let next = (state.lambda - constraint / self.weights[i]).max(0.0);
             self.positions[i] += c.normal * ((next - state.lambda) * self.weights[i]);
             state.lambda = next;
+            self.next_contact_states.push(state);
             if !self.positions[i].is_finite() {
                 return Err(ClothError::NonFiniteState);
             }
         }
+        self.next_contact_states.extend(old);
+        if self.next_contact_states.len() > limit {
+            return Err(ClothError::ContactBudgetExceeded { limit });
+        }
+        std::mem::swap(&mut self.contact_states, &mut self.next_contact_states);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod contact_state_tests {
+    use super::*;
+    use crate::ContactKey;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn sorted_states_match_tree_oracle_with_changing_contacts() {
+        let mut solver = Solver::new();
+        solver.positions = vec![Vec3::ZERO; 3];
+        solver.weights = vec![1.0, 0.0, 2.0];
+        let mut expected_positions = solver.positions.clone();
+        let mut expected = BTreeMap::<ContactKey, ContactState>::new();
+        for iteration in 0..12 {
+            solver.contacts.clear();
+            // Alternate keys to cover insertions before/between/after old
+            // states, disappearances, returns and changed contact normals.
+            for particle in 0..3 {
+                for external in 0..5 {
+                    if (iteration + external) % 3 == 0 {
+                        continue;
+                    }
+                    let normal = if iteration % 2 == 0 { Vec3::Y } else { Vec3::X };
+                    solver.contacts.push(Contact {
+                        key: ContactKey {
+                            particle,
+                            external,
+                            feature: 0,
+                        },
+                        normal,
+                        point: normal * (external as Real * 0.001),
+                        surface_velocity: Vec3::ZERO,
+                        friction: 0.3,
+                    });
+                }
+            }
+            // Independent pre-optimization map algorithm, preserving exact
+            // operation order for projections and normal-change resets.
+            for &c in &solver.contacts {
+                let i = c.key.particle as usize;
+                if solver.weights[i] == 0.0 {
+                    continue;
+                }
+                let state = expected.entry(c.key).or_insert(ContactState {
+                    contact: c,
+                    lambda: 0.0,
+                });
+                if state.contact.normal.dot(c.normal) < 0.9 {
+                    state.lambda = 0.0;
+                }
+                state.contact = c;
+                let constraint = (expected_positions[i] - c.point).dot(c.normal) - 0.005;
+                let next = (state.lambda - constraint / solver.weights[i]).max(0.0);
+                expected_positions[i] += c.normal * ((next - state.lambda) * solver.weights[i]);
+                state.lambda = next;
+            }
+            solver.project_contacts(0.005, 10).unwrap();
+            assert_eq!(solver.positions, expected_positions);
+            assert_eq!(solver.contact_states.len(), expected.len());
+            for (actual, (key, oracle)) in solver.contact_states.iter().zip(&expected) {
+                assert_eq!(actual.contact.key, *key);
+                assert_eq!(actual.contact.normal, oracle.contact.normal);
+                assert_eq!(actual.lambda, oracle.lambda);
+            }
+        }
+        // A new key exceeds the cumulative budget even though this individual
+        // query only has one contact. Disappeared states still count.
+        solver.contacts.truncate(1);
+        solver.contacts[0].key.external = 99;
+        assert!(matches!(
+            solver.project_contacts(0.005, 10),
+            Err(ClothError::ContactBudgetExceeded { limit: 10 })
+        ));
     }
 }

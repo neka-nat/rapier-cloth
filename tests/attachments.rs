@@ -3,6 +3,53 @@ use rapier::prelude::*;
 use rapier_cloth::{Real, *};
 use support::TestWorld;
 
+#[test]
+fn fully_excluded_attachment_collider_does_not_validate_unused_friction() {
+    let mut w = TestWorld::new();
+    w.rigid.gravity = Vec3::ZERO;
+    let body = w.rigid.bodies.insert(RigidBodyBuilder::fixed());
+    let collider = w.rigid.colliders.insert_with_parent(
+        ColliderBuilder::ball(0.5).friction(Real::NAN),
+        body,
+        &mut w.rigid.bodies,
+    );
+    let cloth = w.grid(2, 0.1, Vec3::Y * 0.2);
+    let points = w
+        .cloth
+        .cloth(cloth)
+        .unwrap()
+        .positions()
+        .iter()
+        .enumerate()
+        .map(|(particle, &local_anchor)| AttachmentPoint {
+            particle: particle as u32,
+            local_anchor,
+        })
+        .collect();
+    let attachment = w
+        .cloth
+        .attach(
+            AttachmentDesc {
+                cloth,
+                body,
+                points,
+                compliance: 0.0,
+                excluded_colliders: vec![collider],
+            },
+            &w.rigid.bodies,
+            &w.rigid.colliders,
+        )
+        .unwrap();
+    w.tick().unwrap();
+    w.cloth.release(attachment).unwrap();
+    assert!(matches!(
+        w.tick(),
+        Err(IntegrationError::Core(ClothError::InvalidParameter(
+            "collider friction"
+        )))
+    ));
+}
+
 fn attach(
     w: &mut TestWorld,
     cloth: ClothHandle,
