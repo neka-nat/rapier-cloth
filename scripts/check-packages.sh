@@ -18,8 +18,8 @@ for precision in f32 f64; do
   for name in rapier-cloth-core rapier-cloth; do
     tar -xzf "$package_target/package/$name-0.1.0.crate" -C "$unpacked"
     test -f "$unpacked/$name-0.1.0/src/lib.rs"
-    test -f "$unpacked/$name-0.1.0/LICENSE-MIT"
-    test -f "$unpacked/$name-0.1.0/LICENSE-APACHE"
+    cmp LICENSE-MIT "$unpacked/$name-0.1.0/LICENSE-MIT"
+    test ! -e "$unpacked/$name-0.1.0/LICENSE-APACHE"
     tar -tzf "$package_target/package/$name-0.1.0.crate" > "$package_check_dir/$name-$precision-contents.txt"
     if grep -E '/(\.internal|evidence|node_modules|target)/|/(progress\.md|package-design\.ja\.md|implementation-plan\.ja\.md)$' "$package_check_dir/$name-$precision-contents.txt"; then
       echo "Internal work records and build dependencies must not be distributed" >&2
@@ -59,7 +59,8 @@ for name in ['rapier-cloth','rapier-cloth-core']:
     manifest=pathlib.Path(packages[0]['manifest_path']).resolve()
     assert manifest.is_relative_to(base), manifest
     assert packages[0]['version']=='0.1.0'
-print('Verified: both library sources are extracted package artifacts.')
+    assert packages[0]['license']=='MIT', (name, packages[0]['license'])
+print('Verified: both library sources are extracted package artifacts licensed under MIT.')
 PY
 done
 printf 'Package and independent consumer checks passed. Evidence: %s\n' "$package_check_dir"

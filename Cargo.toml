@@ -7,7 +7,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/neka-nat/rapier-cloth"
 
 [package]
@@ -19,7 +19,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
-include = ["/src/**", "/examples/**", "/benches/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE-*", "/docs/**", "/CHANGELOG.md", "/CONTRIBUTING.md"]
+include = ["/src/**", "/examples/**", "/benches/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE-MIT", "/docs/**", "/CHANGELOG.md", "/CONTRIBUTING.md"]
 
 [features]
 default = ["f32"]
