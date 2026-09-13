@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Use coupled rigid supports during initial surface-gap restoration, with fresh normal multipliers and no friction/history updates. This prevents unresolved overlap from producing a spurious velocity in the subsequent physical prediction.
 - Couple deforming surface normal contacts with independent single-particle rigid supports. Solve their local complementarity conditions together, preserve free particle motion and retract friction when a support unloads. This repairs supported-fold prediction regressions without increasing substeps or solver iterations; full folding and CPU qualification remain open.
 - Bound fixed-plane CCD endpoint distances independently so movement away from a plane cannot consume the starting point's numerical clearance. Zero-clearance starts still fail atomically.
 - Add bounded ray, sphere-approach and closest-surface queries, generational cloth-associated material points, rest-edge-path patch selection and a runnable `surface_grasp` example. Preserve nearby-layer ordering for long rays in f32 and reject invalid or over-budget queries instead of returning partial selections.

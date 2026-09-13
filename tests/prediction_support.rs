@@ -114,3 +114,57 @@ fn supported_fold_prediction_converges_without_pinning_the_lower_layer() {
         }
     }
 }
+
+#[test]
+fn restoring_a_supported_surface_gap_does_not_add_velocity() {
+    let patch = GridBuilder::new(2, 2)
+        .size(0.02, 0.02)
+        .origin(Vec3::Y * 0.00141)
+        .build()
+        .unwrap();
+    let mut positions = patch.rest_positions().to_vec();
+    positions.extend(
+        patch
+            .rest_positions()
+            .iter()
+            .map(|p| Vec3::new(p.x, 0.0005, p.z)),
+    );
+    let mut triangles = patch.triangles().to_vec();
+    triangles.extend(patch.triangles().iter().map(|t| t.map(|i| i + 4)));
+    let mut cloth = Cloth::new(
+        ClothMesh::new(positions, triangles).unwrap(),
+        ClothMaterial::default(),
+    )
+    .unwrap();
+    cloth
+        .set_contact_settings(Some(ClothContactSettings {
+            thickness: 0.001,
+            activation_margin: 0.0001,
+            static_friction: 0.0,
+            kinetic_friction: 0.0,
+            self_collision: true,
+            continuous_self_collision: true,
+            rigid_surface_collision: true,
+            continuous_rigid_collision: true,
+            ..Default::default()
+        }))
+        .unwrap();
+    let mut test = TestWorld::new();
+    test.rigid.gravity = Vec3::ZERO;
+    test.rigid
+        .colliders
+        .insert(ColliderBuilder::new(SharedShape::halfspace(Vec3::Y)).friction(0.0));
+    let handle = test.cloth.add_cloth(cloth);
+    let report = test.tick().unwrap();
+    assert!(report.cloths[0].1.stabilized_contacts > 0);
+    let cloth = test.cloth.cloth(handle).unwrap();
+    assert!(cloth.pins().is_empty());
+    for (i, (&p, &v)) in cloth.positions().iter().zip(cloth.velocities()).enumerate() {
+        let height = if i < 4 { 0.0015 } else { 0.0005 };
+        assert!((p.y - height).abs() < 1e-7, "particle {i}: {p:?}");
+        assert!(
+            v.length() < 1e-6,
+            "gap restoration added velocity at {i}: {v:?}"
+        );
+    }
+}

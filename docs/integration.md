@@ -345,6 +345,9 @@ at most one such rigid support per particle; the remaining contacts still use th
 iterative solve. Particles retain their physical inverse masses and free motion.
 Supports can release, and unloading retracts any unsupported friction correction.
 This adds no time steps or global solver iterations.
+Initial surface-gap restoration uses this coupling with separate normal
+multipliers; it does not apply friction or retain those multipliers as physical
+support loads.
 
 This option covers cloth self-contact. The Rapier adapter uses particle contacts
 unless `rigid_surface_collision` separately enables discrete triangle contacts.

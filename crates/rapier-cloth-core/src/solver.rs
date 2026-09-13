@@ -91,6 +91,7 @@ pub struct Solver {
     next_surface_states: Vec<SurfaceContactState>,
     surface_solve_order: Vec<usize>,
     rigid_support: Vec<usize>,
+    stabilization_lambda: Vec<Real>,
     stretches: Vec<Real>,
     self_collision: Option<SelfCollision>,
     contact_settings: Option<ClothContactSettings>,
@@ -247,13 +248,7 @@ impl Solver {
                     corrected = true;
                 }
             }
-            for c in &self.surface_contacts {
-                if c.gap(&self.positions) < -c.separation * 1.0e-4 {
-                    c.project_validated(&mut self.positions, &self.weights, &mut 0.0)?;
-                    report.stabilized_contacts += 1;
-                    corrected = true;
-                }
-            }
+            corrected |= self.stabilize_surface_contacts(&mut report)?;
             self.accept_motion(source, ContactStage::Stabilization)?;
             if !corrected {
                 break;
@@ -613,6 +608,7 @@ impl Solver {
         report.scratch_bytes += (self.surface_solve_order.capacity()
             + self.rigid_support.capacity())
             * std::mem::size_of::<usize>();
+        report.scratch_bytes += self.stabilization_lambda.capacity() * std::mem::size_of::<Real>();
         // Persist only current, still touching features. A disappeared contact
         // must not act as adhesion or consume history indefinitely.
         self.surface_states.retain(|state| {
@@ -875,6 +871,73 @@ impl Solver {
         }
         Ok(())
     }
+    /// Initial gap restoration uses the same normal support coupling as physical
+    /// motion, with fresh multipliers and no friction/history updates. Residual
+    /// penetration must not become a physical impulse in the prediction stage.
+    fn stabilize_surface_contacts(&mut self, report: &mut StepReport) -> Result<bool, ClothError> {
+        self.stabilization_lambda
+            .resize(self.surface_contacts.len(), 0.0);
+        self.stabilization_lambda.fill(0.0);
+        self.rigid_support.resize(self.positions.len(), usize::MAX);
+        self.rigid_support.fill(usize::MAX);
+        for (index, c) in self.surface_contacts.iter().enumerate() {
+            if let Some((particle, _)) = normal_block::single_particle(c)
+                && self.weights[particle as usize] > 0.0
+                && self.rigid_support[particle as usize] == usize::MAX
+            {
+                self.rigid_support[particle as usize] = index;
+            }
+        }
+        let mut corrected = false;
+        for (index, &c) in self.surface_contacts.iter().enumerate() {
+            if c.gap(&self.positions) >= -c.separation * 1.0e-4
+                && self.stabilization_lambda[index] == 0.0
+            {
+                continue;
+            }
+            let external = c
+                .key
+                .features
+                .iter()
+                .any(|f| matches!(f, crate::SurfaceFeature::External { .. }));
+            let supports = std::array::from_fn(|i| {
+                if c.weights[i] == 0.0 || external {
+                    return None;
+                }
+                let support = self.rigid_support[c.particles[i] as usize];
+                (support != usize::MAX).then(|| normal_block::Support {
+                    contact: self.surface_contacts[support],
+                    lambda: self.stabilization_lambda[support],
+                })
+            });
+            if supports.iter().any(Option::is_some) {
+                let (lambda, loads) = normal_block::project(
+                    c,
+                    &mut self.positions,
+                    &self.weights,
+                    self.stabilization_lambda[index],
+                    supports,
+                )?;
+                self.stabilization_lambda[index] = lambda;
+                for i in 0..4 {
+                    if supports[i].is_some() {
+                        self.stabilization_lambda[self.rigid_support[c.particles[i] as usize]] =
+                            loads[i];
+                    }
+                }
+            } else {
+                c.project_validated(
+                    &mut self.positions,
+                    &self.weights,
+                    &mut self.stabilization_lambda[index],
+                )?;
+            }
+            report.stabilized_contacts += 1;
+            corrected = true;
+        }
+        Ok(corrected)
+    }
+
     fn project_surface_contacts(
         &mut self,
         source: &mut impl ContactSource,
