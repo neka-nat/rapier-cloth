@@ -52,6 +52,26 @@ jobs:
         run: |
           cargo tree --locked -p rapier-cloth-core --edges normal > core-dependencies.txt
           if grep -E 'rapier3d|parry3d|bevy|wgpu|three' core-dependencies.txt; then exit 1; fi
+  implicit:
+    name: Experimental implicit solver (Linux f64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: implicit-f64
+      - run: cargo test --locked --workspace --no-default-features --features f64,implicit
+      - run: cargo clippy --locked --workspace --no-default-features --features f64,implicit --all-targets -- -D warnings
+      - run: cargo run --locked --release --no-default-features --features f64,implicit --example fold_towel_implicit -- --dt 0.1 --output target/implicit-fold.jsonl
+      - run: cargo run --locked --release --no-default-features --features f64,implicit --example fold_towel_implicit -- --dt 0.1 --workers 4 --output target/implicit-fold-parallel.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: implicit-fold-f64
+          path: target/implicit-fold*.jsonl
   msrv:
     runs-on: ubuntu-latest
     strategy:
@@ -64,6 +84,8 @@ jobs:
         with:
           key: msrv-${{ matrix.precision }}
       - run: cargo +1.90.0 check --locked -p rapier-cloth --no-default-features --features ${{ matrix.precision }}
+      - if: matrix.precision == 'f64'
+        run: cargo +1.90.0 check --locked -p rapier-cloth --no-default-features --features f64,implicit
 
   viewer:
     runs-on: ubuntu-latest

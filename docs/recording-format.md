@@ -1,4 +1,4 @@
-# Recording format v1
+# Recording formats
 
 The generic `Recording<Config>` and pick-and-place `Summary` types in
 [examples/support/recording.rs](../examples/support/recording.rs) define the replay
@@ -14,7 +14,7 @@ received numbers and converts only rendering positions to `Float32Array`.
 
 | Field | Meaning |
 |---|---|
-| `schema_version` | Currently 1; other versions are rejected by the viewer |
+| `schema_version` | 1 for XPBD recordings; 2 for the implicit replay profile below |
 | `precision` | `f32` or `f64` |
 | `config` | Task-specific configuration; the viewer requires a positive `h` |
 | `triangles` | Zero-based index triples shared by all frames |
@@ -63,3 +63,28 @@ The viewer's shape format currently supports boxes only; that display format doe
 not define the library's collision support. The viewer validates indices, finite
 values, time ordering and body correspondence before replacing the current display.
 The live demo uses a [separate request/response protocol](live-demo.md#architecture).
+
+## Implicit replay profile (v2)
+
+The [converter](../demos/viewer/scripts/convert-implicit.mjs) produces a separate
+v2 profile from `fold_towel_implicit` JSONL. Geometry, bodies, frame ordering and
+outcome fields follow v1. The required `config.solver` is `implicit` and
+`precision` is `f64`. Other v2 solvers and unknown schema versions are rejected.
+
+- Frame diagnostics are `max_edge_extension` (fraction), `rms_speed` and
+  `max_speed` (m/s). They are null at the initial state, where no step was solved.
+  XPBD penetration, attachment-error and contact-count fields are not fabricated.
+- Pinned vertex IDs and triangles come from the matching public command fixture.
+  The converter checks initial geometry, accepted step ordering and pin targets.
+  The initial state has no pins; commands apply before the first solve.
+- Body 0 is a finite display proxy for the fixed halfspace, with its top at
+  half the recorded thickness. No robot/gripper geometry is implied by pins.
+- Completed runs include the original `summary`, including `settled`, simulated
+  duration, computation time and final-window drift. Outcome describes the whole
+  recording, independently of the currently displayed frame.
+- `provenance` records the input file's SHA-256 and command fixture name.
+  Compression is optional: the viewer accepts `.json` and `.json.gz`.
+
+Every accepted position and timestamp is retained without resampling. The viewer
+holds each state until the next recorded timestamp; it does not interpolate
+motion. These files are visualization data, not solver checkpoints.

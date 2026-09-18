@@ -25,6 +25,7 @@ include = ["/src/**", "/examples/**", "/benches/**", "/Cargo.toml", "/Cargo.lock
 default = ["f32"]
 f32 = ["dep:rapier-f32", "rapier-cloth-core/f32"]
 f64 = ["dep:rapier-f64", "rapier-cloth-core/f64"]
+implicit = ["rapier-cloth-core/implicit"]
 
 [dependencies]
 rapier-cloth-core = { version = "0.1.0", path = "crates/rapier-cloth-core", default-features = false }
@@ -53,3 +54,7 @@ harness = false
 [[bench]]
 name = "folding"
 harness = false
+
+[[example]]
+name = "fold_towel_implicit"
+required-features = ["f64", "implicit"]

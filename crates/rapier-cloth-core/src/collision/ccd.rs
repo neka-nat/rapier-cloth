@@ -72,6 +72,52 @@ impl CcdFeature {
     }
 }
 
+/// Try to certify an entire linear motion after an early conservative prefix.
+///
+/// `Limited` is a safe prefix, not proof of a collision in the remaining motion.
+/// In a rotating approach the distance can fall below the early-stop threshold
+/// while the whole motion still retains clearance. Probe up to three additional
+/// suffixes along the same motion, charging the original cumulative work budget.
+/// If these cannot certify the whole segment, retain the original safe prefix.
+/// This does not advance physical time or accept an unresolved suffix.
+pub(crate) fn certify_linear_motion(
+    feature: CcdFeature,
+    start: [Vec3; 4],
+    end: [Vec3; 4],
+    minimum_separation: Real,
+    work: &mut CollisionWork,
+    limits: CollisionLimits,
+) -> Result<CcdResult, ClothError> {
+    let mut fraction = 0.0;
+    let mut first = None;
+    for _ in 0..4 {
+        let from = std::array::from_fn(|i| start[i] + (end[i] - start[i]) * fraction);
+        let result =
+            match conservative_advance(feature, from, end, minimum_separation, work, limits) {
+                Ok(result) => result,
+                // An unresolved later probe does not invalidate the already
+                // certified original prefix. Budget/invalid-geometry errors still
+                // propagate, and an unresolved first query still fails.
+                Err(ClothError::UnresolvedContinuousCollision(_)) if first.is_some() => break,
+                Err(error) => return Err(error),
+            };
+        match result {
+            CcdResult::Clear => return Ok(CcdResult::Clear),
+            CcdResult::Limited { fraction: local } => {
+                let next = fraction + (1.0 - fraction) * local;
+                first.get_or_insert(next);
+                if next <= fraction || next >= 1.0 {
+                    break;
+                }
+                fraction = next;
+            }
+        }
+    }
+    Ok(CcdResult::Limited {
+        fraction: first.unwrap_or(fraction),
+    })
+}
+
 /// Bound linear interpolation from `start` to `end` without crossing the
 /// minimum separation. Uses no allocations and never changes the input poses.
 ///
@@ -189,4 +235,136 @@ pub fn conservative_advance(
     Err(ClothError::UnresolvedContinuousCollision(
         "per-query convergence limit",
     ))
+}
+
+#[cfg(test)]
+mod prefix_continuation_tests {
+    use super::*;
+    #[test]
+    // Preserve the recorded f64 inputs; the f32 suite exercises their rounding.
+    #[allow(clippy::excessive_precision)]
+    fn saved_safe_approach_continues_past_first_conservative_prefix() {
+        let start = [
+            Vec3::new(
+                -0.07684178301072304,
+                0.02795432166043326,
+                0.07290825811395008,
+            ),
+            Vec3::new(
+                -0.055379011240968744,
+                0.01345112529717496,
+                0.07174130637554785,
+            ),
+            Vec3::new(-0.06901839538316046, 0.01600539918729742, 0.07282066952667),
+            Vec3::new(
+                -0.04801602865774236,
+                0.003353019333387006,
+                0.06646094998916459,
+            ),
+        ];
+        let end = [
+            Vec3::new(
+                -0.07883581572015677,
+                0.016647290626520112,
+                0.06751404564198973,
+            ),
+            Vec3::new(
+                -0.05744326632245079,
+                0.0010016794642521724,
+                0.06833899116623009,
+            ),
+            Vec3::new(
+                -0.07036419493556886,
+                0.004474044679588639,
+                0.06935474904763744,
+            ),
+            Vec3::new(
+                -0.04801602860334894,
+                0.00015899999999999977,
+                0.06646094909815944,
+            ),
+        ];
+
+        let mut first_work = CollisionWork::default();
+        let limits = CollisionLimits::default();
+        let first = conservative_advance(
+            CcdFeature::EdgeEdge,
+            start,
+            end,
+            0.0002862,
+            &mut first_work,
+            limits,
+        )
+        .unwrap();
+        assert!(matches!(first, CcdResult::Limited { .. }));
+        let mut work = CollisionWork::default();
+        assert_eq!(
+            certify_linear_motion(
+                CcdFeature::EdgeEdge,
+                start,
+                end,
+                0.0002862,
+                &mut work,
+                limits
+            )
+            .unwrap(),
+            CcdResult::Clear
+        );
+        // An independent interval-distance audit bounds the full segment above
+        // 0.000304569 m; this fixture must not be rejected as an actual collision.
+        let limited = CollisionLimits {
+            ccd_checks: first_work.ccd_checks,
+            ..limits
+        };
+        assert!(matches!(
+            certify_linear_motion(
+                CcdFeature::EdgeEdge,
+                start,
+                end,
+                0.0002862,
+                &mut CollisionWork::default(),
+                limited
+            ),
+            Err(ClothError::CollisionBudgetExceeded {
+                kind: CollisionBudgetKind::CcdChecks,
+                ..
+            })
+        ));
+    }
+    #[test]
+    fn true_crossing_retains_the_original_safe_prefix() {
+        let start = [
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, -1.0, 1.0),
+            Vec3::new(0.0, 1.0, 1.0),
+        ];
+        let end = [
+            start[0],
+            start[1],
+            Vec3::new(0.0, -1.0, -1.0),
+            Vec3::new(0.0, 1.0, -1.0),
+        ];
+        let limits = CollisionLimits::default();
+        let first = conservative_advance(
+            CcdFeature::EdgeEdge,
+            start,
+            end,
+            0.01,
+            &mut CollisionWork::default(),
+            limits,
+        )
+        .unwrap();
+        let continued = certify_linear_motion(
+            CcdFeature::EdgeEdge,
+            start,
+            end,
+            0.01,
+            &mut CollisionWork::default(),
+            limits,
+        )
+        .unwrap();
+        assert!(matches!(first, CcdResult::Limited { .. }));
+        assert_eq!(continued, first);
+    }
 }

@@ -2,7 +2,8 @@
 
 CPU cloth simulation for Rust applications using Rapier 3D. Add deformable triangle
 meshes to an existing physics world, with contacts, pinned vertices and attachments
-to rigid bodies. The solver uses extended position-based dynamics (XPBD).
+to rigid bodies. The default solver uses extended position-based dynamics (XPBD);
+an optional [implicit shell solver](docs/implicit.md) supports folding experiments.
 
 `rapier-cloth-core` provides the engine-independent solver; `rapier-cloth` adds
 Rapier collision queries, attachments and time synchronization.
@@ -81,8 +82,10 @@ and [whole-triangle rigid contact](docs/integration.md#rigid-surface-contact) ar
 available as opt-in settings. Cloth-to-cloth collision, reactions on dynamic rigid
 bodies and arbitrary collision meshes are not implemented. Experimental
 [continuous rigid-surface checks](docs/integration.md#continuous-rigid-surface-collision)
-cover bounded primitive motion and solver corrections; complete folding and its
-real-time CPU budget are not yet qualified.
+cover bounded primitive motion and solver corrections. The optional
+[implicit towel example](docs/implicit.md#run-the-folding-example) tests a separate
+fold, release and settle trajectory at 0.04 or 0.1 s per physical step. General
+folding and its real-time CPU budget remain under development.
 Use [surface queries and grasp attachments](docs/grasping.md) to select exposed
 cloth layers and command a point or patch; static friction alone is not a grasp model.
 Read the [compatibility and limitations](docs/compatibility.md) before integrating.
@@ -91,6 +94,7 @@ Read the [compatibility and limitations](docs/compatibility.md) before integrati
 
 - [Documentation index](docs/README.md)
 - [Runnable examples and recording playback](docs/examples.md)
+- [Experimental implicit shell solver](docs/implicit.md)
 - [Performance measurement](docs/performance.md)
 - [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 

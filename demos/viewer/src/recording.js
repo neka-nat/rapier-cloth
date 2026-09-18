@@ -1,7 +1,8 @@
 const finiteVector = (v, n) => Array.isArray(v) && v.length === n && v.every(Number.isFinite);
 const requireValue = (ok, message) => { if (!ok) throw new Error(`Invalid recording: ${message}`); };
 export function validateRecording(record) {
-  requireValue(record?.schema_version === 1, 'schema_version 1 is required');
+  const implicit = record?.schema_version === 2 && record?.config?.solver === 'implicit';
+  requireValue(record?.schema_version === 1 || implicit, 'schema_version 1 or implicit schema_version 2 is required');
   requireValue(['f32', 'f64'].includes(record.precision), 'precision');
   requireValue(Number.isFinite(record.config?.h) && record.config.h > 0, 'h');
   requireValue(Array.isArray(record.frames) && record.frames.length > 0, 'frames');
@@ -32,7 +33,12 @@ export function validateRecording(record) {
     }
     for (const key of ['attached_particles', 'pinned_particles']) requireValue(Array.isArray(frame[key]) && frame[key].every(i => Number.isSafeInteger(i) && i >= 0 && i < count), key);
     requireValue(Array.isArray(frame.anchors) && frame.anchors.length === frame.attached_particles.length && frame.anchors.every(p => finiteVector(p, 3)), 'anchors');
-    requireValue(frame.diagnostics && ['max_stretch','p95_stretch','max_penetration','max_target_error','contacts'].every(key => Number.isFinite(frame.diagnostics[key]) && frame.diagnostics[key] >= 0), 'diagnostics');
+    if (implicit) {
+      requireValue((frame.step === 0 && frame.diagnostics === null) ||
+        (frame.diagnostics && ['max_edge_extension', 'rms_speed', 'max_speed'].every(key => Number.isFinite(frame.diagnostics[key]) && frame.diagnostics[key] >= 0)), 'implicit diagnostics');
+    } else {
+      requireValue(frame.diagnostics && ['max_stretch','p95_stretch','max_penetration','max_target_error','contacts'].every(key => Number.isFinite(frame.diagnostics[key]) && frame.diagnostics[key] >= 0), 'diagnostics');
+    }
   }
   if (record.outcome !== undefined) {
     const result = record.outcome;
@@ -43,6 +49,14 @@ export function validateRecording(record) {
     requireValue(result.stop_reason === 'solver_error'
       ? typeof result.failure === 'string' && result.failure.length > 0
       : result.failure === null, 'outcome failure');
+  }
+  if (implicit) {
+    requireValue(record.precision === 'f64' && record.outcome, 'implicit precision / outcome');
+    if (record.outcome.stop_reason === 'completed') {
+      requireValue(typeof record.summary?.settled === 'boolean', 'settled summary');
+      requireValue(['simulation_wall_seconds', 'simulated_seconds', 'final_window_drift'].every(key => Number.isFinite(record.summary[key]) && record.summary[key] >= 0), 'implicit summary');
+      requireValue(Math.abs(record.summary.simulated_seconds - lastTime) < 1e-5, 'summary duration');
+    }
   }
   return record;
 }

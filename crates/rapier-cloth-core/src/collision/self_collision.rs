@@ -1,14 +1,12 @@
 use super::{
     broad_phase::{Bounds, Hierarchy},
-    ccd::{CcdFeature, conservative_advance},
+    ccd::{CcdFeature, certify_linear_motion},
     geometry::{
         SurfaceWitness as Witness, closest_segments, closest_triangle, triangles_intersect,
     },
     settings::*,
 };
-#[cfg(test)]
-use crate::SurfaceFeature;
-use crate::{ClothError, ClothMesh, Real, SurfaceContact, SurfaceContactKey, Vec3};
+use crate::{ClothError, ClothMesh, Real, SurfaceContact, SurfaceContactKey, SurfaceFeature, Vec3};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -61,6 +59,24 @@ fn feature_contact(
     settings: ClothContactSettings,
     activation_only: bool,
 ) -> Result<Option<SurfaceContact>, ClothError> {
+    // Snapping a face or segment endpoint changes the primitive pair. Reproject
+    // onto the named edge so equal keys have the same support and normal,
+    // independent of the triangle or edge pair that generated the candidate.
+    let edge_witness = |vertex: u32, edge: [u32; 2]| {
+        let point = position(vertex);
+        closest_segments([point; 2], [position(edge[0]), position(edge[1])])
+            .map(|closest| Witness::edge(edge, closest.parameters[1]))
+            .ok_or(ClothError::DegenerateConstraint)
+    };
+    let (a, b) = match (a.feature, b.feature) {
+        (SurfaceFeature::Vertex(vertex), SurfaceFeature::Edge(edge)) => {
+            (a, edge_witness(vertex, edge)?)
+        }
+        (SurfaceFeature::Edge(edge), SurfaceFeature::Vertex(vertex)) => {
+            (edge_witness(vertex, edge)?, b)
+        }
+        _ => (a, b),
+    };
     let mut entries = [(0u32, 0.0); 4];
     let mut count = 0;
     for (w, sign) in [(a, 1.0), (b, -1.0)] {
@@ -327,7 +343,7 @@ impl SelfCollision {
                     triangle[1] as usize,
                     triangle[2] as usize,
                 ];
-                let next = conservative_advance(
+                let next = certify_linear_motion(
                     CcdFeature::VertexFace,
                     ids.map(|i| start[i]),
                     ids.map(|i| end[i]),
@@ -373,7 +389,7 @@ impl SelfCollision {
                     continue;
                 }
                 let ids = [ea[0], ea[1], eb[0], eb[1]].map(|i| i as usize);
-                let next = conservative_advance(
+                let next = certify_linear_motion(
                     CcdFeature::EdgeEdge,
                     ids.map(|i| start[i]),
                     ids.map(|i| end[i]),
@@ -593,6 +609,109 @@ impl SelfCollision {
 mod tests {
     use super::*;
     use crate::GridBuilder;
+
+    fn assert_canonical_vertex_edge(a: Witness, b: Witness, positions: &[Vec3], edge: [u32; 2]) {
+        let direction = positions[edge[1] as usize] - positions[edge[0] as usize];
+        let t = ((positions[0] - positions[edge[0] as usize]).dot(direction)
+            / direction.length_squared())
+        .clamp(0.0, 1.0);
+        let closest = positions[edge[0] as usize] + direction * t;
+        let normal = (positions[0] - closest).normalize();
+        for (a, b) in [(a, b), (b, a)] {
+            let contact = contact(a, b, positions, positions, ClothContactSettings::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                contact.key.features,
+                [SurfaceFeature::Vertex(0), SurfaceFeature::Edge(edge)]
+            );
+            let weight = |vertex| {
+                contact
+                    .particles
+                    .iter()
+                    .zip(contact.weights)
+                    .filter(|(i, _)| **i == vertex)
+                    .map(|(_, w)| w)
+                    .sum::<Real>()
+            };
+            assert!((weight(edge[1]) + t).abs() <= 8.0 * Real::EPSILON);
+            // Translation cancellation in the captured f64 fixture is measured
+            // relative to its 1 mm separation, not its world-space coordinates.
+            let tolerance = (8.0 * Real::EPSILON).max(1.0e-10);
+            assert!(
+                contact.normal.distance(normal) <= tolerance,
+                "key-normal mismatch: {:?} versus {:?}",
+                contact.normal,
+                normal
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_boundary_triangle_contact_reprojects_onto_the_named_edge() {
+        for tip_x in [0.1, 0.8] {
+            let positions = [
+                Vec3::new(0.4, 2.0e-7, 0.001),
+                Vec3::ZERO,
+                Vec3::X,
+                Vec3::new(tip_x, 1.0, 0.0),
+            ];
+            let closest =
+                closest_triangle(positions[0], [positions[1], positions[2], positions[3]]).unwrap();
+            let face = Witness::triangle([1, 2, 3], 0, closest.barycentric);
+            assert_eq!(face.feature, SurfaceFeature::Edge([1, 2]));
+            assert_canonical_vertex_edge(Witness::vertex(0), face, &positions, [1, 2]);
+        }
+    }
+
+    #[test]
+    fn canonical_boundary_edge_contact_reprojects_after_endpoint_snapping() {
+        let positions = [
+            Vec3::new(0.4, -2.0e-7, 0.001),
+            Vec3::new(0.8, 1.0, 0.001),
+            Vec3::ZERO,
+            Vec3::X,
+        ];
+        let closest =
+            closest_segments([positions[0], positions[1]], [positions[2], positions[3]]).unwrap();
+        let a = Witness::edge([0, 1], closest.parameters[0]);
+        let b = Witness::edge([2, 3], closest.parameters[1]);
+        assert_eq!(a.feature, SurfaceFeature::Vertex(0));
+        assert_canonical_vertex_edge(a, b, &positions, [2, 3]);
+    }
+
+    #[cfg(feature = "f64")]
+    #[test]
+    fn canonical_boundary_captured_fold_contact_has_consistent_gradient() {
+        // Vertex 935 against face 634 in the retained lowering-state query.
+        let positions = [
+            Vec3::new(
+                -0.1352543465787354,
+                0.0005000000000000083,
+                0.20638148964348207,
+            ),
+            Vec3::new(
+                -0.13537504358740665,
+                0.0015037293065824173,
+                0.21304072853518868,
+            ),
+            Vec3::new(
+                -0.1350817849622075,
+                0.0015000010267510733,
+                0.1968886183616613,
+            ),
+            Vec3::new(
+                -0.11919334678102089,
+                0.001500155615862502,
+                0.2131915223785832,
+            ),
+        ];
+        let closest =
+            closest_triangle(positions[0], [positions[1], positions[2], positions[3]]).unwrap();
+        let face = Witness::triangle([1, 2, 3], 634, closest.barycentric);
+        assert_eq!(face.feature, SurfaceFeature::Edge([1, 2]));
+        assert_canonical_vertex_edge(Witness::vertex(0), face, &positions, [1, 2]);
+    }
 
     fn compare_contacts(a: &[SurfaceContact], b: &[SurfaceContact]) {
         assert_eq!(a.len(), b.len());

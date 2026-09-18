@@ -21,6 +21,8 @@ pub struct Cloth {
     pub(crate) pins: BTreeMap<u32, Vec3>,
     pub(crate) contact_history: Vec<crate::contact::SurfaceContactState>,
     pub(crate) contact_settings: Option<crate::collision::ClothContactSettings>,
+    #[cfg(feature = "implicit")]
+    pub(crate) implicit_settings: Option<crate::ImplicitSettings>,
 }
 
 impl Cloth {
@@ -53,6 +55,8 @@ impl Cloth {
             pins: BTreeMap::new(),
             contact_history: vec![],
             contact_settings: None,
+            #[cfg(feature = "implicit")]
+            implicit_settings: None,
         })
     }
     pub fn mesh(&self) -> &ClothMesh {
@@ -65,6 +69,28 @@ impl Cloth {
     }
     pub fn material(&self) -> ClothMaterial {
         self.material
+    }
+    /// Select the experimental implicit shell solver. `None` selects XPBD.
+    /// Mass, damping and forces retain their existing meanings; shell moduli
+    /// replace scalar XPBD stretch/bend compliances. Settings are checkpointed
+    /// with the cloth, and changing the solver clears old contact history.
+    #[cfg(feature = "implicit")]
+    pub fn set_implicit_solver(
+        &mut self,
+        settings: Option<crate::ImplicitSettings>,
+    ) -> Result<(), ClothError> {
+        if let Some(settings) = settings {
+            settings.validate()?;
+        }
+        if self.implicit_settings != settings {
+            self.contact_history.clear();
+            self.implicit_settings = settings;
+        }
+        Ok(())
+    }
+    #[cfg(feature = "implicit")]
+    pub fn implicit_solver_settings(&self) -> Option<crate::ImplicitSettings> {
+        self.implicit_settings
     }
     pub fn positions(&self) -> &[Vec3] {
         &self.positions

@@ -1,5 +1,6 @@
 import {test,expect} from '@playwright/test';
 import fs from 'node:fs';
+import {gunzipSync} from 'node:zlib';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
@@ -117,3 +118,61 @@ for (const precision of ['f32', 'f64']) {
     expect(errors).toEqual([]);
   });
 }
+
+const implicitFixture = path.resolve('public/towel-fold-implicit.json.gz');
+const implicitRecord = JSON.parse(gunzipSync(fs.readFileSync(implicitFixture)).toString('utf8'));
+test('implicit towel replay renders accepted states and releases all pins', async({page}, testInfo) => {
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  await page.goto('/?sample=implicit');
+  await expect(page.locator('#solver-info')).toContainText('CPU IMPLICIT');
+  await expect(page.getByRole('alert')).toBeEmpty();
+  await expect(page.locator('#outcome')).toContainText('Settled under');
+  await expect(page.locator('#playback-note')).toContainText('14.80 s to compute');
+  for (const index of [0, 20, 40, 41, 80]) {
+    await seek(page, index);
+    const source = implicitRecord.frames[index];
+    const actual = await page.evaluate(() => window.__clothReplay.snapshot());
+    expect(actual.positions).toEqual(source.positions.flat().map(Math.fround));
+    expect(actual.normals.every(Number.isFinite)).toBe(true);
+    expect(actual.pins).toEqual(source.pinned_particles.flatMap(i => source.positions[i]).map(Math.fround));
+    await expect(page.locator('#contacts')).toHaveText(String(source.pinned_particles.length));
+    await expect(page.locator('#phase')).toHaveText(source.phase);
+    await expect(page.locator('#stretch')).toHaveText(source.diagnostics ? `${(source.diagnostics.max_edge_extension * 100).toFixed(3)} %` : '—');
+    if ([20, 80].includes(index)) await page.screenshot({path:testInfo.outputPath(`implicit-step-${index}.png`), fullPage:true});
+  }
+  expect(implicitRecord.frames[40].pinned_particles).toHaveLength(53);
+  expect(implicitRecord.frames[41].pinned_particles).toHaveLength(0);
+  await page.getByRole('button', {name:'Play', exact:true}).click();
+  await expect.poll(() => page.evaluate(() => window.__clothReplay.snapshot().frameIndex)).toBeGreaterThan(0);
+  await page.getByRole('button', {name:'Pause', exact:true}).click();
+  const paused = await page.evaluate(() => window.__clothReplay.snapshot().frameIndex);
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => window.__clothReplay.snapshot().frameIndex)).toBe(paused);
+  await page.locator('#sample').selectOption('pick');
+  await expect(page.locator('#solver-info')).toContainText('XPBD');
+  await expect(page.locator('#stretch-label')).toHaveText('Stretch · p95');
+  await page.locator('#file').setInputFiles(implicitFixture);
+  await expect(page.locator('#solver-info')).toContainText('CPU IMPLICIT');
+  const partial = structuredClone(implicitRecord);
+  partial.frames = partial.frames.slice(0, 3);
+  partial.outcome = {stop_reason:'solver_error', steps:2, end_step:80, failure:'Example failure'};
+  delete partial.summary;
+  await page.locator('#file').setInputFiles({name:'partial.json', mimeType:'application/json', buffer:Buffer.from(JSON.stringify(partial))});
+  await expect(page.locator('#outcome')).toContainText('Simulation stopped at step 2');
+  await expect(page.getByRole('alert')).toBeEmpty();
+  const invalid = structuredClone(implicitRecord);
+  invalid.summary.simulated_seconds = 10;
+  await page.locator('#file').setInputFiles({name:'invalid.json', mimeType:'application/json', buffer:Buffer.from(JSON.stringify(invalid))});
+  await expect(page.getByRole('alert')).toContainText('summary duration');
+  await expect(page.locator('#outcome')).toContainText('Simulation stopped at step 2');
+  expect(errors).toEqual([]);
+});
+test('implicit link autoplays to the last recorded state', async({page}) => {
+  await page.goto('/?sample=implicit&play=1');
+  await expect(page.getByRole('button', {name:'Pause', exact:true})).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__clothReplay.snapshot()?.frameIndex), {timeout:15_000}).toBe(80);
+  await expect(page.getByRole('button', {name:'Play', exact:true})).toBeVisible();
+  await expect(page.locator('#time')).toHaveText('8.000 s');
+});

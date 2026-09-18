@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Add `ImplicitSettings::execution` with serial default and opt-in `ImplicitExecution::Parallel4` for deterministic material and sparse-column assembly. Checkpoints retain execution settings; worker creation failure returns `ClothError::ImplicitWorkerSpawnFailed` without committing the affected cloth step. The implicit folding example accepts `--workers 1|4`. Update exhaustive error matches and complete implicit-settings literals as needed.
+- Skip implicit Hessian blocks that will not be stored because they belong to fixed vertices or the upper triangle, and skip block construction during trial energy/gradient evaluation. Preserve numerical contributions, summation order and solver stopping criteria; check hard-target elimination against the full system.
+
+- Reuse implicit sparse assembly ordering per column and Cholesky symbolic analysis when the complete matrix pattern matches. Recompute numerical values and factors on every iteration, preserve duplicate summation order, and discard these derived caches after each physical step. Add regression coverage for changing contacts, reordered contributions, release dimensions and failed-factor retries.
+
+- Add an optional f64 `implicit` shell solver with Neo-Hookean membrane and dihedral bending, a global sparse Newton solve, contact barriers and lagged smoothed friction. Preserve the default XPBD path and checkpointed per-cloth selection; reject unsupported targets and leave physical state unchanged on failure. Add a recorded 32×32 fold/release/settle example at actual 0.04 or 0.1 s physical steps, analytical/error controls and a Linux CI job. General folding, moving rigid contact and real-time performance remain unqualified for this solver.
+
+- Continue bounded self-collision certification past an early safe prefix when the remaining linear motion can be proven clear. Preserve the original prefix on unresolved probes and charge every query to the existing work budget. Complete folding remains unqualified.
+
+- Reproject self-contact witnesses onto their canonical boundary edges after snapping triangle or segment supports. Contacts sharing a feature key now use consistent edge weights and normals, including swept contacts.
+
 - Add a live towel scene using the same initialized task and transactional substeps as `fold_towel`. Live protocol 2 carries both grippers, vertex/weighted grasp points, accepted substeps and stopped state; add independent gripper release and on-demand shape inspection. Preserve the accepted prefix of a failed request and latch further physics until reset. Full folding and CPU qualification remain open.
 
 - Add the experimental `fold_towel` headless example, sharing execution and audits with the folding benchmark. Preserve accepted frames on task solver failure, distinguish partial/completed/error outcomes, and show both grippers and stopping status in browser replay. Add CLI, recording, extracted-example and browser checks. Complete folding and CPU/live qualification remain open.

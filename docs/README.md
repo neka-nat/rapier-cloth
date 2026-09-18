@@ -8,6 +8,7 @@ example. These guides describe supported behavior and runnable workflows.
 | [Live demo](live-demo.md) | Interact with a cloth simulated by a local Rust CPU server |
 | [Examples](examples.md) | Run headless simulations, generate recordings and inspect them |
 | [Integration](integration.md) | Add cloth to a Rapier world, tune materials and handle errors |
+| [Implicit shell solver](implicit.md) | Run the experimental f64 fold, release and settle example |
 | [Surface selection and grasping](grasping.md) | Select exposed material points or patches and attach them to grippers |
 | [Compatibility and limitations](compatibility.md) | Check precision, toolchain and collision support |
 | [Recording format](recording-format.md) | Read the versioned JSON used by the replay viewer |

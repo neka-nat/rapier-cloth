@@ -16,6 +16,13 @@ pub enum ClothError {
     },
     DegenerateConstraint,
     NonFiniteState,
+    /// A requested implicit worker could not be started. Already-started
+    /// workers are joined and this cloth's physical step is not committed.
+    ImplicitWorkerSpawnFailed(String),
+    ImplicitSolverFailed {
+        phase: &'static str,
+        iterations: usize,
+    },
     ContactBudgetExceeded {
         limit: usize,
     },
@@ -50,6 +57,14 @@ impl fmt::Display for ClothError {
             }
             Self::DegenerateConstraint => write!(f, "constraint geometry became degenerate"),
             Self::NonFiniteState => write!(f, "non-finite simulation state; substep not committed"),
+            Self::ImplicitWorkerSpawnFailed(reason) => write!(
+                f,
+                "could not start implicit worker: {reason}; substep not committed"
+            ),
+            Self::ImplicitSolverFailed { phase, iterations } => write!(
+                f,
+                "implicit solver failed during {phase} after {iterations} iterations; substep not committed"
+            ),
             Self::ContactBudgetExceeded { limit } => write!(f, "contact budget exceeded ({limit})"),
             Self::InvalidSurfaceContact(s) => write!(f, "invalid surface contact: {s}"),
             Self::InfeasibleSurfaceContact => {

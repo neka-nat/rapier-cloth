@@ -154,6 +154,105 @@ The scaling benchmark's `total` excludes Rapier's rigid-body step. It is therefo
 a different scope from `physics_frame` above. Timings are serial CPU measurements;
 larger grids are not automatically suitable for real-time use.
 
+## Implicit towel folding
+
+For the experimental f64 shell solver, measure the complete fold, release and
+settle trajectory separately from the XPBD benchmarks above:
+
+```bash
+cargo run --locked --release --no-default-features --features f64,implicit --example fold_towel_implicit -- --dt 0.1 --output implicit-fold.jsonl
+```
+
+Use a new output path for each repetition. Its summary reports the mean, p95 and
+maximum physical-step time, plus the cost of all 80 steps over 8 simulated seconds.
+Step timing includes checkpoints, commands and Rapier/cloth stepping; it excludes
+record serialization, rendering and independent geometry audits. Read the
+[implicit solver guide](implicit.md) for the fixture and qualification limits.
+
+The implicit solver reuses sparse ordering for unchanged columns and symbolic
+factorization for an unchanged complete matrix pattern. Numerical values and
+factors are recomputed each iteration. These caches expire at the physical-step
+boundary, so changing grasp targets, restoring a checkpoint or retrying a failed
+step does not reuse derived data from the previous attempt.
+
+### Optional four-worker execution
+
+`ImplicitSettings::execution` defaults to `ImplicitExecution::Serial`. Use
+`ImplicitExecution::Parallel4`, or `--workers 4` in the example, to include up to
+three additional native workers for material and sparse-column assembly.
+Numerical accumulation order is preserved; factorization and contact queries
+remain serial. The application owns its overall thread budget, including other
+cloths and the robot simulator. See [CPU execution](implicit.md#cpu-execution)
+for failure and checkpoint behavior.
+
+```bash
+cargo run --locked --release --no-default-features --features f64,implicit --example fold_towel_implicit -- --dt 0.1 --workers 4 --output implicit-parallel.jsonl
+```
+
+Local Linux measurements of the actual public example on an Intel Core i9-13900H
+used the same affinity to four distinct physical cores, with serial/parallel/
+parallel/serial order at h=0.1 and reversed mode order at h=0.04. Each run simulates
+eight seconds, including full grasp release and settling. No builds or tests ran
+concurrently; unrelated host load and CPU frequency were uncontrolled.
+
+| Metric | Serial | Four workers |
+|---|---:|---:|
+| h=0.1 task, two observations | 17.11 / 18.98 s | 14.80 / 14.81 s |
+| h=0.1 mean task cost | 18.05 s | 14.81 s |
+| h=0.1 p95 physical step | 469–519 ms | 392–396 ms |
+| h=0.1 mean process CPU time | 18.09 s | 18.27 s |
+| h=0.1 peak process RSS | 79.10 MiB | 90.36 MiB |
+| h=0.04 task, two observations | 36.43 / 34.98 s | 37.92 / 32.36 s |
+| h=0.04 mean task cost | 35.70 s | 35.14 s |
+| h=0.04 mean process CPU time | 35.80 s | 42.16 s |
+| h=0.04 peak process RSS | 80.57 MiB | 110.18 MiB |
+
+The h=0.1 mean wall cost decreases by **17.96%**, while all physical states,
+iterations and collision-work counters remain exactly equal to the serial
+reference. Across eight runs, 1,120 accepted steps and all release/settling
+metrics match. Additional peak RSS reaches 11.26 MiB at h=0.1 and 29.61 MiB at
+h=0.04. Process CPU and memory usage include recording/allocator overhead;
+step wall timings exclude serialization as described above.
+
+The h=0.04 ranges overlap substantially: its 1.59% mean difference does not
+establish a useful speedup at that step size. Two repetitions per mode are local
+observations, not a cross-platform guarantee. Measure the chosen mode in the
+host application. At h=0.1 the four-worker runtime still takes about **1.85 wall
+seconds per simulated second**, so wall-clock real time remains unmet.
+
+### Earlier serial optimizations
+
+Earlier measurements on a local Intel Core i9-13900H, before and after this reuse
+change measured the following complete-task costs. The run order was before,
+after, after, before, with no concurrent build or experiment.
+
+| Metric | Before reuse | With reuse |
+|---|---:|---:|
+| 8 simulated seconds at h=0.1 | 23.78–24.17 s | 17.67–17.99 s |
+| Mean physical step | 297–302 ms | 221–225 ms |
+| p95 physical step | 606–612 ms | 476–480 ms |
+| Peak process RSS | 49.9–50.3 MiB | 75.1–75.3 MiB |
+
+Mean total cost decreased by about 25.6%, with additional temporary/cache memory.
+All accepted positions, velocities, solver iteration counts and collision-work
+counts matched the previously audited run exactly. These are local measurements
+of this fixture, not a cross-platform timing guarantee. CPU cost remains about
+2.2 times simulated time, so wall-clock real time is not yet achieved.
+
+Subsequent assembly optimization skips local Hessian blocks for fixed vertices
+and the unused upper triangle, and avoids building these blocks during trial
+energy/gradient evaluation. Full h=0.1 and h=0.04 regressions retain identical
+physical states and work counts. A later CPU-0 before/after comparison varied
+from 46–57 s before to 48–54 s after under changing host frequency and load.
+These overlapping ranges do not establish an additional whole-task speedup;
+they also should not be compared directly with the earlier 18 s measurement.
+
+In the h=0.1 fixture, the first released step requires 35 Newton iterations,
+compared with three in each adjacent step. Its cost is spread across sparse
+factorization, assembly, contact queries and continuous motion checks. Evaluate
+improvements over the complete task and preserve the release and settling
+checks; reducing the physical step count alone does not address this work.
+
 ## Measure the full application
 
 The [live demo](live-demo.md#read-the-metrics) exposes render fps, physics time,

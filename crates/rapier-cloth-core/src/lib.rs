@@ -21,7 +21,11 @@ pub mod collision;
 pub use collision::{ClothContactSettings, CollisionBudgetKind, CollisionLimits, CollisionWork};
 pub mod contact;
 pub mod diagnostics;
+#[cfg(feature = "implicit")]
+pub mod implicit;
 pub mod solver;
+#[cfg(feature = "implicit")]
+pub use implicit::{ImplicitExecution, ImplicitSettings, ShellMaterial};
 pub mod surface;
 pub use cloth::{Cloth, ClothHandle, ClothSet};
 pub use constraints::target::SurfaceTarget;

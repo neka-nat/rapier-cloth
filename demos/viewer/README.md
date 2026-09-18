@@ -19,6 +19,18 @@ For recording playback only, run `npm --prefix demos/viewer run dev` and open
 Folding recordings show both grippers and distinguish partial execution from
 solver failure or trajectory completion.
 
+To watch the implicit towel fold, open
+**http://127.0.0.1:5173/?sample=implicit&play=1**, or select **Towel folding · Implicit**.
+The included recording shows 4 s of folding followed by 4 s of released settling,
+with 32×32 vertices and h=0.1 s. Drag to orbit, scroll to zoom, and use the timeline
+to inspect the release. Pink points show the prescribed pinned vertices; this
+fixture has no rendered robot or gripper bodies. Playback uses the saved states
+at their original timestamps, without interpolating motion. It does not run the
+implicit solver in real time.
+
+See [implicit playback](../../docs/implicit.md#watch-the-motion) to generate and
+convert your own recording. Both JSON and gzip-compressed JSON can be opened.
+
 `npm --prefix demos/viewer run build` builds both pages. A static build still needs
 the Rust server and a WebSocket proxy for live physics. See
 [Contributing](../../CONTRIBUTING.md#browser-checks) for browser tests.

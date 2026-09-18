@@ -147,6 +147,23 @@ impl Solver {
         source: &mut impl ContactSource,
     ) -> Result<StepReport, ClothError> {
         settings.validate(h)?;
+        #[cfg(feature = "implicit")]
+        if let Some(implicit) = cloth.implicit_settings {
+            if !surface_targets.is_empty() {
+                return Err(ClothError::InvalidParameter(
+                    "implicit solver currently supports particle targets only",
+                ));
+            }
+            return crate::implicit::step(
+                cloth,
+                h,
+                gravity,
+                settings,
+                external_targets,
+                source,
+                implicit,
+            );
+        }
         if !gravity.is_finite() {
             return Err(ClothError::InvalidParameter("gravity"));
         }

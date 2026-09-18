@@ -14,6 +14,7 @@ work and performance measurements. For a graphical simulation, start with the
 | [surface_grasp](../examples/surface_grasp.rs) | Exposed triangle-interior selection, weighted lift and release | JSON tracking and release summary |
 | [pick_and_place](../examples/pick_and_place.rs) | Multi-vertex grasping, lifting, transport and release | JSON summary and optional recording |
 | [fold_towel](../examples/fold_towel.rs) | Experimental dual-gripper towel folding with continuous self/rigid contact | Audited summary and optional recording, including a partial result if the solver stops |
+| [fold_towel_implicit](../examples/fold_towel_implicit.rs) | Global implicit shell solve with recorded folding commands at 0.04 or 0.1 s | Task summary and optional per-step JSONL diagnostics; requires f64,implicit |
 
 ```bash
 cargo run --locked --release --example hanging_cloth
@@ -23,10 +24,13 @@ cargo run --locked --release --example surface_grasp
 cargo run --locked --release --example pick_and_place
 ```
 
-The default precision is f32. Every example also supports f64:
+The default precision is f32. The examples above support f64; `fold_towel_implicit`
+requires f64 and the additional `implicit` feature:
 
 ```bash
 cargo run --locked --release --no-default-features --features f64 --example hanging_cloth
+cargo run --locked --release --no-default-features --features f64,implicit --example fold_towel_implicit -- --dt 0.1
+cargo run --locked --release --no-default-features --features f64,implicit --example fold_towel_implicit -- --dt 0.1 --workers 4
 ```
 
 These examples stop on simulation errors. Follow the
@@ -57,7 +61,12 @@ static friction. This example leaves self-collision disabled, so self-intersecti
 The summary records motion and deformation diagnostics separately; see the
 [recording format](recording-format.md).
 
+For the separate implicit folding fixture, material model, acceptance checks and
+limitations, see [the implicit solver guide](implicit.md).
+
 ## Experimental towel folding
+
+This section describes the older XPBD fixture.
 
 ```bash
 cargo run --locked --release --example fold_towel -- --help
@@ -109,7 +118,9 @@ npm --prefix demos/viewer run dev
 ```
 
 Open the URL printed by Vite, normally **http://127.0.0.1:5173/**. The viewer loads
-an included f64 recording. Choose **Open recording** to load your own JSON. Use
+an included f64 recording. Select **Towel folding · Implicit** for the
+[implicit fold and release](implicit.md#watch-the-motion), or choose **Open recording**
+to load your own JSON or compressed JSON. Use
 **Play**, **Pause**, the timeline, **Restart** and **Reset view** to inspect motion.
 Drag to orbit, scroll to zoom, and toggle wireframe or pin/attachment markers.
 
