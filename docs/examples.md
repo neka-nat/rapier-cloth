@@ -14,6 +14,7 @@ work and performance measurements. For a graphical simulation, start with the
 | [surface_grasp](../examples/surface_grasp.rs) | Exposed triangle-interior selection, weighted lift and release | JSON tracking and release summary |
 | [pick_and_place](../examples/pick_and_place.rs) | Multi-vertex grasping, lifting, transport and release | JSON summary and optional recording |
 | [fold_towel](../examples/fold_towel.rs) | Experimental dual-gripper towel folding with continuous self/rigid contact | Audited summary and optional recording, including a partial result if the solver stops |
+| [robot_towel_implicit](../examples/robot_towel_implicit.rs) | Two Rapier end-effector poses with hard vertex grasps | Shared headless/live task; f64,implicit; see [robot control](robot-control.md) |
 | [fold_towel_implicit](../examples/fold_towel_implicit.rs) | Global implicit shell solve with recorded folding commands at 0.04 or 0.1 s | Task summary and optional per-step JSONL diagnostics; requires f64,implicit |
 
 ```bash
@@ -24,8 +25,8 @@ cargo run --locked --release --example surface_grasp
 cargo run --locked --release --example pick_and_place
 ```
 
-The default precision is f32. The examples above support f64; `fold_towel_implicit`
-requires f64 and the additional `implicit` feature:
+The default precision is f32. The examples above support f64; `fold_towel_implicit` and
+`robot_towel_implicit` require f64 and the additional `implicit` feature:
 
 ```bash
 cargo run --locked --release --no-default-features --features f64 --example hanging_cloth

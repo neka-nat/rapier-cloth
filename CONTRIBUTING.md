@@ -49,9 +49,12 @@ npm --prefix demos/viewer run build
 npm --prefix demos/viewer run test
 npm --prefix demos/viewer run test:live
 CLOTH_LIVE_PRECISION=f64 npm --prefix demos/viewer run test:live
+CLOTH_LIVE_IMPLICIT=1 npm --prefix demos/viewer run test:live -- --grep implicit
 ```
 
-The last command uses shell environment-variable syntax; set the same variable
+The implicit tests build the f64 implicit server, exercise pose/release/reset
+commands, and compare all 80 live states against a headless robot run.
+The last commands use shell environment-variable syntax; set the same variable
 through your shell on Windows. An existing Chromium executable can be selected with
 `CHROME_PATH`, for example `/usr/bin/google-chrome` on Linux. Live browser tests start
 the actual Rust server on port 9174 and a production preview on port 4174. Screenshots

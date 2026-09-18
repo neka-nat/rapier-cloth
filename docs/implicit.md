@@ -101,7 +101,7 @@ The [example](../examples/fold_towel_implicit.rs) uses one 0.5 m square towel wi
 32×32 vertices, a fixed floor, four simulated seconds of prescribed folding and
 four seconds with all grasps released. The two supported physical step sizes are
 0.04 and 0.1 s, with exactly one cloth solve per step. All 53 selected vertices
-are released together. The fixture uses areal density 0.1503 kg/m², no extra
+are released together in the nominal case. The fixture uses areal density 0.1503 kg/m², no extra
 velocity damping, friction 0.5 and 10 million candidate/CCD queries per step.
 Its [command data and provenance](../examples/assets/README.md) are included.
 
@@ -120,6 +120,16 @@ extension below 3%, planar fold error below 3 cm, and a final half-second window
 with RMS speed below 1 mm/s, maximum speed below 5 mm/s and drift below 1 mm.
 Failure returns a nonzero exit status. These are fixture checks, not universal
 accuracy guarantees.
+
+Use `--case NAME` for the bounded variants: `nominal`, `grasp_inset`, `lift_5mm`,
+`left_early`, `right_late`, `friction_low`, and `friction_high`. See the
+[condition screen and robot adapter](robot-control.md#headless-reproduction-and-evidence)
+for results, including a failed 5 mm lift perturbation. The recording converter
+below validates the nominal pin-command fixture; changed grasp/motion/release
+commands use diagnostic JSONL rather than that converter.
+
+For actual Rapier end-effector bodies and browser pose commands, use the
+[robot-control example and live demo](robot-control.md).
 
 ## Watch the motion
 
@@ -169,8 +179,9 @@ it is not a temporal-convergence test with an identical continuous input.
 
 The current qualification concerns this flat towel and fixed floor. Moving
 obstacles, garment meshes, weighted grasps, multiple garments, force feedback
-and arbitrary materials require further validation. The live browser scene and
-the older `fold_towel` example continue to use XPBD and their own fixtures.
+and arbitrary materials require further validation. The default live drape/wind
+scenes and older `fold_towel` example continue to use XPBD and their own fixtures.
+The optional `implicit_towel` live scene uses the shared Rapier pose adapter.
 Measure complete-task CPU cost separately from numerical success at a large
 physical step; a 0.1 s step does not by itself establish wall-clock real time.
 

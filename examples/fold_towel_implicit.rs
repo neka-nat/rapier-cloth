@@ -2,7 +2,9 @@
 //! See docs/implicit.md for physical parameters, scope and reproduction.
 use rapier_cloth::rapier::prelude::*;
 use rapier_cloth::*;
-use serde::Deserialize;
+#[path = "support/implicit_fixture.rs"]
+mod implicit_fixture;
+use implicit_fixture::Input;
 use serde_json::json;
 use std::{
     fs,
@@ -10,23 +12,15 @@ use std::{
     time::Instant,
 };
 
-#[derive(Deserialize)]
-struct Input {
-    x: Vec<[f64; 3]>,
-    faces: Vec<[u32; 3]>,
-    grasp: Vec<u32>,
-    targets: Vec<Option<Vec<[f64; 3]>>>,
-    h: f64,
-    thickness: f64,
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let mut h = 0.1;
     let mut execution = ImplicitExecution::Serial;
     let mut output = None;
+    let mut variant = String::from("nominal");
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--case" => variant = args.next().ok_or("--case requires a name")?,
             "--dt" => h = args.next().ok_or("--dt requires 0.04 or 0.1")?.parse()?,
             "--workers" => {
                 execution = match args.next().as_deref() {
@@ -38,21 +32,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--output" => output = Some(args.next().ok_or("--output requires a new file path")?),
             "--help" => {
                 println!(
-                    "fold_towel_implicit [--dt 0.04|0.1] [--workers 1|4] [--output NEW_RECORDING.jsonl]"
+                    "fold_towel_implicit [--dt 0.04|0.1] [--workers 1|4] [--case NAME] [--output NEW_RECORDING.jsonl]"
                 );
+                println!("Cases: {}", implicit_fixture::CASES.join(", "));
                 return Ok(());
             }
             _ => return Err(format!("unknown option {arg}").into()),
         }
     }
-    let text = if h == 0.1 {
-        include_str!("assets/towel-fold-10hz.json")
-    } else if h == 0.04 {
-        include_str!("assets/towel-fold-25hz.json")
-    } else {
-        return Err("--dt must be 0.04 or 0.1".into());
-    };
-    let input: Input = serde_json::from_str(text)?;
+    let input = Input::load(h, &variant)?;
+    let friction = Input::friction(&variant);
     let writer: Box<dyn Write> = if let Some(path) = output {
         Box::new(
             fs::OpenOptions::new()
@@ -73,20 +62,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     rigid.colliders.insert(
         ColliderBuilder::new(SharedShape::halfspace(Vec3::Y))
             .translation(Vec3::Y * (input.thickness * 0.5))
-            .friction(0.5),
+            .friction(friction),
     );
     let mut world = RapierClothWorld::new(id);
     world.solver_settings.max_substep = input.h;
     let mesh = ClothMesh::new(
         input.x.iter().copied().map(Vec3::from_array).collect(),
-        input.faces,
+        input.faces.clone(),
     )?;
     let mut cloth = Cloth::new(
         mesh,
         ClothMaterial {
             surface_density: 0.1503,
             damping: 0.0,
-            friction: 0.5,
+            friction,
             contact_radius: input.thickness * 0.5,
             ..Default::default()
         },
@@ -94,8 +83,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cloth.set_contact_settings(Some(ClothContactSettings {
         thickness: input.thickness,
         activation_margin: input.thickness,
-        static_friction: 0.5,
-        kinetic_friction: 0.5,
+        static_friction: friction,
+        kinetic_friction: friction,
         self_collision: true,
         continuous_self_collision: true,
         rigid_surface_collision: true,
@@ -114,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         out,
         "{}",
-        json!({"kind":"config","solver":"implicit","h":input.h,"substeps":1,
+        json!({"kind":"config","solver":"implicit","h":input.h,"substeps":1,"case":variant,"friction":friction,
         "workers":match execution { ImplicitExecution::Serial => 1, ImplicitExecution::Parallel4 => 4 },
         "youngs_modulus":821000.0,"poisson_ratio":0.243,"thickness":input.thickness,
         "density":0.1503,"damping":0.0,"barrier_stiffness":30.0,"friction_velocity":0.001,
@@ -127,19 +116,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut maximum_extension: f64 = 0.0;
     let mut window = Vec::new();
     let duration = input.targets.len() as f64 * input.h;
-    for (step, targets) in input.targets.iter().enumerate() {
+    for step in 0..input.targets.len() {
         let start = Instant::now();
         let checkpoint = world.checkpoint()?;
         let cloth = world.cloth_mut(handle)?;
-        if let Some(targets) = targets {
-            if targets.len() != input.grasp.len() {
-                return Err("grasp command count differs".into());
-            }
-            for (&particle, &p) in input.grasp.iter().zip(targets) {
+        for (selected, &particle) in input.grasp.iter().enumerate() {
+            if let Some(p) = input.target(step, selected, &variant) {
                 cloth.pin(particle, Vec3::from_array(p))?;
-            }
-        } else {
-            for &particle in &input.grasp {
+            } else {
                 cloth.unpin(particle)?;
             }
         }
@@ -204,7 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             out,
             "{}",
             json!({"kind":"step","step":step+1,"t":t,"seconds":seconds,
-            "pins":cloth.pins().len(),"rms_speed":rms_speed,"max_speed":max_speed,"max_edge_extension":extension,
+            "pins":cloth.pins().len(),"pinned_particles":cloth.pins().keys().copied().collect::<Vec<_>>(),"rms_speed":rms_speed,"max_speed":max_speed,"max_edge_extension":extension,
             "iterations":report.cloths[0].1.iterations,"candidate_pairs":report.cloths[0].1.surface_collision.candidate_pairs,
             "ccd_checks":report.cloths[0].1.surface_collision.ccd_checks,"x":x,"v":v})
         )?;

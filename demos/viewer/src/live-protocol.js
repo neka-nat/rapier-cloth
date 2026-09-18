@@ -6,21 +6,25 @@ function requireValue(ok, message) { if (!ok) throw new Error(`Invalid live fram
 
 export function validateFrame(frame) {
   requireValue(frame.protocol === 2, 'protocol 2 is required; restart the matching server and viewer');
-  requireValue(['drape', 'hanging', 'fold_towel'].includes(frame.scene), 'scene');
+  requireValue(['drape', 'hanging', 'fold_towel', 'implicit_towel'].includes(frame.scene), 'scene');
   requireValue(['f32', 'f64'].includes(frame.precision), 'precision');
   requireValue(vector(frame.positions, 3072), 'vertex positions');
   requireValue(vector(frame.sphere, 3) && nonnegative(frame.sphere_radius), 'sphere');
   requireValue(Number.isSafeInteger(frame.step) && frame.step >= 0 && nonnegative(frame.time), 'time');
-  requireValue(Number.isFinite(frame.h) && Math.abs(frame.h - 1/240) < 1e-9
-    && Math.abs(frame.time - frame.step/240) < 1e-5, 'step size');
-  requireValue(frame.substeps === 4 && index(frame.advanced_substeps, 5) && frame.advanced_substeps <= frame.step, 'accepted substeps');
-  requireValue(frame.iterations === 8, 'iterations');
+  const implicit = frame.scene === 'implicit_towel';
+  const expectedH = implicit ? 0.1 : 1/240, substeps = implicit ? 1 : 4;
+  requireValue(Number.isFinite(frame.h) && Math.abs(frame.h - expectedH) < 1e-9
+    && Math.abs(frame.time - frame.step * expectedH) < 1e-5, 'step size');
+  requireValue(frame.substeps === substeps && index(frame.advanced_substeps, substeps + 1) && frame.advanced_substeps <= frame.step, 'accepted substeps');
+  requireValue(implicit ? Number.isSafeInteger(frame.iterations) && frame.iterations >= 0 && frame.iterations <= 80 : frame.iterations === 8, 'iterations');
   requireValue(Array.isArray(frame.pins) && frame.pins.length <= 1024 && frame.pins.every(i => index(i, 1024)), 'pins');
   if (frame.triangles !== undefined) requireValue(Array.isArray(frame.triangles) && frame.triangles.length === 5766 && frame.triangles.every(i => index(i, 1024)), 'triangles');
   requireValue(['physics_ms','p95_stretch','max_penetration','max_target_error','contacts'].every(k => nonnegative(frame[k])), 'diagnostics');
   requireValue(frame.options && typeof frame.options.auto_motion === 'boolean'
     && ['sphere_x','sphere_z','wind'].every(k => Number.isFinite(frame.options[k])), 'options');
   requireValue((frame.scene === 'fold_towel') === (frame.folding !== undefined), 'fold scene data');
+  if (implicit) { validateImplicit(frame); return; }
+  requireValue(frame.implicit === undefined, 'unexpected implicit data');
   if (frame.scene !== 'fold_towel') return;
   const fold = frame.folding;
   requireValue(fold && typeof fold === 'object', 'fold task data');
@@ -56,4 +60,33 @@ export function validateFrame(frame) {
     requireValue(['projected_overlap','overlap_ratio','projected_union_area','relative_area_error','max_corner_error'].every(k => nonnegative(inspection.metrics[k])), 'inspection metrics');
     requireValue(vector(inspection.metrics.projected_half_areas, 2) && inspection.metrics.projected_half_areas.every(nonnegative), 'inspection areas');
   }
+}
+
+function validateImplicit(frame) {
+  const fold = frame.implicit;
+  requireValue(frame.precision === 'f64' && frame.implicit_available === true && fold?.solver === 'implicit', 'implicit solver');
+  requireValue(typeof fold.automatic === 'boolean' && typeof fold.completed === 'boolean'
+    && fold.end_step === 80 && frame.step <= 80 && fold.completed === (frame.step === 80), 'implicit task state');
+  requireValue(typeof fold.phase === 'string' && (fold.stopped === null || typeof fold.stopped === 'string' && fold.stopped.length > 0), 'implicit stop');
+  requireValue(nonnegative(fold.floor_height) && Array.isArray(fold.grippers) && fold.grippers.length === 2, 'implicit scene');
+  requireValue(frame.pins.length === 0 && Array.isArray(fold.grasps) && fold.grasps.length <= 2, 'implicit grasps');
+  const seen = new Set(), owners = new Set();
+  fold.grippers.forEach((g,i) => requireValue(g.id === i && typeof g.holding === 'boolean'
+    && vector(g.translation,3) && quaternion(g.rotation) && vector(g.local_translation,3)
+    && quaternion(g.local_rotation) && vector(g.half_extents,3) && g.half_extents.every(v=>v>0), 'implicit gripper'));
+  for (const grasp of fold.grasps) {
+    requireValue(index(grasp.gripper,2) && !owners.has(grasp.gripper) && Array.isArray(grasp.points) && grasp.points.length > 0, 'implicit grasp owner');
+    owners.add(grasp.gripper);
+    for (const p of grasp.points) {
+      requireValue(p.material?.kind === 'vertex' && index(p.material.particle,1024) && !seen.has(p.material.particle)
+        && vector(p.position,3) && vector(p.anchor,3), 'implicit grasp point');
+      seen.add(p.material.particle);
+    }
+  }
+  fold.grippers.forEach(g=>requireValue(g.holding === owners.has(g.id), 'implicit holding state'));
+  requireValue(Array.isArray(fold.desired) && fold.desired.length === 2
+    && fold.desired.every(p=>vector(p.translation,3) && quaternion(p.rotation)), 'desired poses');
+  const s = fold.sample;
+  requireValue(s && s.step === frame.step && Math.abs(s.time-frame.time)<1e-9 && s.held_vertices === seen.size
+    && ['physics_ms','rms_speed','max_speed','max_edge_extension'].every(k=>nonnegative(s[k])), 'implicit diagnostics');
 }

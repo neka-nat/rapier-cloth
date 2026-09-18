@@ -17,7 +17,7 @@ pub struct LegacyDemo {
 }
 impl LegacyDemo {
     pub fn new(scene: SceneKind) -> Result<Self, String> {
-        if scene == SceneKind::FoldTowel {
+        if matches!(scene, SceneKind::FoldTowel | SceneKind::ImplicitTowel) {
             return Err("Use the shared folding task for this scene".into());
         }
         let id = WorldId::new();
@@ -102,7 +102,10 @@ impl LegacyDemo {
                     cloth.unpin(pin).map_err(|e| e.to_string())?;
                 }
             }
-            Command::ReleaseGripper { .. } | Command::Inspect => {
+            Command::ReleaseGripper { .. }
+            | Command::Inspect
+            | Command::SetGripperPose { .. }
+            | Command::GraspGripper { .. } => {
                 return Err("This command requires the towel-folding scene".into());
             }
             Command::Step => {
@@ -212,6 +215,8 @@ impl LegacyDemo {
             contacts: self.report.contacts,
             max_target_error: self.report.max_target_error,
             folding: None,
+            implicit_available: cfg!(all(feature = "f64", feature = "implicit")),
+            implicit: None,
         }
     }
 }

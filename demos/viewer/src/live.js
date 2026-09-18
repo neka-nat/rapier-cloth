@@ -8,11 +8,14 @@ const $ = id => document.getElementById(id);
 const scene = new THREE.Scene(); scene.background = new THREE.Color('#192522');
 const renderer = new THREE.WebGLRenderer({antialias:true});
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.shadowMap.enabled = true;
+renderer.shadowMap.autoUpdate = false;
+let renderDirty = true;
 $('viewport').appendChild(renderer.domElement);
 const camera = new THREE.PerspectiveCamera(40, 1, 0.01, 30);
 const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true;
+controls.addEventListener('change', () => { renderDirty = true; });
 function resetCamera(kind = $('scene').value) {
-  if (kind === 'fold_towel') { camera.position.set(0.85, 0.85, 1.05); controls.target.set(0, 0.12, 0); }
+  if (['fold_towel','implicit_towel'].includes(kind)) { camera.position.set(0.85, 0.85, 1.05); controls.target.set(0, 0.12, 0); }
   else { camera.position.set(1.65, 1.65, 2.05); controls.target.set(0, 0.45, 0); }
   controls.update();
 }
@@ -48,8 +51,11 @@ let metricStart = performance.now(), metricTime = 0, metricRenders = 0;
 let connectionTimeout;
 
 function setStatus(text, state = '') { $('status').textContent = text; $('status').dataset.state = state; }
+const taskData = frame => frame?.implicit ?? frame?.folding;
 function updateControls() {
-  const folding = $('scene').value === 'fold_towel', stopped = !!source?.folding?.stopped;
+  const implicit = $('scene').value === 'implicit_towel';
+  const folding = implicit || $('scene').value === 'fold_towel', task = taskData(source);
+  const stopped = !!task?.stopped || !!task?.completed;
   for (const id of ['reset','scene']) $(id).disabled = !ready;
   $('play').disabled = !ready || stopped;
   $('step').disabled = !ready || running || stopped;
@@ -57,10 +63,15 @@ function updateControls() {
   for (const id of ['wind','auto-motion']) $(id).disabled = !ready || folding;
   $('release').disabled = !ready || folding || !source?.pins.length;
   for (const id of ['sphere-x','sphere-z']) $(id).disabled = !ready || folding || $('auto-motion').checked;
-  for (const [i, id] of ['release-left','release-right'].entries()) $(id).disabled = !ready || !folding || !source?.folding?.grippers[i].holding;
+  for (const [i, id] of ['release-left','release-right'].entries()) $(id).disabled = !ready || !folding || (implicit && stopped) || !task?.grippers[i].holding;
   $('inspect').disabled = !ready || !folding;
+  $('inspect').hidden = implicit;
+  $('pose-controls').hidden = !implicit;
+  for (const button of document.querySelectorAll('.pose-buttons button')) button.disabled = !ready || stopped || !!pending;
+  $('grasp').disabled = !ready || !implicit || stopped || !!task?.grippers[Number($('gripper').value)].holding;
+  $('scene').querySelector('[value="implicit_towel"]').disabled = !source?.implicit_available;
   $('play').textContent = running ? 'Pause' : 'Resume';
-  if (ready) setStatus(stopped ? 'Stopped · error' : document.hidden ? 'Tab hidden · idle' : running ? 'Running' : pending ? 'Pausing' : 'Paused', stopped ? 'error' : '');
+  if (ready) setStatus(task?.completed ? 'Completed' : stopped ? 'Stopped · error' : document.hidden ? 'Tab hidden · idle' : running ? 'Running' : pending ? 'Pausing' : 'Paused', task?.stopped ? 'error' : '');
 }
 function fail(message) {
   running = false; pending = null; queue = [];
@@ -71,7 +82,7 @@ function enqueue(command) {
   if (command.type === 'reset') queue = [];
   // Retain only the latest pending value of each control, including while a
   // frame is in flight. Controls never build an unbounded step backlog.
-  const key = item => item.type === 'release_gripper' ? `${item.type}:${item.gripper}` : item.type;
+  const key = item => ['release_gripper','set_gripper_pose','grasp_gripper'].includes(item.type) ? `${item.type}:${item.gripper}` : item.type;
   queue = queue.filter(item => key(item) !== key(command));
   queue.push(command);
   dispatch(performance.now());
@@ -81,14 +92,19 @@ function dispatch(now) {
   let command = queue.shift();
   if (!command && running && !document.hidden && now + 0.2 >= nextRequestAt) command = {type:'step'};
   if (!command) return;
+  if (command.type === 'set_gripper_pose') command.at_step = source.step + 1;
   const request_id = nextId++;
   pending = {request_id,command,start:now};
-  if (command.type === 'step') nextRequestAt = Math.max(nextRequestAt + 1000/60, now + 1);
+  if (command.type === 'step') nextRequestAt = Math.max(nextRequestAt + 1000 * (source?.h ?? 1/240) * (source?.substeps ?? 4), now + 1);
   socket.send(JSON.stringify({request_id,command}));
   updateControls();
 }
 function applyFrame(frame) {
   validateFrame(frame);
+  renderDirty = true; renderer.shadowMap.needsUpdate = true;
+  const task = taskData(frame), implicit = !!frame.implicit;
+  floor.position.y = implicit ? task.floor_height : 0;
+  grid.visible = !implicit;
   if (frame.triangles) {
     if (cloth) { cloth.geometry.dispose(); scene.remove(cloth); }
     const geometry = new THREE.BufferGeometry(); geometry.setIndex(frame.triangles);
@@ -102,18 +118,18 @@ function applyFrame(frame) {
   const attribute = cloth.geometry.getAttribute('position'); attribute.array.set(frame.positions); attribute.needsUpdate = true;
   cloth.geometry.computeVertexNormals(); cloth.geometry.computeBoundingBox(); cloth.geometry.computeBoundingSphere();
   sphere.position.fromArray(frame.sphere); sphere.scale.setScalar(frame.sphere_radius);
-  sphere.visible = !frame.folding;
+  sphere.visible = !task;
   grippers.forEach((group, i) => {
-    group.visible = !!frame.folding;
-    if (!frame.folding) return;
-    const g = frame.folding.grippers[i], box = group.children[0];
+    group.visible = !!task;
+    if (!task) return;
+    const g = task.grippers[i], box = group.children[0];
     group.position.fromArray(g.translation); group.quaternion.fromArray(g.rotation);
     box.position.fromArray(g.local_translation); box.quaternion.fromArray(g.local_rotation);
     box.scale.fromArray(g.half_extents.map(x => x*2));
   });
   frame.pins.forEach((i,j) => pinAttribute.array.set(frame.positions.slice(3*i,3*i+3),j*3));
   pinAttribute.needsUpdate = true; pins.geometry.setDrawRange(0,frame.pins.length); pins.visible = $('pins').checked;
-  const graspPoints = frame.folding?.grasps.flatMap(g => g.points) ?? [];
+  const graspPoints = task?.grasps.flatMap(g => g.points) ?? [];
   graspPoints.forEach((p, i) => anchorAttribute.array.set(p.anchor, i*3));
   anchorAttribute.needsUpdate = true; anchors.geometry.setDrawRange(0, graspPoints.length); anchors.visible = $('pins').checked;
   // A reset may complete while a newer slider value is queued. Preserve that
@@ -124,7 +140,7 @@ function applyFrame(frame) {
   $('sphere-x').value = desired.sphere_x; $('sphere-z').value = desired.sphere_z;
   source = frame;
   $('precision').textContent = `RUST CPU / ${frame.precision}`;
-  $('mesh-info').textContent = `32 × 32 VERTICES · 1/240 s × ${frame.substeps} · ${frame.iterations} ITERATIONS`;
+  $('mesh-info').textContent = `32 × 32 VERTICES · ${implicit ? 'IMPLICIT · 0.1 s × 1' : `XPBD · 1/240 s × ${frame.substeps}`} · ${frame.iterations} ITERATIONS`;
   $('time').textContent = `${frame.time.toFixed(3)} s`; $('frame').textContent = `STEP ${frame.step}`;
   $('physics').textContent = `${frame.physics_ms.toFixed(2)} ms`;
   $('roundtrip').textContent = `${lastRoundtrip.toFixed(1)} ms`;
@@ -132,15 +148,32 @@ function applyFrame(frame) {
   $('penetration').textContent = `${(frame.max_penetration*1000).toPrecision(2)} mm`;
   $('contacts').textContent = frame.contacts;
   $('target').textContent = `${(frame.max_target_error*1000).toPrecision(2)} mm`;
-  $('task-phase').hidden = !frame.folding; $('task-phase').textContent = frame.folding?.phase ?? '';
-  $('task-override').hidden = !frame.folding?.manual_release;
-  $('grasp-state').textContent = frame.folding ? frame.folding.grippers.map((g, i) => `${i === 0 ? 'Left' : 'Right'}: ${g.holding ? 'holding' : 'free'}`).join(' · ') : '';
-  const inspection = frame.folding?.inspection;
+  $('task-phase').hidden = !task; $('task-phase').textContent = task?.phase ?? '';
+  $('task-override').hidden = implicit || !task?.manual_release;
+  $('grasp-state').textContent = task ? task.grippers.map((g, i) => `${i === 0 ? 'Left' : 'Right'}: ${g.holding ? 'holding' : 'free'}`).join(' · ') : '';
+  const inspection = task?.inspection;
+  $('fold-description').textContent = implicit
+    ? 'Live Rust implicit physics. One 0.1 s solve per step. Pose commands are ideal grasps; some changed trajectories can fail and stop.'
+    : 'A scripted two-gripper fold. Complete folding and real-time performance remain unqualified.';
+  $('fold-measurements').hidden = implicit;
+  $('fold-measurements').nextElementSibling.hidden = implicit;
+  for (const [id,label] of Object.entries(implicit
+    ? {stretch:'Max edge extension',penetration:'RMS speed',contacts:'Held vertices',target:'Max speed'}
+    : {stretch:'Stretch · p95',penetration:'Max penetration',contacts:'Contacts',target:'Attachment error'})) $(`${id}-label`).textContent = label;
+  if (implicit) {
+    $('stretch').textContent = `${(task.sample.max_edge_extension*100).toFixed(3)} %`;
+    $('penetration').textContent = `${(task.sample.rms_speed*1000).toFixed(3)} mm/s`;
+    $('contacts').textContent = task.sample.held_vertices;
+    $('target').textContent = `${(task.sample.max_speed*1000).toFixed(3)} mm/s`;
+  }
+  $('live-note').textContent = implicit
+    ? 'Computed on demand, not recording playback. Camera controls remain responsive during a solve; unchanged frames are not redrawn. There is one outstanding request and no catch-up backlog. A rate below 1× means simulation progresses slower than wall time.'
+    : 'Four 1/240 s substeps per requested frame. A simulation rate below 1× means physics is running slower than real time. Hidden tabs pause automatic stepping.';
   $('fold-measurements').textContent = inspection
     ? `Step ${inspection.step} · Corner error ${(inspection.metrics.max_corner_error*1000).toFixed(1)} mm · Overlap ${(inspection.metrics.overlap_ratio*100).toFixed(1)}% · Footprint error ${(inspection.metrics.relative_area_error*100).toFixed(1)}%`
     : 'Pause and measure to inspect the current shape.';
-  $('error').textContent = frame.folding?.stopped ?? '';
-  if (frame.folding?.stopped) {
+  $('error').textContent = task?.stopped ?? '';
+  if (task?.stopped || task?.completed) {
     running = false;
     queue = queue.filter(command => command.type !== 'step');
   }
@@ -148,6 +181,7 @@ function applyFrame(frame) {
 function connect() {
   const old = socket;
   ready = false; pending = null; queue = []; nextId = 1;
+  let selectInitialScene = new URLSearchParams(location.search).get('scene') === 'implicit_towel';
   const current = socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/live/ws`);
   old?.close(); clearTimeout(connectionTimeout); $('reconnect').hidden = true;
   $('error').textContent = ''; updateControls(); setStatus('Connecting');
@@ -160,6 +194,10 @@ function connect() {
       if (frame.type !== 'frame' || (ready ? frame.request_id !== pending?.request_id : frame.request_id !== 0)) throw new Error('Unexpected response order. Reconnect to continue.');
       lastRoundtrip = pending ? performance.now() - pending.start : 0;
       pending = null; applyFrame(frame); ready = true; clearTimeout(connectionTimeout); updateControls();
+      if (selectInitialScene) {
+        selectInitialScene = false;
+        enqueue({type:'reset',scene:'implicit_towel'});
+      }
       // Commands can follow immediately; automatic stepping waits for rAF.
       if (queue.length) dispatch(performance.now());
     } catch (error) { fail(error.message); current.close(); }
@@ -184,21 +222,37 @@ $('reset').onclick = () => enqueue({type:'reset',scene:$('scene').value});
 $('release').onclick = () => enqueue({type:'release'});
 $('release-left').onclick = () => enqueue({type:'release_gripper', gripper:0});
 $('release-right').onclick = () => enqueue({type:'release_gripper', gripper:1});
+$('gripper').onchange = updateControls;
+for (const button of document.querySelectorAll('.pose-buttons button')) button.onclick = () => {
+  if (!source?.implicit) return;
+  const gripper = Number($('gripper').value);
+  const pose = structuredClone(source.implicit.desired[gripper]);
+  if (button.dataset.axis !== undefined) pose.translation[Number(button.dataset.axis)] += Number(button.dataset.delta);
+  else {
+    const increment = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), Number(button.dataset.roll)*Math.PI/180);
+    pose.rotation = increment.multiply(new THREE.Quaternion().fromArray(pose.rotation)).toArray();
+  }
+  enqueue({type:'set_gripper_pose',gripper,...pose});
+};
+$('grasp').onclick = () => enqueue({type:'grasp_gripper',gripper:Number($('gripper').value)});
 $('inspect').onclick = () => { running = false; queue = queue.filter(command => command.type !== 'step'); enqueue({type:'inspect'}); updateControls(); };
 $('play').onclick = () => { running = !running; nextRequestAt = performance.now(); updateControls(); };
 $('step').onclick = () => enqueue({type:'step'});
 $('camera').onclick = () => resetCamera();
 $('reconnect').onclick = connect;
-$('wireframe').onchange = () => { material.wireframe = $('wireframe').checked; };
-$('pins').onchange = () => { pins.visible = anchors.visible = $('pins').checked; };
+$('wireframe').onchange = () => { material.wireframe = $('wireframe').checked; renderDirty = true; renderer.shadowMap.needsUpdate = true; };
+$('pins').onchange = () => { pins.visible = anchors.visible = $('pins').checked; renderDirty = true; };
 document.addEventListener('visibilitychange',() => { nextRequestAt = performance.now(); updateControls(); });
 window.addEventListener('pagehide',() => socket?.close());
 new ResizeObserver(() => {
   const {clientWidth:w,clientHeight:h} = $('viewport'); renderer.setSize(w,h);
-  camera.aspect = w/h; camera.updateProjectionMatrix();
+  camera.aspect = w/h; camera.updateProjectionMatrix(); renderDirty = true;
 }).observe($('viewport'));
 renderer.setAnimationLoop(now => {
-  dispatch(now); controls.update(); renderer.render(scene,camera); renderCount++;
+  dispatch(now); controls.update();
+  // Physics, camera input and view options invalidate the picture. Keeping rAF
+  // lightweight lets the CPU solver run while an unchanged frame is displayed.
+  if (renderDirty) { renderer.render(scene,camera); renderCount++; renderDirty = false; }
   if (now - metricStart >= 1000 && source) {
     $('fps').textContent = `${((renderCount-metricRenders)*1000/(now-metricStart)).toFixed(0)} fps`;
     $('speed').textContent = `${((source.time-metricTime)*1000/(now-metricStart)).toFixed(2)}×`;
@@ -213,9 +267,10 @@ window.__clothLive = Object.freeze({snapshot:() => !source ? null : ({
   bounds:cloth.geometry.boundingBox.min.toArray().concat(cloth.geometry.boundingBox.max.toArray()),
   sphere:sphere.position.toArray(),sourcePositions:source.positions.slice(),
   pins:source.pins.slice(),pinPositions:Array.from(pinAttribute.array.slice(0,pins.geometry.drawRange.count*3)),options:{...source.options},camera:camera.position.toArray(),
-  connected:ready,paused:!running,pending:!!pending,queued:queue.length,renderCount,
+  connected:ready,paused:!running,pending:!!pending,queued:queue.length,renderCount,roundtripMs:lastRoundtrip,
   wireframe:material.wireframe,
   advancedSubsteps:source.advanced_substeps,folding:source.folding ? structuredClone(source.folding) : null,
+  implicit:source.implicit ? structuredClone(source.implicit) : null,
   grippers:grippers.map((group, id) => ({id,visible:group.visible,translation:group.position.toArray(),rotation:group.quaternion.toArray(),local_translation:group.children[0].position.toArray(),local_rotation:group.children[0].quaternion.toArray(),half_extents:group.children[0].scale.toArray().map(x => x/2)})),
   anchors:Array.from(anchorAttribute.array.slice(0, anchors.geometry.drawRange.count*3)),anchorsVisible:anchors.visible,sphereVisible:sphere.visible,
 })});

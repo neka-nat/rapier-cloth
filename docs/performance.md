@@ -264,3 +264,35 @@ Keep time step and iteration count visible alongside timing results. Reducing th
 changes accuracy and can require different material parameters. CI checks functional
 behavior and error bounds; it does not impose absolute timing thresholds on shared
 runners or certify a universal 60 fps target.
+
+## Implicit live response
+
+The [Rapier pose demo](robot-control.md) uses the same 80 accepted h=0.1 states
+as its headless example. On the local Intel Core i9-13900H with headless Chromium
+153 software WebGL (1440×1050), continuous rendering competed with CPU physics.
+Rendering only after physics or view changes reduced the observed full-task wait:
+
+| Rendering | Two runs, 8 simulated seconds | Mean wall time | Per-run response p95 | Maximum response |
+|---|---|---|---|---|
+| Continuous scene and shadow redraw | 34.29 / 35.96 s | 35.12 s | 929 / 888 ms | 2.66 s |
+| Redraw on change, reuse shadows | 20.27 / 19.16 s | 19.71 s | 525 / 518 ms | 1.28 s |
+
+These four runs used an ABBA order and identical layout, viewport, physical
+settings and reference commands. Every accepted cloth state and hand pose matched
+the headless robot example exactly (320 step comparisons). Timing uses browser
+`performance.now()` from the first step request to the last state arrival;
+individual responses include serialization, transport and browser scheduling.
+Startup/build time and final screenshot capture are excluded.
+
+The 43.9% wall-time reduction is an application-level result on this software
+renderer. It does not establish a new native solver speedup or predict the
+improvement on hardware WebGL. A separate headless robot run took 15.61 s of
+physics time; it was not part of the paired rendering comparison. Rendering
+remains responsive to camera input while a solve runs. An unchanged paused view
+issues no redraws, and at most one physics request is outstanding.
+
+At about 0.41× simulated/wall time, the measured live demo still falls short of
+real-time progress. No time step, Newton budget, collision guard or physical
+trajectory was changed for this optimization. The largest response remains
+around release. Target-device performance and robustness to changed trajectories
+remain separate follow-up work.

@@ -405,7 +405,10 @@ impl FoldDemo {
                 });
             }
             Command::Reset { .. } => return Err("Reset is handled by the scene coordinator".into()),
-            Command::SetOptions { .. } | Command::Release => {
+            Command::SetOptions { .. }
+            | Command::Release
+            | Command::SetGripperPose { .. }
+            | Command::GraspGripper { .. } => {
                 return Err(
                     "Wind, sphere controls and pin release do not apply to this task".into(),
                 );
@@ -540,6 +543,8 @@ impl FoldDemo {
             max_penetration: self.report.max_penetration,
             max_target_error: self.report.max_target_error,
             contacts: self.report.contacts,
+            implicit_available: cfg!(all(feature = "f64", feature = "implicit")),
+            implicit: None,
             folding: Some(FoldingFrame {
                 config: self.task.config.clone(),
                 variant: 0,

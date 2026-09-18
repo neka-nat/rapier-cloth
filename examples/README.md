@@ -11,6 +11,7 @@ results; they do not open a window.
 | [surface_grasp.rs](surface_grasp.rs) | Visible surface selection, weighted lift and release |
 | [pick_and_place.rs](pick_and_place.rs) | Multi-vertex attachments and JSON recording |
 | [fold_towel.rs](fold_towel.rs) | Experimental dual-gripper fold with audited partial/failure recordings |
+| [robot_towel_implicit.rs](robot_towel_implicit.rs) | Rapier end-effector poses and ideal grasps; shared with the implicit live demo |
 | [fold_towel_implicit.rs](fold_towel_implicit.rs) | Experimental global shell solve; fold, release and settle at 0.04 or 0.1 s |
 
 ```bash

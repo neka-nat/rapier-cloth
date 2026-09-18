@@ -58,3 +58,7 @@ harness = false
 [[example]]
 name = "fold_towel_implicit"
 required-features = ["f64", "implicit"]
+
+[[example]]
+name = "robot_towel_implicit"
+required-features = ["f64", "implicit"]

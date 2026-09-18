@@ -19,10 +19,12 @@ npm --prefix demos/viewer run live
 
 Open **http://127.0.0.1:5173/live.html** to drape cloth over a sphere, adjust wind,
 move the obstacle and release pinned vertices. The launcher builds a local Rust
-CPU server and starts the browser UI. An experimental towel scene adds two scripted
-grippers and independent release controls; full folding and its real-time budget
-remain unqualified. See the [live demo guide](docs/live-demo.md)
-for controls and requirements.
+CPU server and starts the browser UI. For implicit towel folding and Rapier
+end-effector pose commands, run `npm --prefix demos/viewer run live:implicit` and
+open `/live.html?scene=implicit_towel&paused=1`. Use 5 mm moves, 5 degree rotations
+and independent releases. See [robot control](docs/robot-control.md) and the
+[live demo guide](docs/live-demo.md). General folding and wall-clock real-time
+performance remain under development.
 
 ## Use from Rust
 

@@ -3,6 +3,8 @@
 The live demo runs `RapierClothWorld` on a local Rust CPU server and renders the
 result in Three.js. Controls affect subsequent physics steps. It uses one 32×32
 cloth, f32 by default, with four 1/240 s substeps and eight iterations per frame.
+The optional implicit scene uses f64 and one 0.1 s step; see
+[Rapier end-effector control](robot-control.md).
 
 ## Start the demo
 
@@ -25,29 +27,43 @@ To choose different ports in a shell that supports inline environment variables:
 CLOTH_SERVER_PORT=9200 CLOTH_VIEWER_PORT=5273 npm --prefix demos/viewer run live
 ```
 
+To build the implicit solver and start with pose control:
+
+```bash
+npm --prefix demos/viewer run live:implicit
+```
+
+Open **http://127.0.0.1:5173/live.html?scene=implicit_towel&paused=1**.
+Press **Resume** for the complete reference fold or use the hand controls and
+**Step frame** for manual motion. See [robot control](robot-control.md) for the
+command contract, failure handling and headless reproduction.
+
 ## Controls
 
 | Control | Behavior |
 |---|---|
 | Drape over a sphere | Drop an unpinned sheet over a sphere and floor. The lower half of the sphere is embedded in the floor; it moves horizontally |
 | Cloth in the wind | Pin one edge's 32 vertices and apply wind |
-| Towel half-fold · experimental | Run the shared nominal dual-gripper task with continuous self/rigid contact |
+| Towel fold · Implicit / pose control | Optional f64 implicit task; 5 mm position commands, 5 degree roll, release and regrasp |
+| Towel half-fold · XPBD | Run the shared nominal dual-gripper task with continuous self/rigid contact |
 | Wind strength | Adjust a smooth force that varies with time and position across the cloth. Zero clears wind forces |
 | Animate sphere | Move the sphere automatically |
 | Sphere X / Sphere Z | With automatic motion off, choose a target position; actual speed is limited to 0.25 m/s |
 | Pause / Resume | Stop requesting new physics frames, or resume. One frame already in progress may finish |
-| Step frame | While paused, request four substeps; a folding failure returns the successfully accepted prefix |
+| Step frame | While paused, request four XPBD substeps or one 0.1 s implicit step; a failure returns the accepted state |
 | Reset / Scene | Recreate both worlds and restore time, geometry and controls to scene defaults |
 | Release pins | Unpin the edge while retaining its current position and velocity |
 | Release left / right gripper | Release that gripper's grasps without advancing time; the other gripper keeps holding |
+| X/Y/Z ± / Roll ± | Queue the selected implicit hand's next world pose; enter manual mode |
+| Grasp selected patch | Attach that implicit hand's original material patch at its current shape |
 | Measure fold | Pause and measure the current corner alignment, projected overlap and footprint error without stepping |
 | Wireframe / Show markers | Change rendering only |
 | Reconnect | After disconnection, start a new world in a paused state |
 
 Drag to orbit the camera and scroll to zoom. Camera controls work while paused.
 Hidden tabs stop automatic stepping. Returning to a tab does not trigger a backlog
-of catch-up physics. The drape/wind scenes leave self-collision disabled. The towel
-scene enables both continuous collision modes. Wind and sphere controls apply only
+of catch-up physics. The drape/wind scenes leave self-collision disabled. Both towel
+scenes enable continuous self and rigid collision checks. Wind and sphere controls apply only
 to drape/wind scenes.
 
 The drape/wind scenes use bending compliance `1e3` and stretch compliance `0` to allow folds
@@ -58,7 +74,7 @@ See [materials](integration.md#materials) for the parameter meanings.
 
 ## Experimental towel task
 
-Select **Towel half-fold · experimental** to run the same fixture 2, nominal
+Select **Towel half-fold · XPBD** to run the same fixture 2, nominal
 trajectory and transactional substep as the [headless example](examples.md#experimental-towel-folding).
 It uses a 0.5 m towel, 1 mm thickness and two kinematic grippers. Attachments are
 ideal constraints; the boxes do not model a frictional fingertip pinch. Orange and
@@ -89,11 +105,17 @@ with stationary retracted grippers and a `Finished` task phase.
 
 | Metric | Includes |
 |---|---|
-| Render | Measured browser render-loop frequency |
+| Render | Actual redraw frequency; an unchanged paused view draws zero frames |
 | Physics / frame | Latest physics request, including Rapier, cloth diagnostics and folding-task checkpoints/rollback; excludes frame construction, inspection, JSON, transport and rendering |
 | Response | Request send to response receive, including physics, serialization, transport and browser scheduling |
 | Simulation rate | Simulated time divided by elapsed wall time; 1× means real-time progress |
 | Stretch / Penetration / Contacts / Attachment error | Maximum over accepted substeps in the latest physics request; if none succeeds, retain the previous diagnostics |
+
+In the implicit scene the last four metrics are maximum edge extension, RMS
+speed, held vertices and maximum speed. Rendering is invalidated by new physics
+states, camera changes, resize and view options. Camera input remains responsive
+while physics runs, and static shadows are reused. A low idle redraw count is
+expected; it does not measure interaction latency.
 
 A slow environment advances simulation more slowly instead of lowering accuracy
 settings. Render fps alone does not show whether physics keeps up with wall time.
@@ -109,7 +131,7 @@ sequenceDiagram
     participant UI as Browser / Three.js
     participant CPU as Local Rust / RapierClothWorld
     UI->>CPU: step (one request in flight)
-    CPU->>CPU: Rapier then cloth, 1/240 s × 4
+    CPU->>CPU: Rapier then cloth (scene-specific physical step)
     CPU-->>UI: Accepted state, obstacle/gripper poses and diagnostics
     UI->>UI: Update geometry, normals and bounds; render
 ```
@@ -120,12 +142,15 @@ connection owns a world; Vite proxies `/live/ws` to the CPU server.
 
 Live protocol **2** requires matching server and viewer versions; protocol 1 frames
 are rejected. Requests contain `{request_id, command}`. Commands are `step`,
-`reset`, `set_options`, `release`, `release_gripper` and `inspect`. Topology is sent
+`reset`, `set_options`, `release`, `release_gripper`, `inspect`,
+`set_gripper_pose` and `grasp_gripper`. Commands are scene-specific. Topology is sent
 on connection and reset; each frame includes the 1,024 positions as a flat array,
-step index, time and diagnostics. `substeps` is the configured request size (4);
-`advanced_substeps` is the number actually accepted by that request (0–4).
+step index, time and diagnostics. `substeps` is the configured request size (4 for XPBD, 1 for implicit);
+`advanced_substeps` is the number actually accepted by that request (0–4 or 0–1).
 Commands that do not step return zero. Sphere fields apply to drape/wind scenes;
 they are zero and hidden for folding.
+The implicit scene adds `implicit_available` and an `implicit` task object;
+see its [pose protocol](robot-control.md#connect-a-host-controller).
 The browser converts positions to f32 for rendering and retains received values for
 inspection. This transport is specific to the demo; it is not the
 [recording schema](recording-format.md).
