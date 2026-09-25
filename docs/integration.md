@@ -310,8 +310,9 @@ exclude unrelated unsupported colliders with the query filter.
 Initial swept gaps must exceed the minimum plus numerical clearance. Infeasible
 commands, unresolvable separation and exhausted work limits fail without committing
 cloth positions, velocities, contact history or attachment events. The primitive
-checks use at most 256 advancement iterations, charged distance queries and the
-shared collision budget. Small analytical, rotating-support, zero-friction and
+checks use at most 2,048 advancement iterations per query (returning the prefix
+certified so far when they run out), charged distance queries and the shared
+collision budget. Small analytical, rotating-support, zero-friction and
 rollback tests exercise this experimental mode; they do not qualify a complete
 fold or a CPU frame budget.
 
@@ -334,10 +335,11 @@ hidden inside this procedure.
 Sweeps retain at least 90% of physical thickness, while contact constraints target
 the full thickness. Thus a 1 mm cloth uses a 0.9 mm minimum swept separation.
 Initial geometry must have a resolvable gap above the swept minimum wherever
-advancement is needed. Conservative advancement uses a 10% clearance reserve,
-a 256-distance-evaluation limit per query and the configured cumulative CCD budget.
-Numerical clearance and convergence failures return `UnresolvedContinuousCollision`;
-budget exhaustion returns `CollisionBudgetExceeded`. Neither commits the cloth.
+advancement is needed. Conservative advancement uses a 10% clearance reserve
+and at most 2,048 distance evaluations per query, after which the prefix certified
+so far is returned, all within the configured cumulative CCD budget. Numerical
+clearance and non-progress failures return `UnresolvedContinuousCollision`; budget
+exhaustion returns `CollisionBudgetExceeded`. Neither commits the cloth.
 
 Prediction uses swept witnesses to solve contacts against the full inertial
 prediction, preserving tangential motion at zero friction and normal support for

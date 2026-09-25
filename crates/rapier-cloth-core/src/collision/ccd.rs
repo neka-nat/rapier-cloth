@@ -126,14 +126,21 @@ pub(crate) fn certify_linear_motion(
 /// certifies an interval directly, including fast tangential sliding. Otherwise
 /// advancement reserves 10% of the current positive clearance. It terminates
 /// once the clearance reaches 10% of its initial value, or proves the whole
-/// remaining interval clear. At most 256 distance evaluations are permitted for
-/// one query, also charged to the caller's cumulative `CcdChecks` work budget.
+/// remaining interval clear. At most `MAX_EVALUATIONS` distance evaluations are
+/// permitted for one query, also charged to the caller's cumulative `CcdChecks`
+/// work budget; when they are exhausted, the prefix certified so far is returned
+/// as `Limited`, which stays conservative (a feature pivoting about a point
+/// near contact keeps its clearance while a far vertex moves a lot, so the
+/// Lipschitz bound admits only short advances).
 ///
-/// Degenerate distance queries, insufficient numerical clearance, non-progress
-/// and the per-query convergence limit return typed failures. The rounding
+/// Degenerate distance queries, insufficient numerical clearance and
+/// non-progress return typed failures. The rounding
 /// distance allowance is 64 * Real::EPSILON times the interpolated local feature
 /// extent (including cancellation); projection bounds use componentwise dot
 /// product allowances. Retain a resolvable initial margin above the minimum.
+/// Distance evaluations permitted for one conservative-advancement query.
+const MAX_EVALUATIONS: usize = 2048;
+
 pub fn conservative_advance(
     feature: CcdFeature,
     start: [Vec3; 4],
@@ -172,7 +179,7 @@ pub fn conservative_advance(
     }
     let mut fraction = 0.0;
     let mut target_clearance = 0.0;
-    for evaluation in 0..256 {
+    for evaluation in 0..MAX_EVALUATIONS {
         work.charge(CollisionBudgetKind::CcdChecks, 1, limits)?;
         let positions = std::array::from_fn(|i| a[i] + motion[i] * fraction);
         let witnesses = feature
@@ -232,9 +239,8 @@ pub fn conservative_advance(
         // Rounding upward to 1 cannot bypass the strict interval test above.
         fraction = next.min(1.0);
     }
-    Err(ClothError::UnresolvedContinuousCollision(
-        "per-query convergence limit",
-    ))
+    // Every advance kept the separation, so the prefix is a safe answer.
+    Ok(CcdResult::Limited { fraction })
 }
 
 #[cfg(test)]
@@ -330,6 +336,148 @@ mod prefix_continuation_tests {
                 ..
             })
         ));
+    }
+    /// Smallest witness distance sampled along the prefix `[0, fraction]`.
+    #[cfg(feature = "f64")]
+    fn sampled_minimum(
+        feature: CcdFeature,
+        start: [Vec3; 4],
+        end: [Vec3; 4],
+        fraction: Real,
+    ) -> Real {
+        (0..=400)
+            .map(|k| {
+                let t = fraction * k as Real / 400.0;
+                let p: [Vec3; 4] = std::array::from_fn(|i| start[i] + (end[i] - start[i]) * t);
+                let w = feature.witnesses(p).unwrap();
+                (w[0] - w[1]).length()
+            })
+            .fold(Real::INFINITY, Real::min)
+    }
+    #[test]
+    #[cfg(feature = "f64")]
+    // Recorded at the towel release: one edge pivots about a vertex resting
+    // 0.06 mm above the swept minimum while its other vertex falls 15 mm, so
+    // the Lipschitz bound admits about 450 short advances. This exceeded the
+    // former 256-evaluation limit and failed the whole step.
+    fn pivoting_edge_near_contact_certifies_a_safe_prefix() {
+        let start = [
+            Vec3::new(
+                0.13716286669625807,
+                0.005251971094043289,
+                -0.18653653977257792,
+            ),
+            Vec3::new(
+                0.1532433122561256,
+                0.0009546711255515203,
+                -0.17095172096297542,
+            ),
+            Vec3::new(
+                0.15336480237546643,
+                0.000621823286506107,
+                -0.15663752126516475,
+            ),
+            Vec3::new(
+                0.15337966329171174,
+                0.000638884387832846,
+                -0.1727682013288491,
+            ),
+        ];
+        let end = [
+            Vec3::new(
+                0.13709548932958118,
+                -0.009646800459254316,
+                -0.19035679901421476,
+            ),
+            Vec3::new(
+                0.15322070580072014,
+                0.0005079551347088778,
+                -0.1709197677384579,
+            ),
+            Vec3::new(
+                0.15335747136388173,
+                0.0007497249288094587,
+                -0.15661504549399607,
+            ),
+            Vec3::new(
+                0.15336034066405152,
+                0.00012094446448972587,
+                -0.1727356092538063,
+            ),
+        ];
+        let separation = 0.00028619999999999996;
+        let mut work = CollisionWork::default();
+        let result = conservative_advance(
+            CcdFeature::EdgeEdge,
+            start,
+            end,
+            separation,
+            &mut work,
+            CollisionLimits::default(),
+        )
+        .unwrap();
+        let fraction = result.fraction();
+        assert!(fraction > 0.8, "{result:?}");
+        assert!(work.ccd_checks > 256 && work.ccd_checks <= MAX_EVALUATIONS);
+        assert!(sampled_minimum(CcdFeature::EdgeEdge, start, end, fraction) >= separation);
+        assert!(
+            certify_linear_motion(
+                CcdFeature::EdgeEdge,
+                start,
+                end,
+                separation,
+                &mut CollisionWork::default(),
+                CollisionLimits::default(),
+            )
+            .unwrap()
+            .fraction()
+                >= fraction
+        );
+    }
+    #[test]
+    #[cfg(feature = "f64")]
+    fn exhausted_advancement_returns_the_certified_prefix() {
+        // A ten-metre edge pivots about a vertex 0.1 mm above the minimum while
+        // its far vertex sweeps half a metre: every advance is tiny and the
+        // clearance never drops to the early-stop threshold.
+        let separation = 0.01;
+        let start = [
+            Vec3::new(10.0, separation + 1e-4, 0.0),
+            Vec3::new(0.0, separation + 1e-4, 0.0),
+            Vec3::new(0.0, 0.0, -0.001),
+            Vec3::new(0.0, 0.0, 0.001),
+        ];
+        let end = [Vec3::new(10.0, -0.5, 0.0), start[1], start[2], start[3]];
+        let mut work = CollisionWork::default();
+        let result = conservative_advance(
+            CcdFeature::EdgeEdge,
+            start,
+            end,
+            separation,
+            &mut work,
+            CollisionLimits::default(),
+        )
+        .unwrap();
+        let CcdResult::Limited { fraction } = result else {
+            panic!("{result:?}");
+        };
+        assert_eq!(work.ccd_checks, MAX_EVALUATIONS, "fraction {fraction}");
+        assert!(fraction > 0.0 && fraction < 0.5, "{fraction}");
+        assert!(sampled_minimum(CcdFeature::EdgeEdge, start, end, fraction) >= separation);
+        let continued = certify_linear_motion(
+            CcdFeature::EdgeEdge,
+            start,
+            end,
+            separation,
+            &mut CollisionWork::default(),
+            CollisionLimits::default(),
+        )
+        .unwrap();
+        // The suffix probes certify the rest of this collision-free motion.
+        assert!(
+            continued.fraction() >= fraction,
+            "{continued:?} after {fraction}"
+        );
     }
     #[test]
     fn true_crossing_retains_the_original_safe_prefix() {
