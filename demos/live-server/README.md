@@ -17,5 +17,9 @@ accepts configured browser origins. Use `--port` and `--origin` after Cargo's `-
 separator to override them. Add `--no-default-features --features f64` before that
 separator for f64. Only one precision can be enabled.
 
-The server advances four 1/240 s substeps per `step` command and does not advance
-while idle. This is a local demo transport, not a hosted multi-user service.
+The server requests four 1/240 s substeps per `step` command and does not advance
+while idle. Protocol 2 also exposes the shared experimental towel task, per-gripper
+release and on-demand shape inspection. A folding failure returns the last accepted
+state and actual accepted-substep count, then latches until reset. Complete folding
+and CPU performance remain unqualified. This is a local demo transport, not a
+hosted multi-user service.

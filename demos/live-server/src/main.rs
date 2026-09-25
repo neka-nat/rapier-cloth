@@ -1,4 +1,16 @@
 //! Local, demand-driven demo transport. Each connection owns one simulation.
+#[path = "../../../examples/support/folding.rs"]
+mod folding;
+#[path = "../../../examples/support/folding_oracle.rs"]
+mod folding_oracle;
+#[cfg(all(feature = "f64", feature = "implicit"))]
+#[path = "../../../examples/support/implicit_fixture.rs"]
+mod implicit_fixture;
+#[path = "../../../examples/support/implicit_options.rs"]
+mod implicit_options;
+#[cfg(all(feature = "f64", feature = "implicit"))]
+#[path = "../../../examples/support/implicit_robot.rs"]
+mod implicit_robot;
 mod simulation;
 use axum::{
     Router,
@@ -74,7 +86,7 @@ async fn connection(mut socket: WebSocket) {
             }
         };
         last_request = request.request_id;
-        // Only four bounded substeps run on the blocking pool per request.
+        // One implicit or four XPBD bounded substeps run per request.
         // Await delivery before reading another command: no background producer
         // or unbounded queue, including while a browser is paused/disconnected.
         let Ok((next, result)) = tokio::task::spawn_blocking(move || {
@@ -123,7 +135,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/health",
             get(|| async {
-                axum::Json(serde_json::json!({"name":"rapier-cloth-live","protocol":1}))
+                axum::Json(
+                    serde_json::json!({"name":"rapier-cloth-live","protocol":simulation::PROTOCOL}),
+                )
             }),
         )
         .route("/live/ws", get(upgrade))

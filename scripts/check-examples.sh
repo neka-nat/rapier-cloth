@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 example_check_dir="$(mktemp -d "${TMPDIR:-/tmp}/rapier-cloth-examples-XXXXXX")"
 for precision in f32 f64; do
-  for example in hanging_cloth drape_static moving_anchor; do
+  for example in hanging_cloth drape_static moving_anchor surface_grasp; do
     cargo run --locked --release --no-default-features --features "$precision" --example "$example" > "$example_check_dir/$example-$precision.log"
     test -s "$example_check_dir/$example-$precision.log"
   done
@@ -14,6 +14,10 @@ import json, math, pathlib, sys
 folder, precision = pathlib.Path(sys.argv[1]), sys.argv[2]
 recording = json.loads((folder / f'recording-{precision}.json').read_text())
 summary = json.loads((folder / f'summary-{precision}.json').read_text())
+grasp = json.loads((folder / f'surface_grasp-{precision}.log').read_text())
+assert grasp['finite'] and grasp['released'] and grasp['steps'] == 240
+assert grasp['precision'] == precision and grasp['max_target_error'] <= 1e-5
+assert all(b > 0 for b in grasp['barycentric'])
 assert summary == json.loads((folder / f'stdout-{precision}.json').read_text())
 assert summary['finite'] is True and summary['precision'] == precision
 assert recording['schema_version'] == 1 and recording['precision'] == precision
@@ -22,7 +26,10 @@ assert recording['frames'][0]['positions'] != recording['frames'][-1]['positions
 assert all(math.isfinite(x) for frame in recording['frames'] for p in frame['positions'] for x in p)
 assert any(frame['attached_particles'] for frame in recording['frames'])
 assert recording['frames'][-1]['attached_particles'] == []
-print(f'All four {precision} examples ran; recording and stdout/file summary verified.')
+print(f'Five {precision} examples ran; grasp, recording and stdout/file summary verified.')
 PY
+  cargo build --locked --release --no-default-features --features "$precision" --example fold_towel
+  python3 scripts/check-folding-example.py --binary "${CARGO_TARGET_DIR:-target}/release/examples/fold_towel" \
+    --precision "$precision" --output "$example_check_dir/fold-$precision" --checkout "$PWD"
 done
 printf 'Example outputs: %s\n' "$example_check_dir"

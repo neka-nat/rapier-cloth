@@ -2,25 +2,49 @@
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>rapier-cloth · Live</title><link rel="icon" href="data:,"></head>
 <body class="live">
-<header><div><span class="eyebrow">RAPIER CLOTH / LIVE LAB</span><h1>Shape the motion.</h1><p>Drape it. Add wind. Explore cloth as it moves.</p></div><a class="file-button" href="/">Recording viewer ↗</a></header>
+<header><div><span class="eyebrow">RAPIER CLOTH / LIVE LAB</span><h1>Shape the motion.</h1><p>Drape, grasp and explore cloth as it moves.</p></div><a class="file-button" href="/">Recording viewer ↗</a></header>
 <main>
-<section class="stage"><div id="viewport" aria-label="Live cloth simulation"></div><div class="stage-tag"><span class="dot"></span><span id="status" role="status">Connecting</span><span id="precision">CPU</span></div><div class="camera-hint">Drag to orbit · Scroll to zoom</div></section>
+<section class="stage"><div id="viewport" aria-label="Live cloth simulation"></div><div class="stage-tag"><span class="dot"></span><span id="status" role="status">Connecting</span><span id="precision">CPU</span><span id="task-phase" hidden></span></div><div class="camera-hint">Drag to orbit · Scroll to zoom</div></section>
 <aside>
 <span class="eyebrow">LIVE CONTROLS</span>
-<label class="field">Scene<select id="scene" disabled><option value="drape">Drape over a sphere</option><option value="hanging">Cloth in the wind</option></select></label>
+<label class="field">Scene<select id="scene" disabled><option value="drape">Drape over a sphere</option><option value="hanging">Cloth in the wind</option><option value="fold_towel">Towel half-fold · XPBD</option><option value="implicit_towel" disabled>Towel fold · Implicit / pose control</option></select></label>
+<div id="free-controls">
 <label class="field">Wind strength <output id="wind-value">0%</output><input id="wind" type="range" min="0" max="1" step="0.05" value="0" disabled></label>
 <label class="check"><input id="auto-motion" type="checkbox" checked disabled>Animate sphere</label>
 <label class="field">Sphere X<input id="sphere-x" type="range" min="-0.45" max="0.45" step="0.01" value="0" disabled></label>
 <label class="field">Sphere Z<input id="sphere-z" type="range" min="-0.45" max="0.45" step="0.01" value="0" disabled></label>
 <button id="release" disabled>Release pins</button>
-<div class="toggles"><label><input id="wireframe" type="checkbox">Wireframe</label><label><input id="pins" type="checkbox" checked>Show pins</label></div>
-<p class="legend"><span class="mint">●</span> Cloth　<span class="amber">●</span> Sphere　<span class="pink">●</span> Pins</p>
+</div>
+<div id="fold-controls" hidden>
+<p id="fold-description" class="note">A scripted two-gripper fold. Complete folding and real-time performance remain unqualified.</p>
+<div id="implicit-options" hidden>
+<label class="field">Script<select id="implicit-case"><option value="nominal">Nominal fold</option><option value="lift_5mm">Lift +5 mm</option><option value="grasp_inset">Inset grasp</option><option value="left_early">Release left early</option><option value="right_late">Release right late</option><option value="friction_low">Lower friction</option><option value="friction_high">Higher friction</option></select></label>
+<label class="field">At iteration limit<select id="cap-policy"><option value="strict">Stop (strict)</option><option value="approximate">Continue after validation (approximate)</option></select></label>
+<p class="note">Script and policy apply on Reset.</p>
+<p id="solver-state" class="note" role="status"></p>
+</div>
+<p id="grasp-state" class="note"></p>
+<button id="release-left" disabled>Release left gripper</button>
+<button id="release-right" disabled>Release right gripper</button>
+<p id="task-override" class="note" hidden>Manual release changed the scripted task. Reset to run the nominal fold.</p>
+<div id="pose-controls" hidden>
+<label class="field">End effector<select id="gripper"><option value="0">Left</option><option value="1">Right</option></select></label>
+<div class="pose-buttons"><button data-axis="0" data-delta="-0.005">X −</button><button data-axis="0" data-delta="0.005">X +</button><button data-axis="1" data-delta="-0.005">Y −</button><button data-axis="1" data-delta="0.005">Y +</button><button data-axis="2" data-delta="-0.005">Z −</button><button data-axis="2" data-delta="0.005">Z +</button><button data-roll="-5">Roll −</button><button data-roll="5">Roll +</button></div>
+<button id="grasp">Grasp selected patch</button>
+<p class="note">Moves: 5 mm · Roll: 5°. Commands apply on the next step. Manual commands stop the scripted trajectory; Reset restores it. Boxes mark ideal end-effector frames, with no finger collision or force feedback.</p>
+</div>
+<button id="inspect" disabled>Measure fold</button>
+<p id="fold-measurements" class="note">Pause and measure to inspect the current shape.</p>
+<p class="note">Shape measurements are a snapshot, not a released-fold quality check.</p>
+</div>
+<div class="toggles"><label><input id="wireframe" type="checkbox">Wireframe</label><label><input id="pins" type="checkbox" checked>Show markers</label></div>
+<p class="legend"><span class="mint">●</span> Cloth　<span class="amber">●</span> Anchors　<span class="pink">●</span> Pins</p>
 <p id="error" role="alert"></p><button id="reconnect" hidden>Reconnect</button>
 </aside>
 <section class="transport"><button id="play" disabled>Pause</button><button id="step" disabled>Step frame</button><button id="reset" disabled>Reset</button><span id="time">0.000 s</span><button id="camera">Reset view</button></section>
 </main>
-<section class="metrics" aria-label="Simulation metrics"><div><span>Render</span><strong id="fps">—</strong></div><div><span>Physics / frame</span><strong id="physics">—</strong></div><div><span>Response</span><strong id="roundtrip">—</strong></div><div><span>Simulation rate</span><strong id="speed">—</strong></div><div><span>Stretch · p95</span><strong id="stretch">—</strong></div><div><span>Max penetration</span><strong id="penetration">—</strong></div><div><span>Contacts</span><strong id="contacts">—</strong></div></section>
+<section class="metrics" aria-label="Simulation metrics"><div><span>Render</span><strong id="fps">—</strong></div><div><span>Physics / frame</span><strong id="physics">—</strong></div><div><span>Response</span><strong id="roundtrip">—</strong></div><div><span>Simulation rate</span><strong id="speed">—</strong></div><div><span id="stretch-label">Stretch · p95</span><strong id="stretch">—</strong></div><div><span id="penetration-label">Max penetration</span><strong id="penetration">—</strong></div><div><span id="contacts-label">Contacts</span><strong id="contacts">—</strong></div><div><span id="target-label">Attachment error</span><strong id="target">—</strong></div></section>
 <footer><span id="mesh-info">32 × 32 VERTICES · CPU XPBD</span><span id="frame">STEP 0</span></footer>
-<p class="live-note">Four 1/240 s substeps per frame. A simulation rate below 1× means physics is running slower than real time. Hidden tabs pause automatic stepping. Self-collision is not supported.</p>
+<p id="live-note" class="live-note">Four 1/240 s substeps per requested frame. A simulation rate below 1× means physics is running slower than real time. Hidden tabs pause automatic stepping. The experimental towel task enables continuous self and rigid contact; drape and wind scenes use particle contacts.</p>
 <script type="module" src="/src/live.js"></script>
 </body></html>

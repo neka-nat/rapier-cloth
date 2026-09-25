@@ -10,6 +10,10 @@ use crate::{
     IntegrationError, RapierScene, Real, Vec3,
 };
 use std::{collections::BTreeSet, time::Instant};
+#[path = "collision/motion.rs"]
+mod motion;
+#[path = "collision/surface.rs"]
+mod surface;
 
 pub(crate) struct RapierContacts<'a, 'b> {
     scene: &'a RapierScene<'b>,
@@ -18,7 +22,12 @@ pub(crate) struct RapierContacts<'a, 'b> {
     limit: usize,
     excluded_pairs: &'a BTreeSet<(u32, (u32, u32))>,
     sweeps: Vec<Contact>,
+    prediction_sweeps: Vec<Contact>,
     merged: Vec<Contact>,
+    surface_mesh: Option<std::sync::Arc<crate::ClothMesh>>,
+    surface_settings: Option<crate::ClothContactSettings>,
+    surface_manifold: crate::rapier::parry::query::ContactManifold<(), ()>,
+    motion_contacts: Vec<crate::SurfaceContact>,
     pub error: Option<IntegrationError>,
     pub ignored: BTreeSet<(u32, u32)>,
     pub candidate_queries: usize,
@@ -40,13 +49,28 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
             limit,
             excluded_pairs,
             sweeps: Vec::new(),
+            prediction_sweeps: Vec::new(),
             merged: Vec::new(),
+            surface_mesh: None,
+            surface_settings: None,
+            surface_manifold: crate::rapier::parry::query::ContactManifold::new(),
+            motion_contacts: Vec::new(),
             error: None,
             ignored: BTreeSet::new(),
             candidate_queries: 0,
             pair_queries: 0,
             query_time_seconds: 0.0,
         }
+    }
+    pub fn with_surface(mut self, cloth: &crate::Cloth) -> Self {
+        if let Some(settings) = cloth
+            .contact_settings()
+            .filter(|s| s.rigid_surface_collision)
+        {
+            self.surface_mesh = Some(cloth.shared_mesh());
+            self.surface_settings = Some(settings);
+        }
+        self
     }
     fn generate(
         &mut self,
@@ -56,6 +80,7 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
         stage: ContactStage,
         out: &mut Vec<Contact>,
     ) -> Result<(), IntegrationError> {
+        self.prediction_sweeps.clear();
         let mut mins = Vec3::splat(Real::MAX);
         let mut maxs = Vec3::splat(-Real::MAX);
         for p in previous.iter().chain(positions) {
@@ -198,7 +223,7 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
                                     surface_velocity: Vec3::ZERO,
                                     friction,
                                 };
-                                self.sweeps.push(swept);
+                                self.prediction_sweeps.push(swept);
                                 geometry = Some(swept);
                             }
                         }
@@ -214,11 +239,18 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
         }
         // Keep sweep planes even if constraint projection moves the particle
         // outside the source collider's candidate AABB during this substep.
-        // Prediction is queried once per substep; its unique sweep keys remain
-        // sorted for all subsequent iterations. Linear union also replaces a
-        // matching discrete contact with its cached sweep plane.
+        // Continuous prediction may query several trial poses in one substep.
+        // Merge unique keys from this query into the retained cache, replacing
+        // an earlier witness for the same pair with the latest swept witness.
+        // Count retained keys, not the number of prediction queries.
         if stage == ContactStage::Prediction {
-            self.sweeps.sort_unstable_by_key(|c| c.key);
+            self.prediction_sweeps.sort_unstable_by_key(|c| c.key);
+            merge_sweep_contacts(
+                &mut self.sweeps,
+                &self.prediction_sweeps,
+                &mut self.merged,
+                self.limit,
+            )?;
         }
         if !self.sweeps.is_empty() {
             merge_sweep_contacts(out, &self.sweeps, &mut self.merged, self.limit)?;
@@ -254,6 +286,40 @@ fn merge_sweep_contacts(
 }
 
 impl ContactSource for RapierContacts<'_, '_> {
+    fn transport_surface_anchor(
+        &mut self,
+        contact: &crate::SurfaceContact,
+        previous_point: Vec3,
+        _h: Real,
+    ) -> Result<Vec3, ClothError> {
+        let start = Instant::now();
+        let result = self.transport_anchor(contact, previous_point);
+        self.query_time_seconds += start.elapsed().as_secs_f64();
+        result.map_err(|e| {
+            let message = e.to_string();
+            self.error = Some(e);
+            ClothError::External(message)
+        })
+    }
+
+    fn continuous_motion(&self) -> bool {
+        self.surface_settings
+            .is_some_and(|s| s.continuous_rigid_collision)
+    }
+    fn motion_fraction(
+        &mut self,
+        motion: crate::ContactMotion<'_>,
+        work: &mut crate::CollisionWork,
+    ) -> Result<Real, ClothError> {
+        let start = Instant::now();
+        let result = self.generate_motion(motion, work);
+        self.query_time_seconds += start.elapsed().as_secs_f64();
+        result.map_err(|e| {
+            let message = e.to_string();
+            self.error = Some(e);
+            ClothError::External(message)
+        })
+    }
     fn contacts(
         &mut self,
         previous: &[Vec3],
@@ -262,8 +328,28 @@ impl ContactSource for RapierContacts<'_, '_> {
         stage: ContactStage,
         out: &mut Vec<Contact>,
     ) -> Result<(), ClothError> {
+        if self.surface_settings.is_some() {
+            return Ok(());
+        }
         let start = Instant::now();
         let result = self.generate(previous, positions, radius, stage, out);
+        self.query_time_seconds += start.elapsed().as_secs_f64();
+        result.map_err(|e| {
+            let message = e.to_string();
+            self.error = Some(e);
+            ClothError::External(message)
+        })
+    }
+    fn surface_contacts_with_work(
+        &mut self,
+        previous: &[Vec3],
+        positions: &[Vec3],
+        stage: ContactStage,
+        out: &mut Vec<crate::SurfaceContact>,
+        work: &mut crate::CollisionWork,
+    ) -> Result<(), ClothError> {
+        let start = Instant::now();
+        let result = self.generate_surface(previous, positions, stage, out, work);
         self.query_time_seconds += start.elapsed().as_secs_f64();
         result.map_err(|e| {
             let message = e.to_string();
@@ -276,6 +362,57 @@ impl ContactSource for RapierContacts<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_prediction_replaces_sweep_witness_without_duplicating_its_key() {
+        let mut rigid = PhysicsWorld::new();
+        rigid.colliders.insert(ColliderBuilder::ball(0.3));
+        let before = crate::SceneSnapshot::capture(
+            crate::WorldId::new(),
+            0,
+            &rigid.bodies,
+            &rigid.colliders,
+        );
+        rigid.step();
+        let query = rigid.broad_phase.as_query_pipeline(
+            rigid.narrow_phase.query_dispatcher(),
+            &rigid.bodies,
+            &rigid.colliders,
+            QueryFilter::default(),
+        );
+        let scene = RapierScene::new(query, &before, 1.0 / 240.0, Vec3::ZERO);
+        let settings = CollisionSettings::default();
+        let excluded = BTreeSet::new();
+        let mut source =
+            RapierContacts::new(&scene, &settings, ClothMaterial::default(), 1, &excluded);
+        let previous = [-Vec3::X * 2.0];
+        let mut out = Vec::new();
+        let mut last_normal = Vec3::ZERO;
+        for attempt in 0..128 {
+            out.clear();
+            let p = Vec3::new(2.0, if attempt % 2 == 0 { 0.0 } else { 0.1 }, 0.0);
+            source
+                .contacts(&previous, &[p], 0.05, ContactStage::Prediction, &mut out)
+                .unwrap();
+            assert_eq!(out.len(), 1);
+            assert_eq!(source.sweeps.len(), 1);
+            assert!(out[0].normal.x < -0.99);
+            assert_eq!(out[0].normal.y > 0.001, attempt % 2 != 0);
+            last_normal = out[0].normal;
+        }
+        out.clear();
+        source
+            .contacts(
+                &[Vec3::splat(3.0)],
+                &[Vec3::splat(3.0)],
+                0.05,
+                ContactStage::Iteration,
+                &mut out,
+            )
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].normal, last_normal);
+    }
 
     #[test]
     fn sweep_planes_override_current_geometry_and_survive_missing_candidates() {

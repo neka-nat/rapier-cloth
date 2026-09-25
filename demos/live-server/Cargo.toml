@@ -10,6 +10,7 @@ publish = false
 default = ["f32"]
 f32 = ["rapier-cloth/f32"]
 f64 = ["rapier-cloth/f64"]
+implicit = ["rapier-cloth/implicit"]
 
 [dependencies]
 rapier-cloth = { path = "../..", default-features = false }

@@ -49,13 +49,29 @@ npm --prefix demos/viewer run build
 npm --prefix demos/viewer run test
 npm --prefix demos/viewer run test:live
 CLOTH_LIVE_PRECISION=f64 npm --prefix demos/viewer run test:live
+CLOTH_LIVE_IMPLICIT=1 npm --prefix demos/viewer run test:live -- --grep implicit
 ```
 
-The last command uses shell environment-variable syntax; set the same variable
+The implicit tests build the f64 implicit server, exercise pose/release/reset
+commands, and compare all 80 live states against a headless robot run.
+The last commands use shell environment-variable syntax; set the same variable
 through your shell on Windows. An existing Chromium executable can be selected with
 `CHROME_PATH`, for example `/usr/bin/google-chrome` on Linux. Live browser tests start
 the actual Rust server on port 9174 and a production preview on port 4174. Screenshots
 and reports are written under `demos/viewer/test-results/`.
+
+Replay tests also build and run `fold_towel` in f32 and f64, then load the generated
+nine-step recordings through the browser file input. They check actual rendering
+buffers, both grippers and partial-run status; this is startup/replay coverage,
+not complete folding qualification. For a retained longer recording, set
+`CLOTH_FOLD_RECORDING_F32` or `CLOTH_FOLD_RECORDING_F64` to its absolute path.
+Unspecified precisions still generate their short recording normally.
+
+Live tests exercise both grippers, queued releases, shape inspection and reset.
+The nominal towel test runs to a solver stop or the end of the task and can take
+several minutes. It verifies application state delivery/recovery, not fold quality
+or a CPU budget; a solver stop remains a failed folding result. Retained terminal
+frames and screenshots are written to the test output directory.
 
 ## Documentation, examples and package checks
 

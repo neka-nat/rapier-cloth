@@ -1,4 +1,6 @@
 import {test,expect} from '@playwright/test';
+import fs from 'node:fs';
+import {validateFrame} from '../../src/live-protocol.js';
 
 const snapshot = page => page.evaluate(() => window.__clothLive.snapshot());
 async function idle(page) { await expect.poll(async () => { const s = await snapshot(page); return !!s?.connected && !s.pending && s.queued === 0; }).toBe(true); }
@@ -119,4 +121,128 @@ test('disconnect freezes the displayed state and reconnect starts a new live wor
   await expect(page.locator('#play')).toBeDisabled();
   await page.getByRole('button',{name:'Reconnect',exact:true}).click(); await idle(page);
   expect((await snapshot(page)).step).toBe(0); await advance(page);
+});
+
+test('shared towel task renders both grasps, measures without stepping, and releases each queued gripper', async({page}, testInfo) => {
+  test.setTimeout(180_000);
+  const frames = [], errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('websocket', socket => socket.on('framereceived', ({payload}) => {
+    const frame = JSON.parse(String(payload)); if (frame.type === 'frame') frames.push(frame);
+  }));
+  await page.goto('/live.html?paused=1'); await idle(page);
+  await page.locator('#scene').selectOption('fold_towel'); await idle(page);
+  const initial = await snapshot(page);
+  expect(initial.folding.config.version).toBe(2);
+  expect(initial.step).toBe(0); expect(initial.sphereVisible).toBe(false);
+  await expect(page.locator('#free-controls')).toBeHidden();
+  await expect(page.locator('#fold-controls')).toBeVisible();
+  expect(Object.values(initial.folding.collision_mode)).toEqual([true, true, true, true]);
+  await page.waitForTimeout(150); expect((await snapshot(page)).step).toBe(0);
+  while ((await snapshot(page)).step < initial.folding.config.attach_step) await advance(page);
+  const held = await snapshot(page), wire = frames.at(-1);
+  validateFrame(wire);
+  expect(held.folding.grippers.map(g => g.holding)).toEqual([true, true]);
+  expect(held.anchors).toHaveLength(24);
+  expect(held.positions).toEqual(wire.positions.map(Math.fround));
+  expect(held.anchors).toEqual(wire.folding.grasps.flatMap(g => g.points.flatMap(p => p.anchor)).map(Math.fround));
+  expect(held.grippers.map(({visible, ...pose}) => pose)).toEqual(wire.folding.grippers.map(({holding, ...pose}) => pose));
+  expect(held.normals.every(Number.isFinite)).toBe(true);
+  await page.getByRole('button', {name:'Measure fold'}).click(); await idle(page);
+  const inspected = await snapshot(page);
+  expect(inspected.step).toBe(held.step); expect(inspected.positions).toEqual(held.positions);
+  expect(inspected.advancedSubsteps).toBe(0);
+  expect(inspected.folding.inspection.step).toBe(held.step);
+  await expect(page.locator('#fold-measurements')).toContainText(`Step ${held.step}`);
+  await page.screenshot({path:testInfo.outputPath('live-towel-grasp.png'), fullPage:true});
+  const count = frames.length;
+  await page.evaluate(() => {
+    // Both releases are queued while the real four-step request is in flight.
+    document.getElementById('step').click();
+    document.getElementById('release-left').click();
+    document.getElementById('release-right').click();
+  });
+  await idle(page);
+  const updates = frames.slice(count), released = await snapshot(page);
+  expect(updates).toHaveLength(3);
+  expect(updates.map(f => f.advanced_substeps)).toEqual([4, 0, 0]);
+  expect(updates[1].folding.grippers.map(g => g.holding)).toEqual([false, true]);
+  expect(updates[2].folding.grippers.map(g => g.holding)).toEqual([false, false]);
+  expect(updates[1].positions).toEqual(updates[0].positions);
+  expect(updates[2].positions).toEqual(updates[0].positions);
+  expect(released.step).toBe(held.step + 4); expect(released.anchors).toEqual([]);
+  expect(released.folding.inspection).toBeNull();
+  await expect(page.locator('#task-override')).toBeVisible();
+  await expect(page.locator('#release-left')).toBeDisabled();
+  await expect(page.locator('#release-right')).toBeDisabled();
+  const invalid = structuredClone(wire); invalid.folding.grippers[0].holding = false;
+  expect(() => validateFrame(invalid)).toThrow('gripper holding state');
+  const oldProtocol = structuredClone(wire); oldProtocol.protocol = 1;
+  expect(() => validateFrame(oldProtocol)).toThrow('protocol 2');
+  const missingTask = structuredClone(wire); missingTask.folding = null;
+  expect(() => validateFrame(missingTask)).toThrow('fold task data');
+  await page.getByRole('button', {name:'Reset', exact:true}).click(); await idle(page);
+  const reset = await snapshot(page);
+  expect(reset.positions).toEqual(initial.positions); expect(reset.step).toBe(0);
+  expect(reset.folding.grasps).toEqual([]); expect(reset.folding.manual_release).toBe(false);
+  expect(reset.folding.stopped).toBeNull(); expect(reset.folding.inspection).toBeNull();
+  await page.locator('#scene').selectOption('drape'); await idle(page);
+  expect((await snapshot(page)).sphereVisible).toBe(true);
+  expect((await snapshot(page)).grippers.every(g => !g.visible)).toBe(true);
+  await expect(page.locator('#fold-controls')).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test('nominal live towel returns the actual last accepted frame on stop and resets both worlds', async({page}, testInfo) => {
+  // This is an application/recovery check. A stopped fold still fails the
+  // independent M1 quality checker; browser success cannot qualify its physics.
+  test.setTimeout(600_000);
+  let lastWire;
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('websocket', socket => socket.on('framereceived', ({payload}) => {
+    const frame = JSON.parse(String(payload)); if (frame.type === 'frame') lastWire = frame;
+  }));
+  await page.goto('/live.html?paused=1'); await idle(page);
+  await page.locator('#scene').selectOption('fold_towel'); await idle(page);
+  const initial = await snapshot(page), start = Date.now();
+  await page.getByRole('button', {name:'Resume', exact:true}).click();
+  await expect.poll(async () => {
+    const state = await snapshot(page);
+    return !!state.folding.stopped || state.step >= state.folding.config.end_step;
+  }, {timeout:550_000, intervals:[1000]}).toBe(true);
+  if (!(await snapshot(page)).folding.stopped) await page.getByRole('button', {name:'Pause', exact:true}).click();
+  await idle(page);
+  const terminal = await snapshot(page), wire = lastWire;
+  fs.writeFileSync(testInfo.outputPath('terminal-frame.json'), JSON.stringify(wire));
+  fs.writeFileSync(testInfo.outputPath('execution.json'), JSON.stringify({wall_ms:Date.now()-start,step:terminal.step,stopped:terminal.folding.stopped,physics_qualified:false}));
+  expect(terminal.positions).toEqual(wire.positions.map(Math.fround));
+  expect(terminal.anchors).toEqual(wire.folding.grasps.flatMap(g => g.points.flatMap(p => p.anchor)).map(Math.fround));
+  expect(terminal.grippers.map(({visible, ...pose}) => pose)).toEqual(wire.folding.grippers.map(({holding, ...pose}) => pose));
+  expect(terminal.step).toBeGreaterThanOrEqual(2141);
+  if (terminal.folding.stopped) {
+    await expect(page.getByRole('alert')).toHaveText(wire.folding.stopped);
+    await expect(page.locator('#status')).toHaveText('Stopped · error');
+    await expect(page.locator('#play')).toBeDisabled();
+    await expect(page.locator('#step')).toBeDisabled();
+    expect(terminal.paused).toBe(true);
+    expect(terminal.advancedSubsteps).toBeLessThan(4);
+  }
+  await page.waitForTimeout(200);
+  expect((await snapshot(page)).positions).toEqual(terminal.positions);
+  expect((await snapshot(page)).step).toBe(terminal.step);
+  expect((await snapshot(page)).queued).toBe(0);
+  await page.screenshot({path:testInfo.outputPath('live-towel-terminal.png'), fullPage:true});
+  await page.getByRole('button', {name:'Measure fold'}).click(); await idle(page);
+  expect((await snapshot(page)).folding.inspection.step).toBe(terminal.step);
+  expect((await snapshot(page)).step).toBe(terminal.step);
+  expect((await snapshot(page)).positions).toEqual(terminal.positions);
+  fs.writeFileSync(testInfo.outputPath('inspection-frame.json'), JSON.stringify(lastWire));
+  await page.getByRole('button', {name:'Reset', exact:true}).click(); await idle(page);
+  const reset = await snapshot(page);
+  expect(reset.positions).toEqual(initial.positions); expect(reset.step).toBe(0);
+  expect(reset.folding.stopped).toBeNull(); expect(reset.folding.grasps).toEqual([]);
+  await expect(page.getByRole('alert')).toBeEmpty();
+  await advance(page);
+  expect(errors).toEqual([]);
 });

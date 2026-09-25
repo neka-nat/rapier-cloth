@@ -4,7 +4,7 @@ exclude = ["tests/consumers/f32", "tests/consumers/f64", "demos/live-server"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -19,19 +19,28 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
+documentation = "https://docs.rs/rapier-cloth"
+keywords = ["cloth", "physics", "simulation", "rapier", "xpbd"]
+categories = ["simulation", "game-development", "science::robotics"]
 include = ["/src/**", "/examples/**", "/benches/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE-MIT", "/docs/**", "/CHANGELOG.md", "/CONTRIBUTING.md"]
+
+[package.metadata.docs.rs]
+no-default-features = true
+features = ["f64", "implicit"]
 
 [features]
 default = ["f32"]
 f32 = ["dep:rapier-f32", "rapier-cloth-core/f32"]
 f64 = ["dep:rapier-f64", "rapier-cloth-core/f64"]
+implicit = ["rapier-cloth-core/implicit"]
 
 [dependencies]
-rapier-cloth-core = { version = "0.1.0", path = "crates/rapier-cloth-core", default-features = false }
+rapier-cloth-core = { version = "0.2.0", path = "crates/rapier-cloth-core", default-features = false }
 rapier-f32 = { package = "rapier3d", version = "0.34", optional = true }
 rapier-f64 = { package = "rapier3d-f64", version = "0.34", optional = true }
 
 [dev-dependencies]
+parry-reference = { package = "parry3d-f64", version = "0.29" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
@@ -48,3 +57,15 @@ harness = false
 [[bench]]
 name = "realtime"
 harness = false
+
+[[bench]]
+name = "folding"
+harness = false
+
+[[example]]
+name = "fold_towel_implicit"
+required-features = ["f64", "implicit"]
+
+[[example]]
+name = "robot_towel_implicit"
+required-features = ["f64", "implicit"]

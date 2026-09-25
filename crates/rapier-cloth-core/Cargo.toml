@@ -7,12 +7,23 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
+documentation = "https://docs.rs/rapier-cloth-core"
+keywords = ["cloth", "physics", "simulation", "xpbd", "deformable"]
+categories = ["simulation", "game-development", "science::robotics"]
 include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
+
+[package.metadata.docs.rs]
+no-default-features = true
+features = ["f64", "implicit"]
 
 [features]
 default = ["f32"]
 f32 = []
 f64 = []
+implicit = ["dep:faer", "dep:nalgebra", "dep:rayon"]
 
 [dependencies]
 glam = "0.33"
+faer = { version = "0.24.4", optional = true, default-features = false, features = ["std", "sparse-linalg"] }
+nalgebra = { version = "0.35", optional = true, default-features = false, features = ["std"] }
+rayon = { version = "1.10", optional = true, default-features = false }

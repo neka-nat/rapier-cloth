@@ -3,7 +3,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
 };
 
@@ -19,6 +19,10 @@ pub struct Cloth {
     pub(crate) inverse_masses: Vec<Real>,
     pub(crate) forces: Vec<Vec3>,
     pub(crate) pins: BTreeMap<u32, Vec3>,
+    pub(crate) contact_history: Vec<crate::contact::SurfaceContactState>,
+    pub(crate) contact_settings: Option<crate::collision::ClothContactSettings>,
+    #[cfg(feature = "implicit")]
+    pub(crate) implicit_settings: Option<crate::ImplicitSettings>,
 }
 
 impl Cloth {
@@ -49,13 +53,44 @@ impl Cloth {
             masses,
             forces: vec![Vec3::ZERO; n],
             pins: BTreeMap::new(),
+            contact_history: vec![],
+            contact_settings: None,
+            #[cfg(feature = "implicit")]
+            implicit_settings: None,
         })
     }
     pub fn mesh(&self) -> &ClothMesh {
         &self.mesh
     }
+    /// Share immutable rest geometry and topology without copying its arrays.
+    /// Current positions and contact history remain owned by this cloth.
+    pub fn shared_mesh(&self) -> Arc<ClothMesh> {
+        self.mesh.clone()
+    }
     pub fn material(&self) -> ClothMaterial {
         self.material
+    }
+    /// Select the experimental implicit shell solver. `None` selects XPBD.
+    /// Mass, damping and forces retain their existing meanings; shell moduli
+    /// replace scalar XPBD stretch/bend compliances. Settings are checkpointed
+    /// with the cloth, and changing the solver clears old contact history.
+    #[cfg(feature = "implicit")]
+    pub fn set_implicit_solver(
+        &mut self,
+        settings: Option<crate::ImplicitSettings>,
+    ) -> Result<(), ClothError> {
+        if let Some(settings) = settings {
+            settings.validate()?;
+        }
+        if self.implicit_settings != settings {
+            self.contact_history.clear();
+            self.implicit_settings = settings;
+        }
+        Ok(())
+    }
+    #[cfg(feature = "implicit")]
+    pub fn implicit_solver_settings(&self) -> Option<crate::ImplicitSettings> {
+        self.implicit_settings
     }
     pub fn positions(&self) -> &[Vec3] {
         &self.positions
@@ -71,6 +106,32 @@ impl Cloth {
     }
     pub fn pins(&self) -> &BTreeMap<u32, Vec3> {
         &self.pins
+    }
+    /// Active surface contacts retained by the last successful substep.
+    pub fn contact_history_len(&self) -> usize {
+        self.contact_history.len()
+    }
+    /// Discard material friction anchors after an external contact model or
+    /// filter change. Positions and velocities are preserved.
+    pub fn clear_contact_history(&mut self) {
+        self.contact_history.clear();
+    }
+    pub fn contact_settings(&self) -> Option<crate::collision::ClothContactSettings> {
+        self.contact_settings
+    }
+    /// Opt in to surface collision; changing settings invalidates contact history.
+    pub fn set_contact_settings(
+        &mut self,
+        settings: Option<crate::collision::ClothContactSettings>,
+    ) -> Result<(), ClothError> {
+        if let Some(settings) = settings {
+            settings.validate()?;
+        }
+        if self.contact_settings != settings {
+            self.contact_history.clear();
+            self.contact_settings = settings;
+        }
+        Ok(())
     }
     pub fn surface(&self) -> SurfaceView<'_> {
         SurfaceView {
@@ -91,12 +152,16 @@ impl Cloth {
         if !target.is_finite() {
             return Err(ClothError::InvalidParameter("pin position"));
         }
-        self.pins.insert(i, target);
+        if self.pins.insert(i, target).is_none() {
+            self.contact_history.clear();
+        }
         Ok(())
     }
     pub fn unpin(&mut self, i: u32) -> Result<(), ClothError> {
         self.check_particle(i)?;
-        self.pins.remove(&i);
+        if self.pins.remove(&i).is_some() {
+            self.contact_history.clear();
+        }
         Ok(())
     }
     pub fn set_velocity(&mut self, i: u32, v: Vec3) -> Result<(), ClothError> {
@@ -124,6 +189,7 @@ impl Cloth {
         self.positions.copy_from_slice(p);
         self.previous.copy_from_slice(p);
         self.velocities.fill(Vec3::ZERO);
+        self.contact_history.clear();
         Ok(())
     }
 }
@@ -153,6 +219,7 @@ struct Slot {
 pub struct ClothSet {
     identity: u64,
     slots: Vec<Slot>,
+    next_generation: Arc<AtomicU32>,
 }
 static NEXT_SET: AtomicU64 = AtomicU64::new(1);
 impl Default for ClothSet {
@@ -168,6 +235,7 @@ impl ClothSet {
         Self {
             identity,
             slots: Vec::new(),
+            next_generation: Arc::new(AtomicU32::new(0)),
         }
     }
     pub fn insert(&mut self, cloth: Cloth) -> ClothHandle {
@@ -183,6 +251,10 @@ impl ClothSet {
                 value: None,
             });
         }
+        self.slots[i].generation = self
+            .next_generation
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
+            .expect("cloth generation space exhausted");
         self.slots[i].value = Some(cloth);
         ClothHandle {
             set: self.identity,

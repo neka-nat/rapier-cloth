@@ -2,7 +2,8 @@
 
 CPU cloth simulation for Rust applications using Rapier 3D. Add deformable triangle
 meshes to an existing physics world, with contacts, pinned vertices and attachments
-to rigid bodies. The solver uses extended position-based dynamics (XPBD).
+to rigid bodies. The default solver uses extended position-based dynamics (XPBD);
+an optional [implicit shell solver](docs/implicit.md) supports folding experiments.
 
 `rapier-cloth-core` provides the engine-independent solver; `rapier-cloth` adds
 Rapier collision queries, attachments and time synchronization.
@@ -18,18 +19,24 @@ npm --prefix demos/viewer run live
 
 Open **http://127.0.0.1:5173/live.html** to drape cloth over a sphere, adjust wind,
 move the obstacle and release pinned vertices. The launcher builds a local Rust
-CPU server and starts the browser UI. See the [live demo guide](docs/live-demo.md)
-for controls and requirements.
+CPU server and starts the browser UI. For implicit towel folding and Rapier
+end-effector pose commands, run `npm --prefix demos/viewer run live:implicit` and
+open `/live.html?scene=implicit_towel&paused=1`. Strict stopping is the default;
+the scene also offers an explicit validated-approximation policy applied on Reset. Use 5 mm moves, 5 degree rotations
+and independent releases. See [robot control](docs/robot-control.md) and the
+[live demo guide](docs/live-demo.md). General folding and wall-clock real-time
+performance remain under development.
 
 ## Use from Rust
 
-This is a pre-release project. Use a checkout as a path dependency:
-
 ```toml
 [dependencies]
-rapier-cloth = { path = "../rapier-cloth" }
+rapier-cloth = "0.2"
 ```
 
+A repository checkout also works as a path dependency
+(`rapier-cloth = { path = "../rapier-cloth" }`). The engine-independent solver is
+available on its own as [`rapier-cloth-core`](https://crates.io/crates/rapier-cloth-core).
 Rust 1.90 or newer is required. The default is `f32`, compatible with `rapier3d 0.34`.
 For `rapier3d-f64 0.34`, set `default-features = false, features = ["f64"]`.
 Select exactly one precision; do not use `--all-features`.
@@ -74,15 +81,24 @@ bending constraints, pins and attachments with body-local anchors. Collisions
 support spheres, boxes, capsules and fixed half-spaces. Kinematic obstacle motion
 is bounded per substep.
 
-Coupling is one-way. Self-collision, cloth-to-cloth collision, reactions on dynamic
-rigid bodies, arbitrary collision meshes and edge/face CCD are not implemented.
-Use explicit attachments for grasping; static friction alone is not a grasp model.
+Coupling is one-way. Experimental [self-collision](docs/integration.md#discrete-self-collision)
+and [whole-triangle rigid contact](docs/integration.md#rigid-surface-contact) are
+available as opt-in settings. Cloth-to-cloth collision, reactions on dynamic rigid
+bodies and arbitrary collision meshes are not implemented. Experimental
+[continuous rigid-surface checks](docs/integration.md#continuous-rigid-surface-collision)
+cover bounded primitive motion and solver corrections. The optional
+[implicit towel example](docs/implicit.md#run-the-folding-example) tests a separate
+fold, release and settle trajectory at 0.04 or 0.1 s per physical step. General
+folding and its real-time CPU budget remain under development.
+Use [surface queries and grasp attachments](docs/grasping.md) to select exposed
+cloth layers and command a point or patch; static friction alone is not a grasp model.
 Read the [compatibility and limitations](docs/compatibility.md) before integrating.
 
 ## Documentation
 
 - [Documentation index](docs/README.md)
 - [Runnable examples and recording playback](docs/examples.md)
+- [Experimental implicit shell solver](docs/implicit.md)
 - [Performance measurement](docs/performance.md)
 - [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 

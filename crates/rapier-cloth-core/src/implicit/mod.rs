@@ -1,0 +1,1378 @@
+//! Experimental global implicit shell solver. Enable with the `implicit` feature.
+//! The f64 path supports hard particle grasps and finite-thickness surface contact.
+//! Neo-Hookean membrane, discrete shell bending, finite-thickness barrier and
+//! lagged regularized Coulomb friction share one position objective.
+#![allow(clippy::needless_range_loop)]
+// Element tensors use explicit component indices to keep their contractions
+// visible; the sparse global system uses checked indices from validated meshes.
+mod contact_elements;
+mod elements;
+mod membrane;
+mod primitive;
+mod settings;
+mod sparse;
+pub(crate) mod workers;
+use crate::collision::self_collision::SelfCollision;
+use crate::constraints::bend::{angle_and_gradients, angle_difference};
+use crate::{
+    Cloth, ClothError, ContactMotion, ContactSource, ContactStage, Real, SolverSettings,
+    StepReport, SurfaceContact, Target, Vec3,
+};
+use nalgebra::SMatrix;
+pub use settings::{
+    ImplicitCapPolicy, ImplicitExecution, ImplicitOutcome, ImplicitSeed, ImplicitSettings,
+    ImplicitTermination, ShellMaterial,
+};
+use sparse::{Block, SparseSystem};
+
+#[derive(Clone)]
+struct Triangle {
+    ids: [usize; 3],
+    b: [[Real; 2]; 3],
+    volume: Real,
+}
+#[derive(Clone)]
+struct Hinge {
+    ids: [usize; 4],
+    rest: Real,
+    stiffness: Real,
+}
+#[derive(Clone)]
+struct Friction {
+    contact: SurfaceContact,
+    reference: Vec3,
+    load: Real,
+}
+// Stable evaluation of the existing potential; forces and curvature are unchanged.
+#[derive(Default)]
+struct EnergySum {
+    sum: Real,
+    correction: Real,
+}
+impl EnergySum {
+    fn add(&mut self, value: Real) {
+        let next = self.sum + value;
+        self.correction += if self.sum.abs() >= value.abs() {
+            (self.sum - next) + value
+        } else {
+            (value - next) + self.sum
+        };
+        self.sum = next;
+    }
+    fn total(&self) -> Real {
+        self.sum + self.correction
+    }
+}
+
+fn membrane_energy(a: Real, b: Real, c: Real, mu: Real, lambda: Real, logj: Real) -> Real {
+    let u = a - 1.0;
+    let v = c - 1.0;
+    let product = u * v - b * b;
+    let t = (u + v) + product; // det(F^T F) - 1, without subtracting 1 afterwards.
+    if t.abs() > 0.125 || !t.is_finite() {
+        return 0.5 * mu * (a + c - 2.0) - mu * logj + 0.5 * lambda * logj * logj;
+    }
+    let log_det = t.ln_1p();
+    // t - log(1+t) = t^2 (1/2 - t/3 + t^2/4 - ...).
+    // At |t|<=1/8, truncation after degree 20 is below 6e-21.
+    let mut polynomial = 0.0;
+    for k in (2..=20).rev() {
+        polynomial = (if k % 2 == 0 { 1.0 } else { -1.0 }) / k as Real + t * polynomial;
+    }
+    let remainder = t * t * polynomial;
+    0.5 * mu * (-product + remainder) + 0.125 * lambda * log_det * log_det
+}
+
+#[cfg(all(test, feature = "f64"))]
+mod precision_tests {
+    use super::*;
+    include!("energy-fixtures.rs");
+    #[test]
+    fn objective_sum_preserves_small_terms_and_signed_cancellation() {
+        let mut e = EnergySum::default();
+        for value in [1e16, 1.0, -1e16, 2.0] {
+            e.add(value);
+        }
+        assert_eq!(e.total(), 3.0);
+        let mut e = EnergySum::default();
+        e.add(0.02);
+        for _ in 0..10000 {
+            e.add(1e-20);
+        }
+        assert_eq!(e.total(), 0.02 + 1e-16);
+    }
+    #[test]
+    fn membrane_energy_matches_independent_seventy_digit_fixtures() {
+        for &(f, expected) in PRECISION_FIXTURES {
+            let f = f.map(Vec3::from_array);
+            let actual = membrane(f, 2.5, 1.7, false).unwrap().0;
+            assert!(
+                (actual - expected).abs() <= 1e-25 + 1e-7 * expected.abs(),
+                "F={f:?}: {actual:e} vs {expected:e}"
+            );
+        }
+    }
+    #[test]
+    fn energy_evaluation_join_keeps_energy_and_derivatives_consistent() {
+        for sign in [-1.0, 1.0] {
+            let stretch = (1.0 + sign * 0.125_f64).sqrt();
+            let f = [Vec3::new(stretch, 0.0, 0.0), Vec3::Y];
+            let (_, g, _) = membrane(f, 2.5, 1.7, true).unwrap();
+            let eps = 1e-7;
+            let mut lo = f;
+            let mut hi = f;
+            lo[0].x -= eps;
+            hi[0].x += eps;
+            let a = membrane(lo, 2.5, 1.7, false).unwrap().0;
+            let b = membrane(hi, 2.5, 1.7, false).unwrap().0;
+            assert!(((b - a) / (2.0 * eps) - g[0].x).abs() < 1e-8);
+        }
+    }
+}
+
+#[derive(Default)]
+struct Assembly {
+    energy: Real,
+    gradient: Vec<Real>,
+    /// Lower 3×3 blocks in assembly order; empty for energy-only evaluations.
+    blocks: Vec<Block>,
+    /// Reused per-element and per-contact results of the parallel evaluators.
+    elements: elements::ElementBuffers,
+    terms: Vec<contact_elements::Slot>,
+    friction_terms: Vec<contact_elements::FrictionSlot>,
+    friction_offsets: Vec<usize>,
+}
+
+fn failure(phase: &'static str, iterations: usize) -> ClothError {
+    ClothError::ImplicitSolverFailed { phase, iterations }
+}
+
+/// Returns barrier energy, its gap derivative and second derivative.
+fn barrier(gap: Real, band: Real, stiffness: Real) -> Option<[Real; 3]> {
+    if gap <= 0.0 || !gap.is_finite() {
+        return None;
+    }
+    if gap >= band {
+        return Some([0.0; 3]);
+    }
+    let d = gap - band;
+    let l = (gap / band).ln();
+    Some([
+        -stiffness * d * d * l,
+        -stiffness * (2.0 * d * l + d * d / gap),
+        -stiffness * (2.0 * l + 4.0 * d / gap - d * d / (gap * gap)),
+    ])
+}
+
+/// Analytic Neo-Hookean membrane derivatives in the six components of F.
+fn membrane(
+    f: [Vec3; 2],
+    mu: Real,
+    lambda: Real,
+    hessian: bool,
+) -> Option<(Real, [Vec3; 2], SMatrix<Real, 6, 6>)> {
+    let a = f[0].length_squared();
+    let b = f[0].dot(f[1]);
+    let c = f[1].length_squared();
+    let det = a * c - b * b;
+    if det <= 1e-16 || !det.is_finite() {
+        return None;
+    }
+    let inv = [[c / det, -b / det], [-b / det, a / det]];
+    let logj = 0.5 * det.ln();
+    let q = lambda * logj - mu;
+    let fc = [
+        f[0] * inv[0][0] + f[1] * inv[1][0],
+        f[0] * inv[0][1] + f[1] * inv[1][1],
+    ];
+    let p = [f[0] * mu + fc[0] * q, f[1] * mu + fc[1] * q];
+    let e = membrane_energy(a, b, c, mu, lambda, logj);
+    let mut h = SMatrix::<Real, 6, 6>::zeros();
+    if hessian {
+        for j in 0..6 {
+            let mut df = [Vec3::ZERO; 2];
+            df[j / 3][j % 3] = 1.0;
+            let dc = [
+                [2.0 * f[0].dot(df[0]), f[0].dot(df[1]) + f[1].dot(df[0])],
+                [f[0].dot(df[1]) + f[1].dot(df[0]), 2.0 * f[1].dot(df[1])],
+            ];
+            let dj = fc[0].dot(df[0]) + fc[1].dot(df[1]);
+            let mut di = [[0.0; 2]; 2];
+            for k in 0..2 {
+                for l in 0..2 {
+                    for u in 0..2 {
+                        for v in 0..2 {
+                            di[k][l] -= inv[k][u] * dc[u][v] * inv[v][l];
+                        }
+                    }
+                }
+            }
+            for k in 0..2 {
+                let dp = df[k] * mu
+                    + fc[k] * (lambda * dj)
+                    + (df[0] * inv[0][k] + df[1] * inv[1][k] + f[0] * di[0][k] + f[1] * di[1][k])
+                        * q;
+                for axis in 0..3 {
+                    h[(k * 3 + axis, j)] = dp[axis];
+                }
+            }
+        }
+    }
+    Some((e, p, h))
+}
+
+fn push_gradient(dofs: &[Option<usize>], gradient: &mut [Real], i: usize, g: Vec3) {
+    if let Some(d) = dofs[i] {
+        for c in 0..3 {
+            gradient[d + c] += g[c];
+        }
+    }
+}
+
+/// Appends a free lower-triangular block; other blocks are not stored.
+fn push_block(
+    dofs: &[Option<usize>],
+    hessian: bool,
+    blocks: &mut Vec<Block>,
+    i: usize,
+    j: usize,
+    value: [[Real; 3]; 3],
+) {
+    if hessian
+        && let (Some(di), Some(dj)) = (dofs[i], dofs[j])
+        && di >= dj
+    {
+        blocks.push(Block {
+            row: di / 3,
+            col: dj / 3,
+            value,
+        });
+    }
+}
+
+struct Model<'a> {
+    cloth: &'a Cloth,
+    triangles: Vec<Triangle>,
+    hinges: Vec<Hinge>,
+    dofs: Vec<Option<usize>>,
+    count: usize,
+    prediction: Vec<Vec3>,
+    mu: Real,
+    lambda: Real,
+    h: Real,
+    band: Real,
+    barrier_stiffness: Real,
+    implicit: ImplicitSettings,
+    /// The step's lanes; created on the first parallel phase.
+    workers: std::sync::Arc<workers::Workers>,
+}
+impl<'a> Model<'a> {
+    #[cfg(test)]
+    fn set_execution(&mut self, execution: ImplicitExecution) {
+        self.implicit.execution = execution;
+        self.workers = std::sync::Arc::new(workers::Workers::new(
+            if execution == ImplicitExecution::Parallel4 {
+                4
+            } else {
+                1
+            },
+        ));
+    }
+    fn new(
+        cloth: &'a Cloth,
+        h: Real,
+        gravity: Vec3,
+        targets: &[Target],
+        implicit: ImplicitSettings,
+    ) -> Result<Self, ClothError> {
+        let config = cloth.contact_settings.ok_or(ClothError::InvalidParameter(
+            "implicit solver requires surface settings",
+        ))?;
+        let young = implicit.material.youngs_modulus;
+        let nu = implicit.material.poisson_ratio;
+        let t = implicit.material.thickness;
+        let mu = young / (2.0 * (1.0 + nu));
+        let lambda = young * nu / (1.0 - nu * nu);
+        let mut count = 0;
+        let mut fixed = vec![false; cloth.positions.len()];
+        for &i in cloth.pins.keys() {
+            fixed[i as usize] = true;
+        }
+        for target in targets {
+            if target.compliance != 0.0 {
+                return Err(ClothError::InvalidParameter(
+                    "implicit solver currently supports hard particle targets only",
+                ));
+            }
+            if target.particle as usize >= fixed.len() || !target.position.is_finite() {
+                return Err(ClothError::InvalidParameter("implicit target"));
+            }
+            if fixed[target.particle as usize] {
+                return Err(ClothError::ConflictingTarget(target.particle));
+            }
+            fixed[target.particle as usize] = true;
+        }
+        let dofs = fixed
+            .iter()
+            .map(|&fixed| {
+                if fixed {
+                    None
+                } else {
+                    let i = count;
+                    count += 3;
+                    Some(i)
+                }
+            })
+            .collect();
+        let rest = cloth.mesh.rest_positions();
+        let triangles = cloth
+            .mesh
+            .triangles()
+            .iter()
+            .map(|&ids| {
+                let ids = ids.map(|i| i as usize);
+                let u = rest[ids[1]] - rest[ids[0]];
+                let v = rest[ids[2]] - rest[ids[0]];
+                let len = u.length();
+                let cross = u.cross(v).length();
+                let s = u.dot(v) / len;
+                let height = cross / len;
+                let b1 = [1.0 / len, -s / (len * height)];
+                let b2 = [0.0, 1.0 / height];
+                Triangle {
+                    ids,
+                    b: [[-b1[0] - b2[0], -b1[1] - b2[1]], b1, b2],
+                    volume: 0.5 * cross * t,
+                }
+            })
+            .collect();
+        let rigidity = young * t.powi(3) / (12.0 * (1.0 - nu * nu));
+        let hinges = cloth
+            .mesh
+            .hinges()
+            .iter()
+            .map(|hinge| {
+                let ids = hinge.vertices.map(|i| i as usize);
+                let p = ids.map(|i| rest[i]);
+                let edge = p[1] - p[0];
+                let area2 = edge.cross(p[2] - p[0]).length() + edge.cross(p[3] - p[0]).length();
+                Hinge {
+                    ids,
+                    rest: hinge.rest_angle,
+                    stiffness: rigidity * 6.0 * edge.length_squared() / area2,
+                }
+            })
+            .collect();
+        let damp = (-cloth.material.damping * h).exp();
+        let prediction = cloth
+            .positions
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| {
+                p + (cloth.velocities[i]
+                    + (gravity + cloth.forces[i] * cloth.inverse_masses[i]) * h)
+                    * (damp * h)
+            })
+            .collect();
+        Ok(Self {
+            cloth,
+            triangles,
+            hinges,
+            dofs,
+            count,
+            prediction,
+            mu,
+            lambda,
+            h,
+            band: config.activation_margin,
+            barrier_stiffness: implicit.barrier_stiffness,
+            implicit,
+            workers: std::sync::Arc::new(workers::Workers::new(
+                if implicit.execution == ImplicitExecution::Parallel4 {
+                    4
+                } else {
+                    1
+                },
+            )),
+        })
+    }
+    fn assemble(
+        &self,
+        x: &[Vec3],
+        contacts: &[SurfaceContact],
+        friction: &[Friction],
+        hessian: bool,
+    ) -> Result<Assembly, ClothError> {
+        let mut a = Assembly::default();
+        self.assemble_into(x, contacts, friction, hessian, &mut a)?;
+        Ok(a)
+    }
+    /// `assemble` into reused buffers; `a` is fully overwritten on success.
+    fn assemble_into(
+        &self,
+        x: &[Vec3],
+        contacts: &[SurfaceContact],
+        friction: &[Friction],
+        hessian: bool,
+        a: &mut Assembly,
+    ) -> Result<(), ClothError> {
+        let mut energy = EnergySum::default();
+        a.energy = 0.0;
+        a.gradient.clear();
+        a.gradient.resize(self.count, 0.0);
+        a.blocks.clear();
+        let dofs = &self.dofs;
+        // Only free, lower-triangular blocks reach the sparse matrix. Check
+        // before constructing their tensors, including on energy-only trials.
+        let active_block =
+            |i: usize, j: usize| hessian && dofs[i].zip(dofs[j]).is_some_and(|(di, dj)| di >= dj);
+        for i in 0..x.len() {
+            let w = self.cloth.masses[i] / (self.h * self.h);
+            let d = x[i] - self.prediction[i];
+            energy.add(0.5 * w * d.length_squared());
+            push_gradient(dofs, &mut a.gradient, i, d * w);
+            push_block(
+                dofs,
+                hessian,
+                &mut a.blocks,
+                i,
+                i,
+                [[w, 0.0, 0.0], [0.0, w, 0.0], [0.0, 0.0, w]],
+            );
+        }
+        if self.implicit.execution == ImplicitExecution::Parallel4 && self.triangles.len() >= 1024 {
+            let gradient = &mut a.gradient;
+            elements::assemble(
+                self,
+                x,
+                hessian,
+                &mut a.elements,
+                &mut energy,
+                |i: usize, g: Vec3| push_gradient(dofs, gradient, i, g),
+                &mut a.blocks,
+            )?;
+        } else {
+            for tri in &self.triangles {
+                let mut f = [Vec3::ZERO; 2];
+                for k in 0..3 {
+                    for c in 0..2 {
+                        f[c] += x[tri.ids[k]] * tri.b[k][c];
+                    }
+                }
+                let (e, g, _) = membrane(f, self.mu, self.lambda, false)
+                    .ok_or(ClothError::DegenerateConstraint)?;
+                energy.add(e * tri.volume);
+                for k in 0..3 {
+                    push_gradient(
+                        dofs,
+                        &mut a.gradient,
+                        tri.ids[k],
+                        (g[0] * tri.b[k][0] + g[1] * tri.b[k][1]) * tri.volume,
+                    );
+                }
+                if hessian {
+                    let hp = membrane::projected_hessian(f, self.mu, self.lambda)
+                        .ok_or(ClothError::DegenerateConstraint)?;
+                    for i in 0..3 {
+                        for j in 0..3 {
+                            if !active_block(tri.ids[i], tri.ids[j]) {
+                                continue;
+                            }
+                            let mut block = [[0.0; 3]; 3];
+                            for u in 0..3 {
+                                for v in 0..3 {
+                                    for r in 0..2 {
+                                        for s in 0..2 {
+                                            block[u][v] += tri.volume
+                                                * tri.b[i][r]
+                                                * hp[(r * 3 + u, s * 3 + v)]
+                                                * tri.b[j][s];
+                                        }
+                                    }
+                                }
+                            }
+                            push_block(dofs, hessian, &mut a.blocks, tri.ids[i], tri.ids[j], block);
+                        }
+                    }
+                }
+            }
+            for hinge in &self.hinges {
+                let (angle, g) = angle_and_gradients(hinge.ids.map(|i| x[i]))
+                    .ok_or(ClothError::DegenerateConstraint)?;
+                let d = angle_difference(angle, hinge.rest);
+                let k = hinge.stiffness;
+                energy.add(0.5 * k * d * d);
+                for i in 0..4 {
+                    push_gradient(dofs, &mut a.gradient, hinge.ids[i], g[i] * (k * d));
+                    for j in 0..4 {
+                        if !active_block(hinge.ids[i], hinge.ids[j]) {
+                            continue;
+                        }
+                        push_block(
+                            dofs,
+                            hessian,
+                            &mut a.blocks,
+                            hinge.ids[i],
+                            hinge.ids[j],
+                            std::array::from_fn(|u| std::array::from_fn(|v| k * g[i][u] * g[j][v])),
+                        );
+                    }
+                }
+            }
+        }
+        let parallel = contact_elements::evaluate(self, x, contacts, &mut a.terms)?;
+        let mut parent_terms = a.terms.iter_mut();
+        for c in contacts {
+            if primitive::is_parent(c) {
+                let term = if parallel {
+                    parent_terms
+                        .next()
+                        .and_then(Option::take)
+                        .expect("missing parent contact")?
+                } else {
+                    primitive::gauss_newton(
+                        c,
+                        x,
+                        self.cloth.mesh.rest_positions(),
+                        self.band,
+                        self.barrier_stiffness,
+                    )?
+                };
+                energy.add(term.e);
+                let (g, n) = (term.g, term.normal);
+                for i in 0..4 {
+                    push_gradient(
+                        dofs,
+                        &mut a.gradient,
+                        c.particles[i] as usize,
+                        Vec3::new(g[3 * i], g[3 * i + 1], g[3 * i + 2]),
+                    );
+                    for j in 0..4 {
+                        if active_block(c.particles[i] as usize, c.particles[j] as usize) {
+                            push_block(
+                                dofs,
+                                hessian,
+                                &mut a.blocks,
+                                c.particles[i] as usize,
+                                c.particles[j] as usize,
+                                std::array::from_fn(|r| {
+                                    std::array::from_fn(|s| {
+                                        term.weight * n[3 * i + r] * n[3 * j + s]
+                                    })
+                                }),
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+            let b = barrier(c.gap(x), self.band, self.barrier_stiffness)
+                .ok_or(ClothError::UnresolvedSurfaceContact)?;
+            energy.add(b[0]);
+            for i in 0..4 {
+                if c.weights[i] != 0.0 {
+                    push_gradient(
+                        dofs,
+                        &mut a.gradient,
+                        c.particles[i] as usize,
+                        c.normal * (b[1] * c.weights[i]),
+                    );
+                    for j in 0..4 {
+                        if c.weights[j] != 0.0
+                            && active_block(c.particles[i] as usize, c.particles[j] as usize)
+                        {
+                            push_block(
+                                dofs,
+                                hessian,
+                                &mut a.blocks,
+                                c.particles[i] as usize,
+                                c.particles[j] as usize,
+                                std::array::from_fn(|u| {
+                                    std::array::from_fn(|v| {
+                                        b[2] * c.normal[u]
+                                            * c.normal[v]
+                                            * c.weights[i]
+                                            * c.weights[j]
+                                    })
+                                }),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if contact_elements::evaluate_friction(
+            self,
+            x,
+            friction,
+            hessian,
+            &mut a.friction_terms,
+            &mut a.friction_offsets,
+            &mut a.blocks,
+        )? {
+            for (f, term) in friction.iter().zip(&mut a.friction_terms) {
+                let term = term.take().expect("unfilled friction contact");
+                energy.add(term.e);
+                for i in 0..4 {
+                    if f.contact.weights[i] != 0.0 {
+                        push_gradient(
+                            dofs,
+                            &mut a.gradient,
+                            f.contact.particles[i] as usize,
+                            term.g[i],
+                        );
+                    }
+                }
+            }
+        } else {
+            for f in friction {
+                let c = f.contact;
+                let n = c.normal;
+                let delta = c.relative(x) - f.reference;
+                let u = delta - n * delta.dot(n);
+                let eps = self.implicit.friction_velocity * self.h;
+                let len = (u.length_squared() + eps * eps).sqrt();
+                let load = c.kinetic_friction * f.load;
+                energy.add(load * (len - eps));
+                for i in 0..4 {
+                    if c.weights[i] != 0.0 {
+                        push_gradient(
+                            dofs,
+                            &mut a.gradient,
+                            c.particles[i] as usize,
+                            u * (load / len * c.weights[i]),
+                        );
+                        for j in 0..4 {
+                            if c.weights[j] != 0.0
+                                && active_block(c.particles[i] as usize, c.particles[j] as usize)
+                            {
+                                push_block(
+                                    dofs,
+                                    hessian,
+                                    &mut a.blocks,
+                                    c.particles[i] as usize,
+                                    c.particles[j] as usize,
+                                    std::array::from_fn(|r| {
+                                        std::array::from_fn(|s| {
+                                            load * c.weights[i]
+                                                * c.weights[j]
+                                                * ((if r == s { 1.0 } else { 0.0 })
+                                                    - n[r] * n[s]
+                                                    - u[r] * u[s] / (len * len))
+                                                / len
+                                        })
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        a.energy = energy.total();
+        if !a.energy.is_finite() || a.gradient.iter().any(|g| !g.is_finite()) {
+            return Err(ClothError::NonFiniteState);
+        }
+        Ok(())
+    }
+}
+
+/// `swept`: `x` lies on the motion of the latest collecting self sweep, whose
+/// recorded pairs replace the hierarchy query.
+#[allow(clippy::too_many_arguments)]
+fn query(
+    source: &mut impl ContactSource,
+    engine: &mut SelfCollision,
+    old: &[Vec3],
+    x: &[Vec3],
+    stage: ContactStage,
+    cloth: &Cloth,
+    limit: usize,
+    swept: bool,
+) -> Result<Vec<SurfaceContact>, ClothError> {
+    let mut particles = Vec::new();
+    source.contacts(old, x, cloth.material.contact_radius, stage, &mut particles)?;
+    if !particles.is_empty() {
+        return Err(ClothError::InvalidParameter(
+            "implicit solver requires surface contact callbacks",
+        ));
+    }
+    let mut out = Vec::new();
+    source.surface_contacts_with_work(old, x, stage, &mut out, &mut engine.work)?;
+    if cloth.contact_settings.unwrap().self_collision
+        && !(swept && engine.implicit_swept_primitives(x, &mut out)?)
+    {
+        engine.implicit_primitives(x, &mut out)?;
+    }
+    out.sort_by_key(|c| c.key);
+    out.dedup_by_key(|c| c.key);
+    if out.len() > limit {
+        return Err(ClothError::ContactBudgetExceeded { limit });
+    }
+    engine.work.charge(
+        crate::CollisionBudgetKind::RetainedContacts,
+        out.len(),
+        cloth.contact_settings.unwrap().limits,
+    )?;
+    for c in &out {
+        c.validate(x.len())?;
+    }
+    Ok(out)
+}
+
+fn external_fraction(
+    source: &mut impl ContactSource,
+    motion: ContactMotion<'_>,
+    work: &mut crate::CollisionWork,
+) -> Result<Real, ClothError> {
+    let fraction = source.motion_fraction(motion, work)?;
+    if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+        return Err(ClothError::InvalidSurfaceContact("invalid motion fraction"));
+    }
+    Ok(fraction)
+}
+
+/// Certifies the motion from the accepted `positions` to `end` with both
+/// continuous checks; the self sweep records its pairs for a query at `end`.
+fn certify(
+    engine: &mut SelfCollision,
+    source: &mut impl ContactSource,
+    config: crate::ClothContactSettings,
+    positions: &[Vec3],
+    end: &[Vec3],
+) -> Result<Real, ClothError> {
+    let mut fraction: Real = 1.0;
+    if config.self_collision {
+        fraction = fraction.min(engine.implicit_motion_fraction(positions, end, true)?);
+    }
+    if source.continuous_motion() {
+        fraction = fraction.min(external_fraction(
+            source,
+            ContactMotion {
+                start: positions,
+                end,
+                stage: ContactStage::Prediction,
+            },
+            &mut engine.work,
+        )?);
+    }
+    Ok(fraction)
+}
+
+/// Derived solver data kept between physical steps. It never changes a
+/// result: only work that a new step would repeat identically is reused.
+#[derive(Default)]
+pub(crate) struct Cache {
+    sparse: SparseSystem,
+}
+
+impl std::fmt::Debug for Cache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cache").finish_non_exhaustive()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step(
+    cloth: &mut Cloth,
+    h: Real,
+    gravity: Vec3,
+    settings: &SolverSettings,
+    targets: &[Target],
+    source: &mut impl ContactSource,
+    implicit: ImplicitSettings,
+    cache: &mut Cache,
+) -> Result<StepReport, ClothError> {
+    settings.validate(h)?;
+    implicit.validate()?;
+    if !gravity.is_finite() {
+        return Err(ClothError::InvalidParameter("gravity"));
+    }
+    let contact = cloth.contact_settings.ok_or(ClothError::InvalidParameter(
+        "implicit solver requires surface settings",
+    ))?;
+    contact.validate()?;
+    if contact.activation_margin <= 0.0
+        || (contact.self_collision && !contact.continuous_self_collision)
+        || (contact.rigid_surface_collision && !source.continuous_motion())
+    {
+        return Err(ClothError::InvalidParameter(
+            "implicit solver requires a positive barrier width and continuous surface contacts",
+        ));
+    }
+    let model = Model::new(cloth, h, gravity, targets, implicit)?;
+    let config = cloth.contact_settings.unwrap();
+    let mut engine = SelfCollision::new(cloth.mesh.clone(), config);
+    engine.begin(cloth.mesh.clone(), config);
+    engine.set_workers(std::sync::Arc::clone(&model.workers));
+    let mut x = cloth.positions.clone();
+    for (&i, &p) in &cloth.pins {
+        x[i as usize] = p;
+    }
+    for t in targets {
+        x[t.particle as usize] = t.position;
+    }
+    let initial = query(
+        source,
+        &mut engine,
+        &cloth.positions,
+        &cloth.positions,
+        ContactStage::Stabilization,
+        cloth,
+        settings.max_contacts,
+        false,
+    )?;
+    let mut certified = false;
+    if implicit.seed == ImplicitSeed::Velocity && model.count > 0 {
+        // Extrapolate the free vertices, shortening the extrapolation until
+        // the continuous checks pass and every contact keeps clearance.
+        let mut scale: Real = 1.0;
+        for attempt in 0..4 {
+            let trial: Vec<Vec3> = x
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| match model.dofs[i] {
+                    Some(_) => p + cloth.velocities[i] * (h * scale),
+                    None => p,
+                })
+                .collect();
+            let fraction = certify(&mut engine, source, config, &cloth.positions, &trial)?;
+            if fraction >= 1.0 {
+                let contacts = query(
+                    source,
+                    &mut engine,
+                    &cloth.positions,
+                    &trial,
+                    ContactStage::Iteration,
+                    cloth,
+                    settings.max_contacts,
+                    true,
+                )?;
+                if contacts.iter().all(|c| c.gap(&trial) > 0.0) {
+                    x = trial;
+                    certified = true;
+                    break;
+                }
+                scale *= 0.5;
+            } else {
+                scale *= 0.9 * fraction;
+            }
+            if attempt == 3 || scale * h * cloth.mesh.area().sqrt() < 1e-12 {
+                break;
+            }
+        }
+    }
+    // The pins' motion ends at `x`, so this sweep's pairs serve the first query.
+    if !certified && certify(&mut engine, source, config, &cloth.positions, &x)? < 1.0 {
+        return Err(failure("grasp initialization sweep", 0));
+    }
+    let mut friction = Vec::new();
+    for contact in initial {
+        let gap = contact.gap(&cloth.positions);
+        let mut b = barrier(gap, model.band, model.barrier_stiffness)
+            .ok_or_else(|| failure("initial contact clearance", 0))?;
+        if primitive::is_parent(&contact) {
+            let weight =
+                primitive::normal_weight(&contact, &cloth.positions, cloth.mesh.rest_positions());
+            b[1] *= weight;
+        }
+        if b[1] < 0.0 {
+            let previous = contact.relative(&cloth.positions);
+            let reference = if contact
+                .key
+                .features
+                .iter()
+                .any(|feature| matches!(feature, crate::SurfaceFeature::External { .. }))
+            {
+                // `relative` is the weighted vertex sum (without the contact
+                // offset), so an external stencil supplies a world-space point.
+                source.transport_surface_anchor(&contact, previous, h)?
+            } else {
+                // Self-contact anchors are relative cloth coordinates; the
+                // external source owns only rigid-surface transport.
+                previous
+            };
+            if !reference.is_finite() {
+                return Err(ClothError::InvalidSurfaceContact(
+                    "non-finite friction anchor",
+                ));
+            }
+            friction.push(Friction {
+                contact,
+                reference,
+                load: -b[1],
+            });
+        }
+    }
+    let mut contacts = query(
+        source,
+        &mut engine,
+        &cloth.positions,
+        &x,
+        ContactStage::Iteration,
+        cloth,
+        settings.max_contacts,
+        true,
+    )?;
+    let mut report = StepReport::default();
+    let mut converged = model.count == 0;
+    let mut accepted_updates = 0;
+    if model.count == 0 {
+        model.assemble(&x, &contacts, &friction, false)?;
+    }
+    // Use the author solver's RMS Newton-displacement / h criterion over a
+    // configurable window (default three, as in the author solver).
+    let window = implicit.convergence_window;
+    let mut residual_window = std::collections::VecDeque::new();
+    let sparse = &mut cache.sparse;
+    sparse.begin_step(std::sync::Arc::clone(&model.workers));
+    let mut assembled = Assembly::default();
+    let mut trial_eval = Assembly::default();
+    for iteration in 0..if model.count == 0 {
+        0
+    } else {
+        implicit.max_iterations
+    } {
+        model.assemble_into(&x, &contacts, &friction, true, &mut assembled)?;
+        sparse.load(model.count, &assembled.blocks, iteration)?;
+        let mut solution: Vec<Real> = assembled.gradient.iter().map(|g| -g).collect();
+        sparse.solve(&mut solution, iteration)?;
+        let direction: Vec<Vec3> = model
+            .dofs
+            .iter()
+            .map(|i| {
+                i.map_or(Vec3::ZERO, |d| {
+                    Vec3::new(solution[d], solution[d + 1], solution[d + 2])
+                })
+            })
+            .collect();
+        let slope: Real = assembled
+            .gradient
+            .iter()
+            .zip(&solution)
+            .map(|(g, d)| g * d)
+            .sum();
+        report.iterations = iteration + 1;
+        let newton_rms = (direction.iter().map(|v| v.length_squared()).sum::<Real>()
+            / (model.count / 3) as Real)
+            .sqrt()
+            / h;
+        residual_window.push_back(newton_rms);
+        if residual_window.len() > window {
+            residual_window.pop_front();
+        }
+        let roundoff_motion = direction
+            .iter()
+            .all(|d| d.length() <= Real::EPSILON * 128.0 * cloth.mesh.area().sqrt());
+        // A step whose first direction is already small starts at (or was
+        // seeded at) a consistent state; later single small directions can be
+        // the low point of an oscillation.
+        if newton_rms == 0.0
+            || roundoff_motion
+            || (iteration == 0 && newton_rms <= implicit.velocity_tolerance)
+            || (residual_window.len() == window
+                && residual_window
+                    .iter()
+                    .all(|&r| r <= implicit.velocity_tolerance))
+        {
+            converged = true;
+            break;
+        }
+        if slope >= 0.0 || !slope.is_finite() {
+            return Err(failure("non-descent direction", iteration));
+        }
+        let full: Vec<_> = x.iter().zip(&direction).map(|(&p, &d)| p + d).collect();
+        let mut alpha = if config.self_collision {
+            // Record pairs in range of this motion for the line-search queries.
+            engine.implicit_motion_fraction(&x, &full, true)?
+        } else {
+            1.0
+        };
+        if source.continuous_motion() {
+            let rigid_alpha = external_fraction(
+                source,
+                ContactMotion {
+                    start: &x,
+                    end: &full,
+                    stage: ContactStage::Iteration,
+                },
+                &mut engine.work,
+            )?;
+            alpha = alpha.min(rigid_alpha);
+        }
+        let mut accepted = None;
+        for _ in 0..implicit.max_line_search_iterations {
+            let trial: Vec<_> = x
+                .iter()
+                .zip(&direction)
+                .map(|(&p, &d)| p + d * alpha)
+                .collect();
+            let trial_contacts = query(
+                source,
+                &mut engine,
+                &cloth.positions,
+                &trial,
+                ContactStage::Iteration,
+                cloth,
+                settings.max_contacts,
+                true,
+            )?;
+            let evaluation =
+                model.assemble_into(&trial, &trial_contacts, &friction, false, &mut trial_eval);
+            match evaluation {
+                Ok(()) if trial_eval.energy <= assembled.energy + 0.0001 * alpha * slope => {
+                    accepted = Some((trial, trial_contacts));
+                    break;
+                }
+                Err(ClothError::UnresolvedSurfaceContact | ClothError::DegenerateConstraint) => {}
+                Err(e) => return Err(e),
+                _ => {}
+            }
+            alpha *= 0.5;
+        }
+        if let Some((trial, next_contacts)) = accepted {
+            x = trial;
+            contacts = next_contacts;
+            accepted_updates += 1;
+        } else {
+            return Err(failure("line search", iteration));
+        }
+    }
+    let approximate =
+        !converged && implicit.cap_policy == ImplicitCapPolicy::ApproximateWithFinalValidation;
+    if !converged && !approximate {
+        return Err(failure("Newton iteration budget", implicit.max_iterations));
+    }
+    if approximate {
+        if accepted_updates != implicit.max_iterations {
+            return Err(failure(
+                "cap without accepted final iterate",
+                report.iterations,
+            ));
+        }
+        validate_approximate_targets(cloth, &x, targets, report.iterations)?;
+    }
+    // The final state ends this sweep, so its recorded pairs serve the final query.
+    if config.self_collision && engine.implicit_motion_fraction(&cloth.positions, &x, true)? < 1.0 {
+        return Err(failure("final self sweep", report.iterations));
+    }
+    if source.continuous_motion()
+        && external_fraction(
+            source,
+            ContactMotion {
+                start: &cloth.positions,
+                end: &x,
+                stage: ContactStage::Final,
+            },
+            &mut engine.work,
+        )? < 1.0
+    {
+        return Err(failure("final rigid sweep", report.iterations));
+    }
+    contacts = query(
+        source,
+        &mut engine,
+        &cloth.positions,
+        &x,
+        ContactStage::Final,
+        cloth,
+        settings.max_contacts,
+        true,
+    )?;
+    model.assemble_into(&x, &contacts, &friction, false, &mut trial_eval)?;
+    let final_assembly = trial_eval;
+    let force_rms = if model.count == 0 {
+        0.0
+    } else {
+        (final_assembly.gradient.iter().map(|g| g * g).sum::<Real>() / (model.count / 3) as Real)
+            .sqrt()
+    };
+    let force_max = final_assembly
+        .gradient
+        .chunks_exact(3)
+        .map(|g| g.iter().map(|v| v * v).sum::<Real>().sqrt())
+        .fold(0.0, Real::max);
+    if !force_rms.is_finite() || !force_max.is_finite() || !final_assembly.energy.is_finite() {
+        return Err(ClothError::NonFiniteState);
+    }
+    report.implicit = Some(ImplicitOutcome {
+        termination: if approximate {
+            ImplicitTermination::ApproximateIterationCap
+        } else {
+            ImplicitTermination::Converged
+        },
+        converged,
+        energy: final_assembly.energy,
+        force_rms,
+        force_max,
+    });
+    report.contacts = contacts.len();
+    report.surface_collision = engine.work;
+    report.max_stretch = cloth
+        .mesh
+        .edges()
+        .iter()
+        .map(|e| x[e.vertices[0] as usize].distance(x[e.vertices[1] as usize]) / e.rest_length)
+        .fold(1.0, Real::max);
+    let mut stretch: Vec<_> = cloth
+        .mesh
+        .edges()
+        .iter()
+        .map(|e| x[e.vertices[0] as usize].distance(x[e.vertices[1] as usize]) / e.rest_length)
+        .collect();
+    stretch.sort_by(Real::total_cmp);
+    report.p95_stretch = stretch[((stretch.len() - 1) as Real * 0.95) as usize];
+    report.max_bend_error = cloth
+        .mesh
+        .hinges()
+        .iter()
+        .filter_map(|hinge| {
+            crate::constraints::bend::angle(hinge.vertices.map(|i| x[i as usize]))
+                .map(|angle| angle_difference(angle, hinge.rest_angle).abs())
+        })
+        .fold(0.0, Real::max);
+    if approximate {
+        validate_approximate_extension(report.max_stretch, report.iterations)?;
+    }
+    drop(model);
+    let velocities: Vec<_> = x
+        .iter()
+        .zip(&cloth.positions)
+        .map(|(&p, &old)| (p - old) / h)
+        .collect();
+    if velocities.iter().any(|v| !v.is_finite()) {
+        return Err(ClothError::NonFiniteState);
+    }
+    cloth.previous.clone_from(&cloth.positions);
+    cloth.velocities = velocities;
+    cloth.positions = x;
+    cloth.contact_history.clear();
+    Ok(report)
+}
+
+fn validate_approximate_targets(
+    cloth: &Cloth,
+    x: &[Vec3],
+    targets: &[Target],
+    iterations: usize,
+) -> Result<(), ClothError> {
+    if x.iter().any(|p| !p.is_finite()) {
+        return Err(ClothError::NonFiniteState);
+    }
+    if cloth.pins.iter().any(|(&i, &p)| x[i as usize] != p)
+        || targets.iter().any(|t| x[t.particle as usize] != t.position)
+    {
+        return Err(failure("approximate hard target", iterations));
+    }
+    Ok(())
+}
+
+fn validate_approximate_extension(stretch: Real, iterations: usize) -> Result<(), ClothError> {
+    if !stretch.is_finite() || stretch >= 1.03 {
+        return Err(failure("approximate extension guard", iterations));
+    }
+    Ok(())
+}
+
+#[cfg(all(test, feature = "f64"))]
+mod cap_policy_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn hard_targets_restrict_the_full_system_without_changing_the_objective() {
+        let mesh = crate::GridBuilder::new(3, 3)
+            .size(0.25, 0.25)
+            .build()
+            .unwrap();
+        let mut cloth = Cloth::new(mesh, crate::ClothMaterial::default()).unwrap();
+        cloth
+            .set_contact_settings(Some(crate::ClothContactSettings {
+                activation_margin: 0.001,
+                ..Default::default()
+            }))
+            .unwrap();
+        let x: Vec<_> = cloth
+            .positions
+            .iter()
+            .map(|p| Vec3::new(p.x * 1.03, 0.2 * p.x * p.z, p.z * 0.98))
+            .collect();
+        // Reversed support indices exercise both sides of each local tensor.
+        let mut contact = SurfaceContact {
+            key: crate::SurfaceContactKey {
+                other_cloth: None,
+                features: [
+                    crate::SurfaceFeature::Edge([0, 8]),
+                    crate::SurfaceFeature::Edge([2, 6]),
+                ],
+            },
+            particles: [8, 0, 6, 2],
+            weights: [0.3, 0.7, -0.4, -0.6],
+            normal: Vec3::new(1.0, 2.0, 3.0).normalize(),
+            offset: Vec3::ZERO,
+            separation: 0.001,
+            surface_velocity: Vec3::ZERO,
+            static_friction: 0.5,
+            kinetic_friction: 0.5,
+        };
+        contact.offset = contact.relative(&x) - contact.normal * 0.0015;
+        let friction = [Friction {
+            contact,
+            reference: contact.relative(&x) + Vec3::X * 0.0002,
+            load: 0.03,
+        }];
+        let implicit = ImplicitSettings::default();
+        let full = Model::new(&cloth, 0.1, Vec3::ZERO, &[], implicit)
+            .unwrap()
+            .assemble(&x, &[contact], &friction, true)
+            .unwrap();
+        for fixed in [vec![0, 4, 8], vec![2, 6], vec![], (0..9).collect()] {
+            let targets: Vec<_> = fixed
+                .iter()
+                .map(|&particle| Target {
+                    particle,
+                    position: x[particle as usize],
+                    compliance: 0.0,
+                })
+                .collect();
+            let model = Model::new(&cloth, 0.1, Vec3::ZERO, &targets, implicit).unwrap();
+            let reduced = model.assemble(&x, &[contact], &friction, true).unwrap();
+            let trial = model.assemble(&x, &[contact], &friction, false).unwrap();
+            assert_eq!(reduced.energy, full.energy);
+            assert_eq!(trial.energy, full.energy);
+            assert_eq!(trial.gradient, reduced.gradient);
+            assert!(trial.blocks.is_empty());
+            let free: Vec<_> = (0..full.gradient.len())
+                .filter(|i| !fixed.contains(&((*i / 3) as u32)))
+                .collect();
+            assert_eq!(
+                reduced.gradient,
+                free.iter().map(|&i| full.gradient[i]).collect::<Vec<_>>()
+            );
+            // Eliminating hard targets must produce the principal submatrix,
+            // retaining every contribution and its original addition order.
+            let vertices: Vec<_> = (0..x.len())
+                .filter(|v| !fixed.contains(&(*v as u32)))
+                .collect();
+            let expected: Vec<_> = full
+                .blocks
+                .iter()
+                .filter_map(|b| {
+                    Some(Block {
+                        row: vertices.iter().position(|&v| v == b.row)?,
+                        col: vertices.iter().position(|&v| v == b.col)?,
+                        value: b.value,
+                    })
+                })
+                .collect();
+            assert_eq!(reduced.blocks, expected);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "f64")]
+    fn assembled_material_is_rigid_invariant_and_has_balanced_forces() {
+        let mesh = crate::GridBuilder::new(3, 3)
+            .size(0.25, 0.25)
+            .build()
+            .unwrap();
+        let mut cloth = Cloth::new(mesh, crate::ClothMaterial::default()).unwrap();
+        cloth
+            .set_contact_settings(Some(crate::ClothContactSettings {
+                activation_margin: 0.001,
+                ..Default::default()
+            }))
+            .unwrap();
+        let mut model =
+            Model::new(&cloth, 0.04, Vec3::ZERO, &[], ImplicitSettings::default()).unwrap();
+        let x: Vec<_> = cloth
+            .positions
+            .iter()
+            .map(|p| Vec3::new(p.x * 1.03, p.y + 0.2 * p.x * p.z, p.z * 0.98))
+            .collect();
+        model.prediction = x.clone();
+        let a = model.assemble(&x, &[], &[], false).unwrap();
+        let forces: Vec<_> = a
+            .gradient
+            .chunks_exact(3)
+            .map(|g| Vec3::new(g[0], g[1], g[2]))
+            .collect();
+        assert!(forces.iter().copied().sum::<Vec3>().length() < 1e-10);
+        assert!(
+            x.iter()
+                .zip(&forces)
+                .map(|(p, g)| p.cross(*g))
+                .sum::<Vec3>()
+                .length()
+                < 1e-10
+        );
+        let axis = Vec3::new(1.0, 2.0, -1.0).normalize();
+        let angle: Real = 0.7;
+        let rotate = |p: Vec3| {
+            p * angle.cos()
+                + axis.cross(p) * angle.sin()
+                + axis * (axis.dot(p) * (1.0 - angle.cos()))
+        };
+        let rotated: Vec<_> = x
+            .iter()
+            .map(|&p| rotate(p) + Vec3::new(0.4, -0.3, 0.7))
+            .collect();
+        model.prediction = rotated.clone();
+        let b = model.assemble(&rotated, &[], &[], false).unwrap();
+        assert!((a.energy - b.energy).abs() < 1e-11);
+        for (i, g) in b.gradient.chunks_exact(3).enumerate() {
+            assert!((Vec3::new(g[0], g[1], g[2]) - rotate(forces[i])).length() < 1e-9);
+        }
+        model.prediction = x.clone();
+        let eps = 1e-7;
+        for i in 0..x.len() {
+            for axis in 0..3 {
+                let mut lo = x.clone();
+                let mut hi = x.clone();
+                lo[i][axis] -= eps;
+                hi[i][axis] += eps;
+                let derivative = (model.assemble(&hi, &[], &[], false).unwrap().energy
+                    - model.assemble(&lo, &[], &[], false).unwrap().energy)
+                    / (2.0 * eps);
+                assert!((derivative - forces[i][axis]).abs() < 1e-7);
+            }
+        }
+    }
+    #[test]
+    fn membrane_gradient_and_hessian_follow_energy() {
+        let f = [Vec3::new(1.03, 0.07, 0.13), Vec3::new(-0.05, 0.97, 0.02)];
+        let (e, g, h) = membrane(f, 3.0, 2.0, true).unwrap();
+        assert!(e > 0.0);
+        let eps = if Real::EPSILON < 1e-10 { 1e-5 } else { 1e-3 };
+        let tol = if Real::EPSILON < 1e-10 { 1e-7 } else { 1e-3 };
+        for j in 0..6 {
+            let mut lo = f;
+            let mut hi = f;
+            lo[j / 3][j % 3] -= eps;
+            hi[j / 3][j % 3] += eps;
+            let (el, gl, _) = membrane(lo, 3.0, 2.0, false).unwrap();
+            let (eh, gh, _) = membrane(hi, 3.0, 2.0, false).unwrap();
+            assert!(((eh - el) / (2.0 * eps) - g[j / 3][j % 3]).abs() < tol);
+            for i in 0..6 {
+                assert!(
+                    ((gh[i / 3][i % 3] - gl[i / 3][i % 3]) / (2.0 * eps) - h[(i, j)]).abs() < tol
+                );
+            }
+        }
+    }
+    #[test]
+    fn barrier_derivatives_and_inactive_branch() {
+        let g = 0.0002;
+        // Central differences need a larger increment at f32 precision to
+        // avoid cancellation at this submillimetre contact scale.
+        let h = if Real::EPSILON < 1e-10 { 1e-8 } else { 1e-6 };
+        let b = barrier(g, 0.000318, 30.0).unwrap();
+        let lo = barrier(g - h, 0.000318, 30.0).unwrap();
+        let hi = barrier(g + h, 0.000318, 30.0).unwrap();
+        assert!(((hi[0] - lo[0]) / (2.0 * h) - b[1]).abs() < 1e-6);
+        assert!(((hi[1] - lo[1]) / (2.0 * h) - b[2]).abs() < 0.1);
+        assert_eq!(barrier(0.001, 0.000318, 30.0), Some([0.0; 3]));
+        assert!(barrier(0.0, 0.000318, 30.0).is_none());
+    }
+}

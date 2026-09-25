@@ -8,6 +8,8 @@ const serverPort = Number(process.env.CLOTH_SERVER_PORT ?? 9100);
 const viewerPort = Number(process.env.CLOTH_VIEWER_PORT ?? 5173);
 for (const port of [serverPort,viewerPort]) if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid port');
 const url = `http://127.0.0.1:${viewerPort}`;
+const implicit = process.argv.slice(2).includes('--implicit');
+if (process.argv.slice(2).some(arg => arg !== '--implicit')) throw new Error('Usage: live.mjs [--implicit]');
 const children = new Set();
 let stopping = false;
 function stop(code = 0) {
@@ -27,7 +29,7 @@ try {
   // Build first and start the executable directly so Ctrl+C owns both the
   // server and Vite processes, rather than orphaning a cargo child process.
   await new Promise((resolve,reject) => {
-    const build = spawn('cargo',['build','--locked','--release','--manifest-path','demos/live-server/Cargo.toml','--target-dir',path.join(root,'demos/live-server/target')],{cwd:root,stdio:'inherit'});
+    const build = spawn('cargo',['build','--locked','--release','--manifest-path','demos/live-server/Cargo.toml',...(implicit ? ['--no-default-features','--features','f64,implicit'] : []),'--target-dir',path.join(root,'demos/live-server/target')],{cwd:root,stdio:'inherit'});
     children.add(build); build.on('error',reject);
     build.on('exit',code => { children.delete(build); code === 0 && !stopping ? resolve() : reject(new Error('Rust build stopped')); });
   });
@@ -37,11 +39,11 @@ try {
     let healthy = false;
     for (let attempt = 0; attempt < 100 && !stopping; attempt++) {
       await new Promise(resolve => setTimeout(resolve,100));
-      try { const res = await fetch(`http://127.0.0.1:${serverPort}/health`,{signal:AbortSignal.timeout(500)}); healthy = res.ok && (await res.json()).name === 'rapier-cloth-live'; } catch { /* wait for bind */ }
+      try { const res = await fetch(`http://127.0.0.1:${serverPort}/health`,{signal:AbortSignal.timeout(500)}); const status = await res.json(); healthy = res.ok && status.name === 'rapier-cloth-live' && status.protocol === 2; } catch { /* wait for bind */ }
       if (healthy) break;
     }
     if (!healthy || stopping) throw new Error('CPU server did not start');
     start(process.execPath,[path.join(viewer,'node_modules/vite/bin/vite.js'),'--host','127.0.0.1','--port',String(viewerPort),'--strictPort'],{cwd:viewer,env:{...process.env,LIVE_SERVER_URL:`http://127.0.0.1:${serverPort}`}});
-    console.log(`\nLive cloth: ${url}/live.html\nCtrl+C stops both servers.\n`);
+    console.log(`\nLive cloth: ${url}/live.html${implicit ? '?scene=implicit_towel&paused=1' : ''}\nCtrl+C stops both servers.\n`);
   }
 } catch (error) { if (!stopping) console.error(error.message); stop(1); }

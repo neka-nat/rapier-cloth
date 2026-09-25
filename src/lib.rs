@@ -13,10 +13,16 @@ pub use rapier_cloth_core::*;
 #[cfg(any(feature = "f32", feature = "f64"))]
 pub mod attachment;
 #[cfg(any(feature = "f32", feature = "f64"))]
-mod collision;
+pub mod grasp;
+#[cfg(any(feature = "f32", feature = "f64"))]
+pub use grasp::{ClothSurfaceHit, ClothSurfacePoint, GraspOptions, GraspPatch};
+#[cfg(any(feature = "f32", feature = "f64"))]
+#[path = "collision.rs"]
+mod rapier_collision;
 #[cfg(any(feature = "f32", feature = "f64"))]
 pub use attachment::{
     AttachmentDesc, AttachmentEvent, AttachmentEventKind, AttachmentHandle, AttachmentPoint,
+    SurfaceAttachmentDesc, SurfaceAttachmentPoint,
 };
 #[cfg(any(feature = "f32", feature = "f64"))]
 pub mod diagnostics;

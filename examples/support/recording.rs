@@ -64,10 +64,10 @@ pub struct Frame {
     pub diagnostics: Diagnostics,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Recording {
+pub struct Recording<C = Config> {
     pub schema_version: u32,
     pub precision: String,
-    pub config: Config,
+    pub config: C,
     pub triangles: Vec<[u32; 3]>,
     pub shapes: Vec<BodyShape>,
     pub frames: Vec<Frame>,
@@ -95,7 +95,7 @@ fn time(step: u64, h: Real) -> f64 {
     let seconds = f64::from(h);
     step as f64 * seconds
 }
-fn body_frame(id: u32, pose: &Pose) -> BodyFrame {
+pub fn body_frame(id: u32, pose: &Pose) -> BodyFrame {
     BodyFrame {
         id,
         translation: pose.translation.to_array(),

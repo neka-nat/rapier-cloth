@@ -8,9 +8,35 @@ pub enum ClothError {
     InvalidHandle,
     InvalidParticle(u32),
     ConflictingTarget(u32),
+    ConflictingSurfaceTarget {
+        triangle: u32,
+    },
+    SurfaceQueryBudgetExceeded {
+        limit: usize,
+    },
     DegenerateConstraint,
     NonFiniteState,
-    ContactBudgetExceeded { limit: usize },
+    /// A requested implicit worker could not be started. Already-started
+    /// workers are joined and this cloth's physical step is not committed.
+    ImplicitWorkerSpawnFailed(String),
+    ImplicitSolverFailed {
+        phase: &'static str,
+        iterations: usize,
+    },
+    ContactBudgetExceeded {
+        limit: usize,
+    },
+    InvalidSurfaceContact(&'static str),
+    InfeasibleSurfaceContact,
+    UnresolvedSurfaceContact,
+    UnresolvedContinuousCollision(&'static str),
+    InitialSelfIntersection {
+        triangles: [u32; 2],
+    },
+    CollisionBudgetExceeded {
+        kind: crate::collision::CollisionBudgetKind,
+        limit: usize,
+    },
     External(String),
 }
 
@@ -22,9 +48,48 @@ impl fmt::Display for ClothError {
             Self::InvalidHandle => write!(f, "invalid or expired cloth handle"),
             Self::InvalidParticle(i) => write!(f, "invalid particle index {i}"),
             Self::ConflictingTarget(i) => write!(f, "conflicting targets on particle {i}"),
+            Self::ConflictingSurfaceTarget { triangle } => write!(
+                f,
+                "surface target on triangle {triangle} could not be satisfied"
+            ),
+            Self::SurfaceQueryBudgetExceeded { limit } => {
+                write!(f, "surface query budget exceeded ({limit})")
+            }
             Self::DegenerateConstraint => write!(f, "constraint geometry became degenerate"),
             Self::NonFiniteState => write!(f, "non-finite simulation state; substep not committed"),
+            Self::ImplicitWorkerSpawnFailed(reason) => write!(
+                f,
+                "could not start implicit worker: {reason}; substep not committed"
+            ),
+            Self::ImplicitSolverFailed { phase, iterations } => write!(
+                f,
+                "implicit solver failed during {phase} after {iterations} iterations; substep not committed"
+            ),
             Self::ContactBudgetExceeded { limit } => write!(f, "contact budget exceeded ({limit})"),
+            Self::InvalidSurfaceContact(s) => write!(f, "invalid surface contact: {s}"),
+            Self::InfeasibleSurfaceContact => {
+                write!(
+                    f,
+                    "surface contact conflicts with fixed targets or rigid supports"
+                )
+            }
+            Self::UnresolvedSurfaceContact => {
+                write!(
+                    f,
+                    "surface contact did not converge within the separation tolerance"
+                )
+            }
+            Self::UnresolvedContinuousCollision(reason) => write!(
+                f,
+                "continuous collision could not certify the proposed motion: {reason}"
+            ),
+            Self::InitialSelfIntersection { triangles } => write!(
+                f,
+                "initial self-intersection between triangles {triangles:?}"
+            ),
+            Self::CollisionBudgetExceeded { kind, limit } => {
+                write!(f, "surface collision {kind:?} budget exceeded ({limit})")
+            }
             Self::External(s) => write!(f, "external contact error: {s}"),
         }
     }

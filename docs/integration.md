@@ -57,6 +57,24 @@ from stretch so that softness does not require elastic edges. Zero stretch
 compliance does not guarantee zero numerical strain with a finite iteration budget.
 Diagonal triangle edges are not an independent shear material model.
 
+With zero stretch compliance and hard pins or attachments, the solver also bounds
+each free vertex's distance to a reachable hard anchor in each connected hard-target
+region by a shortest rest-edge path length. Corrections from different regions are
+averaged so that selecting one gripper does not open a gap at their boundary.
+These one-sided bounds accelerate propagation from the grasp: they
+follow from inextensible edge lengths and leave vertices inside the bound free to
+buckle. Local edge constraints remain necessary; the bounds do not guarantee a
+maximum local strain. The approach follows
+[long-range attachments](https://matthias-research.github.io/pages/publications/sca2012cloth.pdf),
+using edge-path upper bounds rather than distances through the rest surface's
+interior.
+
+The bounds use rest topology, so folded rest meshes can unfold. They are disabled
+for positive stretch compliance and soft targets, and are rebuilt when topology
+or the set of hard anchors changes. Releasing all anchors removes the bounds.
+Their projections are part of the same trial and continuous-collision checks as
+other constraints; they are not additional physical time steps or force sensors.
+
 `pin(particle, world_position)` creates a fixed target; `unpin(particle)` releases
 it without replacing its current position or velocity. `set_force` sets a persistent
 force in newtons; set it to zero to clear it. The live demo multiplies its wind
@@ -95,9 +113,265 @@ kinematic motion is treated as physical contact correction.
 Friction acts on relative velocity at the contact point and uses the arithmetic
 mean of cloth and collider coefficients, or `friction_override` when set. Rapier's
 coefficient combination rule is not used. A Coulomb limit bounds the impulse and
-prevents reversing the remaining slip. There is no static-friction history.
+prevents reversing the remaining slip. This legacy particle mode has no
+static-friction history.
+
+## Discrete self-collision
+
+Self-collision is experimental and disabled until a cloth opts in:
+
+```rust
+use rapier_cloth::{ClothContactSettings, CollisionLimits};
+
+cloth.set_contact_settings(Some(ClothContactSettings {
+    thickness: 0.001,           // Full physical thickness in metres.
+    activation_margin: 0.0001,  // Extra candidate range, not extra thickness.
+    self_collision: true,
+    continuous_self_collision: false,
+    rigid_surface_collision: false,
+    continuous_rigid_collision: false,
+    static_friction: 0.6,       // Must be at least kinetic_friction.
+    kinetic_friction: 0.5,
+    limits: CollisionLimits::default(),
+}))?;
+```
+
+The core constrains nonincident vertex-face and edge-edge features on either side
+of the sheet. Shared vertices/edges are excluded by topology; connected components
+and pinned regions are not excluded wholesale. Physical self-contact separation
+is `thickness`; Rapier's current external particle contacts still use
+`ClothMaterial::contact_radius`. This option does not add rigid triangle-surface
+collision or continuous self-collision. Use small-motion fixtures and inspect
+penetration/strain; the mode is not yet a qualified robotic folding system.
+
+`CollisionLimits` separates cumulative candidate-pair work (default 2,000,000 per
+substep), retained contact keys (65,536), and CCD distance-evaluation work
+(2,000,000). The CCD counter is zero in the discrete implementation. Candidate
+work includes repeated refreshes and topologically incident candidates examined
+by the broad phase. Retained keys are bounded by maximum capacity, not summed
+across iterations. `SolverSettings::max_contacts` additionally limits the combined
+legacy and surface contacts. Limits return typed errors; contacts are never silently
+dropped. `StepReport::surface_collision` reports successful-step work/high-water
+counts, and its scratch-byte estimate includes reusable hierarchy/contact buffers.
+
+Contact history belongs to each cloth and participates in world checkpoints and
+atomic stepping. `set_positions` and changed contact settings invalidate it; an
+invalid setting or failed substep preserves the previous physical state. Reapplying
+identical settings preserves history. `contact_history_len()` reports retained
+touching surface contacts.
+
+Surface contacts use experimental persistent static/kinetic friction. A material
+anchor holds while the required tangential multiplier is inside the static
+Coulomb cone of the physical normal load. Outside that cone, the kinetic
+coefficient limits slip resistance. Tangential position corrections participate
+in the same continuous motion checks as other constraints; initial-overlap
+recovery supplies no friction load. The velocity solve uses only additional
+residual impact load, avoiding a second application of position friction.
+Deforming contacts distribute corrections through mass-weighted material-coordinate
+gradients. The supporting triangle contributes rotational response, including its
+vertices outside a vertex/edge normal-contact stencil. The tangent effective mass
+accounts for that response. Applied per-vertex corrections are retained through
+geometry refresh, motion shortening and unloading, so changing the support frame
+does not rotate an already applied correction or apply its load twice.
+
+Between substeps, closest-point refreshes keep sticking material weights when each witness
+stays within twice the separation distance and the normal dot product is at least
+0.9. Sliding resets the anchor for the next substep. Multipliers restart at zero
+each substep; physical anchors persist. Self-contact anchors follow the rotation
+of a material triangle on the supporting cloth side, including spin about the
+contact normal. Vertex and edge supports use a fixed incident triangle. Changing
+the contact normal alone does not move the material witnesses. A degenerate
+supporting triangle returns an error without committing the substep.
+Rapier external anchors follow the complete previous-to-current rigid transform,
+including rotation about the normal.
+
+Separation, changed material/contact settings, cloth teleports and pin membership
+changes invalidate history. Attach/release and automatic attachment removal also
+clear the affected cloth's history. The Rapier world checkpoints its last surface
+scene; collider pose discontinuities, shape changes and collision-setting changes
+clear history before the next solve. These scene changes conservatively clear all
+cloth histories. For changes in a custom external model or filter that retains
+the same feature keys, call `Cloth::clear_contact_history()` explicitly.
+
+Analytical pull/incline, kinetic-load, common-rotation, moving-support and small
+stacked-patch tests exercise this mode. Independent virtual-work and rigid-motion
+tests cover the force distribution on rotated and deformed support triangles.
+Rotating self-support tests also cover checkpoint replay and release after
+separation. Complete garment manipulation,
+large support deformations and dense-fold performance remain unqualified.
+
+The position-level Coulomb model follows the approach described in
+[Unified Particle Physics, section 6.1](https://mmacklin.com/uppfrta_preprint.pdf).
+This implementation accumulates bounded multipliers and retains material anchors;
+the paper's performance results do not qualify this solver.
+
+Custom core collision adapters can implement the defaulted
+`ContactSource::surface_contacts` method, returning `SurfaceContact` constraints
+with up to four particles and stable, unique `SurfaceContactKey` values. The
+existing particle-contact callback remains available. Invalid geometry, unresolved
+initial self-intersections and infeasible all-fixed surface contacts return errors
+without committing the cloth state.
+
+Rotating custom sources must override `ContactSource::transport_surface_anchor`.
+It advects the supplied material witness once per adopted substep anchor; its
+default is uniform translation from `surface_velocity`. For generalized weights
+the supplied point is their weighted sum, so translation scales by the weight
+sum. Rapier supplies its exact endpoint transform. A non-finite result or callback
+failure aborts the cloth substep and preserves committed history.
+
+For bounded external surface queries, override
+`ContactSource::surface_contacts_with_work` and charge each primitive candidate
+through `CollisionWork::charge` using the owning cloth's limits. These counters
+are shared with built-in self-contact/CCD; the default callback forwards to
+`surface_contacts`. Every contact stage can be queried repeatedly within one
+substep, including prediction. Keep cached keys unique and update their witnesses
+when retrying a trial pose.
+
+## Rigid surface contact
+
+Enable the experimental Rapier surface adapter per cloth:
+
+```rust
+cloth.set_contact_settings(Some(ClothContactSettings {
+    rigid_surface_collision: true,
+    self_collision: true,
+    continuous_self_collision: true,
+    ..Default::default()
+}))?;
+```
+
+The adapter queries complete triangles against spheres, boxes and capsules, and
+uses vertex inequalities to cover triangles against a fixed half-space. It finds
+small obstacles inside a triangle even when every cloth vertex misses them.
+Canonical vertex/edge/face witnesses avoid counting a shared boundary twice;
+collider identities include their handle generation. Gripper exclusions apply
+only when all nonzero support particles belong to the selected excluded patch.
+An adjacent unselected feature remains eligible for collision.
+
+Required rigid-surface separation is `thickness / 2`; activation adds only a
+candidate margin. For example, 1 mm full thickness rests with its midsurface
+0.5 mm above a plane. The legacy particle contact/sweep path is disabled for that
+cloth, so its numerical `contact_radius` does not inflate the surface offset.
+Static and kinetic friction each combine the corresponding cloth coefficient
+with collider friction using their arithmetic mean; `friction_override` overrides
+both combined coefficients.
+
+This configuration performs discrete rigid queries. The continuous flag in the
+example applies to **self-collision only**. Rigid CCD has a separate opt-in below.
+Kinematic sphere/box/capsule poses use the existing motion-budget contract, and
+pre-step poses are used for stabilization. Moving contact-point velocities include
+body rotation. Dynamic bodies and moving half-spaces remain unsupported.
+
+Initial midsurface intersections deeper than the precision length tolerance
+(10 micrometres for f32, 1 nanometre for f64) return
+`IntegrationError::InitialRigidIntersection`. A final separation below 90% of the
+half-thickness target returns `ClothError::UnresolvedSurfaceContact`. Contact/work
+overflow and infeasible fixed targets also fail atomically. The adapter has small
+primitive and moving-support regression tests; the complete fold and CPU frame
+budget remain unqualified.
+
+## Continuous rigid-surface collision
+
+Enable external motion checks independently of cloth self-collision:
+
+```rust
+cloth.set_contact_settings(Some(ClothContactSettings {
+    rigid_surface_collision: true,
+    continuous_rigid_collision: true,
+    self_collision: false,
+    ..Default::default()
+}))?;
+```
+
+Fixed half-spaces and fixed/kinematic spheres, boxes and capsules participate in
+prediction, stabilization, elastic/target/contact correction and the final sweep.
+The swept minimum is 90% of `thickness / 2`, with additional numerical clearance;
+contact projection still targets the full half-thickness. Swept contact anchors
+are transported to the ending rigid pose before solving the complete inertial
+prediction. The application still advances both worlds by exactly the same `h`.
+
+The declared continuous trajectory uses linear body center-of-mass translation
+and constant angular interpolation between the actual endpoint orientations;
+collider offsets therefore follow arcs. Rapier 0.34's serial velocity solver uses
+normalized linear quaternion increments, so its ending angle can differ from
+`angular_velocity * h`. The bridge validates that difference against the possible
+solver increment angles, including final velocity damping. Velocity-based angular
+commands reaching half a turn per external substep are rejected: endpoint
+quaternions cannot identify their path unambiguously. Reduce the application step
+and restore both worlds before retrying. The existing, normally much tighter
+kinematic motion budget also applies. These checks certify the declared path,
+not an arbitrary trajectory sharing the same endpoint poses.
+
+Keep collider geometry and its body-local pose unchanged between snapshot and
+solve. A changed shape, a moved fixed collider or inconsistent kinematic motion
+returns an error. Dynamic bodies and moving half-spaces remain unsupported;
+exclude unrelated unsupported colliders with the query filter.
+
+Initial swept gaps must exceed the minimum plus numerical clearance. Infeasible
+commands, unresolvable separation and exhausted work limits fail without committing
+cloth positions, velocities, contact history or attachment events. The primitive
+checks use at most 2,048 advancement iterations per query (returning the prefix
+certified so far when they run out), charged distance queries and the shared
+collision budget. Small analytical, rotating-support, zero-friction and
+rollback tests exercise this experimental mode; they do not qualify a complete
+fold or a CPU frame budget.
+
+Custom core sources opt in through `ContactSource::continuous_motion` and implement
+`motion_fraction(ContactMotion, CollisionWork)`. Return a certified fraction in
+`[0, 1]`, charge work, and return an error if certification fails. Stabilization
+holds obstacles at their previous pose; iteration corrections hold their current
+pose. Prediction/final checks span the physical trajectory. The default methods
+preserve existing sources that only supply contact queries.
+
+## Continuous self-collision
+
+Set `continuous_self_collision: true` together with `self_collision: true` to
+enable experimental continuous checks. The core bounds linear motion during
+prediction, stabilization, elastic/target projection and both contact projection
+paths. Internal trial corrections form batches; each accepted batch and the final
+substep's linear endpoint sweep are checked. No additional physical time steps are
+hidden inside this procedure.
+
+Sweeps retain at least 90% of physical thickness, while contact constraints target
+the full thickness. Thus a 1 mm cloth uses a 0.9 mm minimum swept separation.
+Initial geometry must have a resolvable gap above the swept minimum wherever
+advancement is needed. Conservative advancement uses a 10% clearance reserve
+and at most 2,048 distance evaluations per query, after which the prefix certified
+so far is returned, all within the configured cumulative CCD budget. Numerical
+clearance and non-progress failures return `UnresolvedContinuousCollision`; budget
+exhaustion returns `CollisionBudgetExceeded`. Neither commits the cloth.
+
+Prediction uses swept witnesses to solve contacts against the full inertial
+prediction, preserving tangential motion at zero friction and normal support for
+kinetic friction. Elastic/contact trial corrections can be shortened together with
+their multiplier increments. Each solver iteration completes elastic, target and
+contact projections before checking their combined displacement. If that trial
+must be shortened, contacts are refreshed at the accepted pose and their thickness
+correction is checked separately. This lets a supported patch recover its edge
+lengths without accepting a penetrated intermediate elastic pose. Hard target
+commands are still required to be reached within the precision's length tolerance;
+infeasible commands fail atomically.
+`surface_collision.limited_advances` counts motion checks requesting a reduction.
+
+When self-contact shares particles with rigid contacts that each constrain one
+particle, the solver couples the normal constraints in a local block. It selects
+at most one such rigid support per particle; the remaining contacts still use the
+iterative solve. Particles retain their physical inverse masses and free motion.
+Supports can release, and unloading retracts any unsupported friction correction.
+This adds no time steps or global solver iterations.
+Initial surface-gap restoration uses this coupling with separate normal
+multipliers; it does not apply friction or retain those multipliers as physical
+support loads.
+
+This option covers cloth self-contact. The Rapier adapter uses particle contacts
+unless `rigid_surface_collision` separately enables discrete triangle contacts.
+Enable `continuous_rigid_collision` as described above for bounded external checks.
+The complete folding task and its CPU budget are not yet qualified.
 
 ## Attachments and grasping
+
+For exposed-layer selection, connected patches and weighted triangle-point
+targets, see [surface selection and grasping](grasping.md).
 
 Call `world.attach(desc, &bodies, &colliders)` with an `AttachmentDesc` containing a
 cloth handle, body handle, compliance and a list of
@@ -140,6 +414,8 @@ When `is_desynchronized()` becomes true, stop stepping. To retry with a differen
 
 Checkpoints are in-memory state for the same cloth world, not a public serialization
 format. Discard handles and events created after the checkpoint. The repository's
+allocation generations are not rewound, preventing discarded handles from
+aliasing later allocations. Existing checkpoint handles remain valid. The
 checkpoint tests use a fixed-world fixture; a general application must also preserve
 controllers and other external state. A demo may instead recreate both worlds on reset.
 

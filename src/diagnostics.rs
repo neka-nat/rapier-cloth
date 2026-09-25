@@ -11,6 +11,10 @@ pub enum IntegrationError {
         reason: &'static str,
     },
     MissingPreviousPose(ColliderHandle),
+    InitialRigidIntersection {
+        collider: ColliderHandle,
+        feature: crate::SurfaceFeature,
+    },
     MotionBudget {
         collider: ColliderHandle,
         movement: Real,
@@ -30,6 +34,10 @@ impl fmt::Display for IntegrationError {
             Self::MissingPreviousPose(c) => {
                 write!(f, "missing previous kinematic collider pose: {c:?}")
             }
+            Self::InitialRigidIntersection { collider, feature } => write!(
+                f,
+                "initial cloth feature {feature:?} intersects rigid collider {collider:?}"
+            ),
             Self::MotionBudget {
                 collider,
                 movement,

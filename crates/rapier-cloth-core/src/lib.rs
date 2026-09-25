@@ -17,12 +17,25 @@ pub use error::ClothError;
 pub use material::ClothMaterial;
 pub use mesh::{ClothMesh, GridBuilder};
 pub mod cloth;
+pub mod collision;
+pub use collision::{ClothContactSettings, CollisionBudgetKind, CollisionLimits, CollisionWork};
 pub mod contact;
 pub mod diagnostics;
+#[cfg(feature = "implicit")]
+pub mod implicit;
 pub mod solver;
+#[cfg(feature = "implicit")]
+pub use implicit::{
+    ImplicitCapPolicy, ImplicitExecution, ImplicitOutcome, ImplicitSettings, ImplicitTermination,
+    ShellMaterial,
+};
 pub mod surface;
 pub use cloth::{Cloth, ClothHandle, ClothSet};
-pub use contact::{Contact, ContactKey, ContactSource, ContactStage, NoContacts};
+pub use constraints::target::SurfaceTarget;
+pub use contact::{
+    Contact, ContactKey, ContactMotion, ContactSource, ContactStage, NoContacts, SurfaceContact,
+    SurfaceContactKey, SurfaceFeature,
+};
 pub use diagnostics::StepReport;
 pub use solver::{Solver, SolverSettings, Target};
-pub use surface::SurfaceView;
+pub use surface::{SurfaceHit, SurfacePoint, SurfaceQueryLimits, SurfaceRay, SurfaceView};
