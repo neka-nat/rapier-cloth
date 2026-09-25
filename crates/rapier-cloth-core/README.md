@@ -9,12 +9,15 @@ feature adds faer and nalgebra for an experimental global shell solve (f64 only)
 For Rapier collision queries, attachments and time synchronization, use
 [rapier-cloth](https://github.com/neka-nat/rapier-cloth).
 
-## Use from a checkout
+## Use
 
 ```toml
 [dependencies]
-rapier-cloth-core = { path = "../rapier-cloth/crates/rapier-cloth-core" }
+rapier-cloth-core = "0.2"
 ```
+
+A repository checkout also works as a path dependency
+(`rapier-cloth-core = { path = "../rapier-cloth/crates/rapier-cloth-core" }`).
 
 Requires Rust 1.90 or newer. Select exactly one precision: `f32` is the default;
 for f64, add `default-features = false, features = ["f64"]`. Do not use

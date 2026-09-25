@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-09-25
+
+First crates.io release of `rapier-cloth`; `rapier-cloth-core` moves from 0.1.0 to
+0.2.0. The public API grew since 0.1.0 (surface contacts, self-collision, surface
+grasps, the optional implicit solver and their settings/report/error types), so
+exhaustive error matches and settings/report struct literals need updating.
 
 - Speed up the implicit solver on the documented towel task (8 simulated seconds on the reference laptop: four workers about 34 s to 7–8 s, serial about 65 s to 8 s). Contact Newton matrices use Gauss-Newton barrier curvature instead of exact second-order derivatives with a per-contact eigen-decomposition, and the membrane projection uses the analytic eigensystem of the 3×2 deformation gradient; energies and forces are unchanged. Sparse assembly sums 3×3 blocks into a pattern that only grows during a step, reusing the fill-reducing ordering, the symbolic factorization and all factor and assembly buffers. `Parallel4` now runs on a per-step rayon pool (new optional dependency) and also covers bounds fitting, initial intersection checks, self-contact queries and sweeps, friction assembly and matrix accumulation; workers write material and friction blocks directly into the assembly. Self-contact queries and sweeps traverse the vertex, edge and triangle hierarchies pairwise instead of querying the hierarchy once per primitive. Line-search trial points evaluate the contact pairs recorded by the preceding sweep, and repeated queries at unchanged positions reuse their result. Serial and parallel results remain identical; trajectories change by at most 1.5 mm RMS from the preceding implementation on the seven towel conditions.
 - Continuous collision queries that exhaust their per-query distance-evaluation budget (raised from 256 to 2,048) now return the prefix they certified as `Limited` instead of failing the step. A feature pivoting about a near-contact point admits only short conservative advances while a far vertex moves a lot; a rounding-level perturbation of the towel release step previously turned this into `UnresolvedContinuousCollision`. Queries that finish within the budget are unchanged.
@@ -79,4 +84,4 @@
 - Preserve cloth state on failed substeps; provide checkpoint/restore and generational cloth/attachment handles.
 - Add f32/f64 reference tests, headless pick-and-place recording, a Three.js replay viewer, scaling benchmarks and extracted-package consumer checks.
 
-Self-collision, two-way coupling, arbitrary collision meshes and language bindings are outside this candidate. Crates.io publication has not been performed.
+Self-collision, two-way coupling, arbitrary collision meshes and language bindings are outside this candidate. `rapier-cloth-core` 0.1.0 was published to crates.io on 2026-09-13; `rapier-cloth` was not published.

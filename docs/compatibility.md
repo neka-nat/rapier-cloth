@@ -15,7 +15,7 @@
 
 Cargo.lock and the viewer's package-lock.json pin the repository's resolved
 versions. The default core's only normal dependency is glam. Enabling `implicit`
-adds faer 0.24 and nalgebra 0.35. The core has no Rapier, Parry, renderer or serde
+adds faer 0.24, nalgebra 0.35 and rayon 1.10. The core has no Rapier, Parry, renderer or serde
 dependency; the bridge re-exports the selected Rapier crate.
 The resolved graph requires Rust 1.90 even though some dependencies allow older Rust.
 

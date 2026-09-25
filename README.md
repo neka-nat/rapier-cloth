@@ -29,13 +29,14 @@ performance remain under development.
 
 ## Use from Rust
 
-This is a pre-release project. Use a checkout as a path dependency:
-
 ```toml
 [dependencies]
-rapier-cloth = { path = "../rapier-cloth" }
+rapier-cloth = "0.2"
 ```
 
+A repository checkout also works as a path dependency
+(`rapier-cloth = { path = "../rapier-cloth" }`). The engine-independent solver is
+available on its own as [`rapier-cloth-core`](https://crates.io/crates/rapier-cloth-core).
 Rust 1.90 or newer is required. The default is `f32`, compatible with `rapier3d 0.34`.
 For `rapier3d-f64 0.34`, set `default-features = false, features = ["f64"]`.
 Select exactly one precision; do not use `--all-features`.

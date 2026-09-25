@@ -851,7 +851,7 @@ dependencies = [
 
 [[package]]
 name = "rapier-cloth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "parry3d-f64",
  "rapier-cloth-core",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "rapier-cloth-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "faer",
  "glam 0.33.7",
