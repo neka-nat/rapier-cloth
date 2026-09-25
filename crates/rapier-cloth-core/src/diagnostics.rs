@@ -2,6 +2,9 @@ use crate::Real;
 
 #[derive(Debug, Clone, Default)]
 pub struct StepReport {
+    /// Accepted implicit-step diagnostics; `None` for XPBD or before any step.
+    #[cfg(feature = "implicit")]
+    pub implicit: Option<crate::implicit::ImplicitOutcome>,
     pub max_stretch: Real,
     pub p95_stretch: Real,
     pub max_bend_error: Real,

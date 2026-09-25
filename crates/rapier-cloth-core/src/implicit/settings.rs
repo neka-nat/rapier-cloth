@@ -1,5 +1,42 @@
 use crate::{ClothError, Real};
 
+/// Action when the Newton iteration budget is exhausted. Other failures always
+/// reject the step. Task qualification is limited to the documented towel fixture.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ImplicitCapPolicy {
+    /// Reject an unconverged step and preserve the accepted state.
+    #[default]
+    Strict,
+    /// Return the last accepted iterate only after final CCD, contact, finite-state,
+    /// hard-target and less-than-3% edge-extension checks. Requires 80 iterations
+    /// and a 0.001 m/s tolerance. This does not certify stationary accuracy.
+    ApproximateWithFinalValidation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImplicitTermination {
+    /// The configured Newton-displacement criterion was met.
+    Converged,
+    /// The iteration cap was reached; final physical validation passed.
+    ApproximateIterationCap,
+}
+
+/// Diagnostics for an accepted implicit step, after all final checks succeed.
+/// Residual forces are the negative free-particle objective gradient, in newtons.
+/// Neither the residual nor `converged` bounds trajectory or shape error.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImplicitOutcome {
+    pub termination: ImplicitTermination,
+    /// False for `ApproximateIterationCap`, even when the physical checks pass.
+    pub converged: bool,
+    /// Final backward-Euler objective, in joules.
+    pub energy: Real,
+    /// RMS residual force magnitude over free particles (zero if all fixed).
+    pub force_rms: Real,
+    /// Maximum free-particle residual force magnitude.
+    pub force_max: Real,
+}
+
 /// CPU execution budget for one implicit cloth solve. Numerical accumulation
 /// order is the same in both modes. Host applications own scheduling across
 /// cloths; no global pool or thread-affinity policy is installed.
@@ -8,7 +45,7 @@ pub enum ImplicitExecution {
     /// Run on the calling thread, without creating workers.
     #[default]
     Serial,
-    /// Use the calling thread and up to three scoped workers for material and
+    /// Use the calling thread and up to three scoped workers for material, parent-contact and
     /// sparse-column assembly. Small inputs and other phases stay serial.
     /// Requires a target that supports spawning native threads.
     Parallel4,
@@ -44,6 +81,8 @@ pub struct ImplicitSettings {
     pub material: ShellMaterial,
     /// Explicit per-cloth CPU budget, also preserved by checkpoints.
     pub execution: ImplicitExecution,
+    /// Explicit opt-in to approximate returns; checkpoints preserve this policy.
+    pub cap_policy: ImplicitCapPolicy,
     pub max_iterations: usize,
     pub max_line_search_iterations: usize,
     /// RMS Newton displacement divided by h, in m/s, for three iterations.
@@ -61,6 +100,7 @@ impl Default for ImplicitSettings {
         Self {
             material: ShellMaterial::default(),
             execution: ImplicitExecution::Serial,
+            cap_policy: ImplicitCapPolicy::Strict,
             max_iterations: 80,
             max_line_search_iterations: 24,
             velocity_tolerance: 0.001,
@@ -72,6 +112,14 @@ impl Default for ImplicitSettings {
 
 impl ImplicitSettings {
     pub fn validate(&self) -> Result<(), ClothError> {
+        // Keep approximate returns within the qualified iteration/tolerance profile.
+        if self.cap_policy == ImplicitCapPolicy::ApproximateWithFinalValidation
+            && (self.max_iterations != 80 || self.velocity_tolerance != 0.001)
+        {
+            return Err(ClothError::InvalidParameter(
+                "approximate cap policy requires baseline profile",
+            ));
+        }
         if cfg!(feature = "f32") {
             return Err(ClothError::InvalidParameter(
                 "the experimental implicit solver requires f64",

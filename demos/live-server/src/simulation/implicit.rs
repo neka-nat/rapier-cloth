@@ -1,4 +1,5 @@
 use super::{Command, Frame, Options, PROTOCOL, SceneKind};
+use crate::implicit_options::ImplicitOptions;
 use crate::implicit_robot::RobotTowel;
 use rapier_cloth::ImplicitExecution;
 use serde_json::json;
@@ -9,8 +10,15 @@ pub struct ImplicitDemo {
 }
 impl ImplicitDemo {
     pub fn new() -> Result<Self, String> {
+        Self::with_options(ImplicitOptions::default())
+    }
+    pub fn with_options(options: ImplicitOptions) -> Result<Self, String> {
         Ok(Self {
-            task: RobotTowel::new("nominal", ImplicitExecution::Parallel4)?,
+            task: RobotTowel::with_policy(
+                &options.variant,
+                ImplicitExecution::Parallel4,
+                options.cap_policy,
+            )?,
             advanced: 0,
         })
     }
@@ -104,7 +112,7 @@ impl ImplicitDemo {
             folding: None,
             implicit_available: true,
             implicit: Some(
-                json!({"solver":"implicit","phase":phase,"automatic":t.automatic,
+                json!({"solver":"implicit","phase":phase,"variant":t.variant,"cap_policy":t.cap_policy,"automatic":t.automatic,
                     "stopped":t.stopped,"completed":t.finished(),"end_step":t.input.targets.len(),
                     "floor_height":t.input.thickness*0.5,"grippers":grippers,"grasps":grasps,"sample":t.sample(),
                     "desired":t.desired.map(|p|json!({"translation":p.translation.to_array(),"rotation":p.rotation.to_array()}))
@@ -116,6 +124,61 @@ impl ImplicitDemo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_reset_configuration_is_atomic_and_defaults_remain_strict() {
+        use crate::implicit_options::CapPolicy;
+        let mut demo = super::super::Demo::new(SceneKind::ImplicitTowel).unwrap();
+        assert_eq!(
+            demo.frame(0, false).implicit.unwrap()["cap_policy"],
+            "strict"
+        );
+        let frame = demo
+            .command(
+                Command::Reset {
+                    scene: SceneKind::ImplicitTowel,
+                    implicit: Some(ImplicitOptions {
+                        variant: "lift_5mm".into(),
+                        cap_policy: CapPolicy::Approximate,
+                    }),
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            frame.implicit.as_ref().unwrap()["cap_policy"],
+            "approximate"
+        );
+        assert_eq!(
+            frame.implicit.as_ref().unwrap()["sample"]["approximate_steps"],
+            0
+        );
+        assert!(frame.implicit.as_ref().unwrap()["sample"]["outcome"].is_null());
+        assert!(
+            demo.command(
+                Command::Reset {
+                    scene: SceneKind::ImplicitTowel,
+                    implicit: Some(ImplicitOptions {
+                        variant: "unknown".into(),
+                        ..Default::default()
+                    }),
+                },
+                2
+            )
+            .is_err()
+        );
+        assert_eq!(demo.frame(3, false).positions, frame.positions);
+        assert_eq!(demo.frame(3, false).implicit, frame.implicit);
+        let reset = demo
+            .command(
+                Command::Reset {
+                    scene: SceneKind::ImplicitTowel,
+                    implicit: None,
+                },
+                4,
+            )
+            .unwrap();
+        assert_eq!(reset.implicit.unwrap()["cap_policy"], "strict");
+    }
     #[test]
     fn live_and_headless_advance_identically_and_inspection_is_read_only() {
         let mut live = ImplicitDemo::new().unwrap();
@@ -183,6 +246,7 @@ mod tests {
             .command(
                 Command::Reset {
                     scene: SceneKind::ImplicitTowel,
+                    implicit: None,
                 },
                 3,
             )

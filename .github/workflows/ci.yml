@@ -67,6 +67,8 @@ jobs:
       - run: cargo clippy --locked --workspace --no-default-features --features f64,implicit --all-targets -- -D warnings
       - run: cargo run --locked --release --no-default-features --features f64,implicit --example fold_towel_implicit -- --dt 0.1 --output target/implicit-fold.jsonl
       - run: cargo run --locked --release --no-default-features --features f64,implicit --example fold_towel_implicit -- --dt 0.1 --workers 4 --output target/implicit-fold-parallel.jsonl
+      - run: cargo run --locked --release --no-default-features --features f64,implicit --example fold_towel_implicit -- --case lift_5mm --cap-policy approximate --workers 4 --output target/implicit-fold-lift.jsonl
+      - run: cargo run --locked --release --no-default-features --features f64,implicit --example robot_towel_implicit -- --case lift_5mm --cap-policy approximate --output target/implicit-fold-robot.jsonl
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -149,6 +151,39 @@ jobs:
         if: always()
         with:
           name: live-demo-${{ matrix.precision }}
+          path: demos/viewer/test-results/
+
+  live-implicit:
+    name: Implicit live control (Linux f64)
+    runs-on: ubuntu-latest
+    env:
+      CLOTH_LIVE_IMPLICIT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            demos/live-server -> target
+          key: live-implicit
+      - run: cargo test --locked --manifest-path demos/live-server/Cargo.toml --no-default-features --features f64,implicit
+      - run: cargo clippy --locked --manifest-path demos/live-server/Cargo.toml --no-default-features --features f64,implicit --all-targets -- -D warnings
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: demos/viewer/package-lock.json
+      - run: npm --prefix demos/viewer ci
+      - run: npx playwright install --with-deps chromium
+        working-directory: demos/viewer
+      - run: npm --prefix demos/viewer run test:live -- implicit.spec.js
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: implicit-live-browser-evidence
           path: demos/viewer/test-results/
 
   packages:

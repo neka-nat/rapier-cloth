@@ -86,7 +86,18 @@ function validateImplicit(frame) {
   fold.grippers.forEach(g=>requireValue(g.holding === owners.has(g.id), 'implicit holding state'));
   requireValue(Array.isArray(fold.desired) && fold.desired.length === 2
     && fold.desired.every(p=>vector(p.translation,3) && quaternion(p.rotation)), 'desired poses');
+  requireValue(['strict','approximate'].includes(fold.cap_policy)
+    && ['nominal','lift_5mm','grasp_inset','left_early','right_late','friction_low','friction_high'].includes(fold.variant), 'implicit configuration');
   const s = fold.sample;
-  requireValue(s && s.step === frame.step && Math.abs(s.time-frame.time)<1e-9 && s.held_vertices === seen.size
+  requireValue(s && s.iterations === frame.iterations && s.step === frame.step && Math.abs(s.time-frame.time)<1e-9 && s.held_vertices === seen.size
     && ['physics_ms','rms_speed','max_speed','max_edge_extension'].every(k=>nonnegative(s[k])), 'implicit diagnostics');
+  requireValue(Number.isSafeInteger(s.approximate_steps) && s.approximate_steps >= 0
+    && s.approximate_steps <= frame.step && (fold.cap_policy !== 'strict' || s.approximate_steps === 0), 'approximate history');
+  if (frame.step === 0) { requireValue(s.outcome === null, 'initial solver outcome'); return; }
+  const o = s.outcome;
+  requireValue(o && ['converged','approximate_iteration_cap'].includes(o.termination)
+    && o.converged === (o.termination === 'converged') && Number.isFinite(o.energy)
+    && nonnegative(o.force_rms) && nonnegative(o.force_max), 'implicit outcome');
+  if (!o.converged) requireValue(fold.cap_policy === 'approximate' && s.approximate_steps > 0
+    && frame.iterations === 80 && s.max_edge_extension < 0.03, 'approximate validation');
 }

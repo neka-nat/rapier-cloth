@@ -159,14 +159,14 @@ fn evaluate(model: &Model, x: &[Vec3]) -> Result<ElementBuffers, ClothError> {
 pub(super) fn assemble(
     model: &Model,
     x: &[Vec3],
-    energy: &mut Real,
+    energy: &mut EnergySum,
     mut add_gradient: impl FnMut(usize, Vec3),
     mut add_block: impl FnMut(usize, usize, [[Real; 3]; 3]),
 ) -> Result<(), ClothError> {
     let (triangles, hinges) = evaluate(model, x)?;
     for (tri, result) in model.triangles.iter().zip(triangles) {
         let element = result.expect("unfilled triangle")?;
-        *energy += element.energy;
+        energy.add(element.energy);
         for k in 0..3 {
             add_gradient(tri.ids[k], element.gradient[k]);
         }
@@ -183,7 +183,7 @@ pub(super) fn assemble(
     }
     for (hinge, result) in model.hinges.iter().zip(hinges) {
         let element = result.expect("unfilled hinge")?;
-        *energy += element.energy;
+        energy.add(element.energy);
         let mut block = 0;
         for i in 0..4 {
             add_gradient(hinge.ids[i], element.gradient[i]);

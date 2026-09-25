@@ -17,6 +17,12 @@
 </div>
 <div id="fold-controls" hidden>
 <p id="fold-description" class="note">A scripted two-gripper fold. Complete folding and real-time performance remain unqualified.</p>
+<div id="implicit-options" hidden>
+<label class="field">Script<select id="implicit-case"><option value="nominal">Nominal fold</option><option value="lift_5mm">Lift +5 mm</option><option value="grasp_inset">Inset grasp</option><option value="left_early">Release left early</option><option value="right_late">Release right late</option><option value="friction_low">Lower friction</option><option value="friction_high">Higher friction</option></select></label>
+<label class="field">At iteration limit<select id="cap-policy"><option value="strict">Stop (strict)</option><option value="approximate">Continue after validation (approximate)</option></select></label>
+<p class="note">Script and policy apply on Reset.</p>
+<p id="solver-state" class="note" role="status"></p>
+</div>
 <p id="grasp-state" class="note"></p>
 <button id="release-left" disabled>Release left gripper</button>
 <button id="release-right" disabled>Release right gripper</button>

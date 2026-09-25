@@ -6,6 +6,8 @@ mod folding_oracle;
 #[cfg(all(feature = "f64", feature = "implicit"))]
 #[path = "../../../examples/support/implicit_fixture.rs"]
 mod implicit_fixture;
+#[path = "../../../examples/support/implicit_options.rs"]
+mod implicit_options;
 #[cfg(all(feature = "f64", feature = "implicit"))]
 #[path = "../../../examples/support/implicit_robot.rs"]
 mod implicit_robot;

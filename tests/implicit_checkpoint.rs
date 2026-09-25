@@ -4,15 +4,24 @@ use rapier_cloth::*;
 
 #[test]
 fn checkpoint_restores_solver_choice_and_replays_the_same_step() {
-    replay(ImplicitExecution::Serial, 3);
+    replay(ImplicitExecution::Serial, ImplicitCapPolicy::Strict, 3);
 }
 
 #[test]
 fn checkpoint_restores_parallel_execution_and_replays_the_same_step() {
-    replay(ImplicitExecution::Parallel4, 32);
+    replay(ImplicitExecution::Parallel4, ImplicitCapPolicy::Strict, 32);
 }
 
-fn replay(execution: ImplicitExecution, grid: usize) {
+#[test]
+fn checkpoint_restores_approximate_policy_and_typed_outcome() {
+    replay(
+        ImplicitExecution::Parallel4,
+        ImplicitCapPolicy::ApproximateWithFinalValidation,
+        32,
+    );
+}
+
+fn replay(execution: ImplicitExecution, cap_policy: ImplicitCapPolicy, grid: usize) {
     let id = WorldId::new();
     let mut rigid = PhysicsWorld::new();
     rigid.integration_parameters.dt = 0.1;
@@ -38,6 +47,7 @@ fn replay(execution: ImplicitExecution, grid: usize) {
         }))
         .unwrap();
     let implicit = ImplicitSettings {
+        cap_policy,
         execution,
         ..Default::default()
     };
@@ -55,9 +65,9 @@ fn replay(execution: ImplicitExecution, grid: usize) {
         );
         world
             .step_substep(0.1, &RapierScene::new(query, &previous, 0.1, rigid.gravity))
-            .unwrap();
+            .unwrap()
     };
-    run(&mut world, &mut rigid);
+    let first_report = run(&mut world, &mut rigid);
     let expected = world.cloth(handle).unwrap().positions().to_vec();
     let expected_velocities = world.cloth(handle).unwrap().velocities().to_vec();
     world
@@ -74,7 +84,15 @@ fn replay(execution: ImplicitExecution, grid: usize) {
         world.cloth(handle).unwrap().implicit_solver_settings(),
         Some(implicit)
     );
-    run(&mut world, &mut rigid);
+    let replay_report = run(&mut world, &mut rigid);
+    assert_eq!(
+        first_report.cloths[0].1.implicit,
+        replay_report.cloths[0].1.implicit
+    );
+    assert_eq!(
+        first_report.cloths[0].1.implicit.unwrap().termination,
+        ImplicitTermination::Converged
+    );
     assert_eq!(world.cloth(handle).unwrap().positions(), expected);
     assert_eq!(
         world.cloth(handle).unwrap().velocities(),

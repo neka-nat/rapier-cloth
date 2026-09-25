@@ -29,6 +29,15 @@ for (const row of rows) {
     requireValue(row.pins === (targets ? fixture.grasp.length : 0), 'pin count differs from fixture');
     if (targets) requireValue(fixture.grasp.every((index, i) => targets[i].every((value, axis) =>
       Math.abs(row.x?.[index]?.[axis] - value) < 1e-12)), 'pin targets differ from fixture');
+    if (config.cap_policy !== undefined) {
+      requireValue(['strict','approximate'].includes(config.cap_policy), 'cap policy');
+      const o=row.outcome, count=steps.reduce((n,s)=>n+Number(s.outcome?.converged === false),0);
+      requireValue(o && ['converged','approximate_iteration_cap'].includes(o.termination)
+        && o.converged === (o.termination === 'converged') && Number.isFinite(o.energy)
+        && ['force_rms','force_max'].every(k=>Number.isFinite(o[k]) && o[k]>=0), 'solver outcome');
+      requireValue(row.approximate_steps === count + Number(!o.converged)
+        && (o.converged || config.cap_policy === 'approximate' && row.iterations === 80 && row.max_edge_extension < 0.03), 'approximate history');
+    }
     steps.push(row);
   } else {
     requireValue(['completed', 'failure'].includes(row.kind), 'record kind');
@@ -52,8 +61,11 @@ const record = {
   shapes:[{id:0, kind:'box', half_extents:[1, 0.025, 1], local_translation:[0, config.thickness / 2 - 0.025, 0], color:'#34483e'}],
   frames:[frame(0, 0, x, [], 'Initial state', null), ...steps.map((row, i) => frame(
     row.step, row.t, row.x, row.pins ? fixture.grasp : [],
-    row.pins ? 'Folding' : (i > 0 && steps[i - 1].pins ? 'Release' : 'Settling'),
-    {max_edge_extension:row.max_edge_extension, rms_speed:row.rms_speed, max_speed:row.max_speed},
+    (row.pins ? 'Folding' : (i > 0 && steps[i - 1].pins ? 'Release' : 'Settling'))
+      + (row.outcome?.converged === false ? ' · Approximate (not converged)' : '')
+      + (row.approximate_steps ? ` · Approximate steps: ${row.approximate_steps}` : ''),
+    {max_edge_extension:row.max_edge_extension, rms_speed:row.rms_speed, max_speed:row.max_speed,
+      ...(row.outcome ? {outcome:row.outcome, approximate_steps:row.approximate_steps} : {})},
   ))],
   outcome:{stop_reason:terminal?.kind === 'completed' ? 'completed' : terminal ? 'solver_error' : 'step_limit',
     steps:steps.length, end_step:fixture.targets.length, failure:terminal?.kind === 'failure' ? terminal.error : null},

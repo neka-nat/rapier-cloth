@@ -67,6 +67,8 @@ function updateControls() {
   $('inspect').disabled = !ready || !folding;
   $('inspect').hidden = implicit;
   $('pose-controls').hidden = !implicit;
+  $('implicit-options').hidden = !implicit;
+  for (const id of ['implicit-case','cap-policy']) $(id).disabled = !ready;
   for (const button of document.querySelectorAll('.pose-buttons button')) button.disabled = !ready || stopped || !!pending;
   $('grasp').disabled = !ready || !implicit || stopped || !!task?.grippers[Number($('gripper').value)].holding;
   $('scene').querySelector('[value="implicit_towel"]').disabled = !source?.implicit_available;
@@ -161,6 +163,10 @@ function applyFrame(frame) {
     ? {stretch:'Max edge extension',penetration:'RMS speed',contacts:'Held vertices',target:'Max speed'}
     : {stretch:'Stretch · p95',penetration:'Max penetration',contacts:'Contacts',target:'Attachment error'})) $(`${id}-label`).textContent = label;
   if (implicit) {
+    const outcome = task.sample.outcome;
+    const termination = !outcome ? 'No accepted step' : outcome.converged ? 'Converged' : 'Approximate · not converged';
+    $('solver-state').textContent = `${task.variant} · ${task.cap_policy} · ${termination} · Approximate steps: ${task.sample.approximate_steps}`;
+    $('solver-state').dataset.state = task.sample.approximate_steps ? 'approximate' : '';
     $('stretch').textContent = `${(task.sample.max_edge_extension*100).toFixed(3)} %`;
     $('penetration').textContent = `${(task.sample.rms_speed*1000).toFixed(3)} mm/s`;
     $('contacts').textContent = task.sample.held_vertices;
@@ -181,7 +187,13 @@ function applyFrame(frame) {
 function connect() {
   const old = socket;
   ready = false; pending = null; queue = []; nextId = 1;
-  let selectInitialScene = new URLSearchParams(location.search).get('scene') === 'implicit_towel';
+  const params = new URLSearchParams(location.search);
+  let selectInitialScene = params.get('scene') === 'implicit_towel';
+  if (selectInitialScene) {
+    $('cap-policy').value = params.get('cap_policy') === 'approximate' ? 'approximate' : 'strict';
+    const variant = params.get('case') ?? 'nominal';
+    $('implicit-case').value = [...$('implicit-case').options].some(o => o.value === variant) ? variant : 'nominal';
+  }
   const current = socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/live/ws`);
   old?.close(); clearTimeout(connectionTimeout); $('reconnect').hidden = true;
   $('error').textContent = ''; updateControls(); setStatus('Connecting');
@@ -196,7 +208,7 @@ function connect() {
       pending = null; applyFrame(frame); ready = true; clearTimeout(connectionTimeout); updateControls();
       if (selectInitialScene) {
         selectInitialScene = false;
-        enqueue({type:'reset',scene:'implicit_towel'});
+        enqueue(resetCommand('implicit_towel'));
       }
       // Commands can follow immediately; automatic stepping waits for rAF.
       if (queue.length) dispatch(performance.now());
@@ -217,8 +229,11 @@ function optionsChanged() {
 }
 for (const id of ['wind','sphere-x','sphere-z']) $(id).oninput = optionsChanged;
 $('auto-motion').onchange = optionsChanged;
-$('scene').onchange = () => enqueue({type:'reset',scene:$('scene').value});
-$('reset').onclick = () => enqueue({type:'reset',scene:$('scene').value});
+function resetCommand(scene = $('scene').value) {
+  return {type:'reset',scene,...(scene === 'implicit_towel' ? {implicit:{variant:$('implicit-case').value,cap_policy:$('cap-policy').value}} : {})};
+}
+$('scene').onchange = () => enqueue(resetCommand());
+$('reset').onclick = () => enqueue(resetCommand());
 $('release').onclick = () => enqueue({type:'release'});
 $('release-left').onclick = () => enqueue({type:'release_gripper', gripper:0});
 $('release-right').onclick = () => enqueue({type:'release_gripper', gripper:1});

@@ -154,7 +154,98 @@ The scaling benchmark's `total` excludes Rapier's rigid-body step. It is therefo
 a different scope from `physics_frame` above. Timings are serial CPU measurements;
 larger grids are not automatically suitable for real-time use.
 
+## Current implicit contact performance
+
+The current implementation omits unused Hessian storage from first-order contact
+differentiation. It retains the second-order formulas, contact result buffers,
+four-worker scheduler and original accumulation order. In f64, the first-order
+intermediate shrinks from 1,256 to 104 bytes; second-order values remain 1,256
+bytes. Intermediate size is not an equivalent reduction in process memory.
+
+A local matched comparison on September 21, 2026 used an Intel Core i9-13900H,
+Linux x86_64, Rust 1.93.0, release/f64, one 32×32 towel, four workers, actual
+`h=0.1` and the explicit approximate cap policy. Each trajectory simulated eight
+seconds. Both versions already used parallel material, sparse and parent-contact
+assembly; this comparison isolates the derivative storage change.
+
+Each entrypoint/case had one warmup per version and three measured runs per
+version, alternating before/after order. No project builds, tests or geometry
+audits ran concurrently. Desktop load, CPU frequency and affinity were
+uncontrolled. All measured rows are retained. These are local observations,
+not a guaranteed speedup or a controlled estimate of performance on other hosts.
+
+| Entrypoint / case | Before, mean wall seconds (range) | After, mean wall seconds (range) | Reduction of means | Median paired reduction |
+|---|---:|---:|---:|---:|
+| Rapier hands / nominal | 68.36 (54.15–95.52) | 52.63 (52.33–53.06) | 23.0% | 4.2% |
+| Rapier hands / lift +5 mm | 54.95 (46.98–61.63) | 52.19 (48.66–55.44) | 5.0% | 6.7% |
+| Browser / nominal | 55.29 (43.71–77.28) | 38.15 (36.71–40.74) | 31.0% | 18.2% |
+| Browser / lift +5 mm | 45.75 (37.15–59.15) | 47.88 (35.66–65.53) | −4.7% | −3.7% |
+
+A negative reduction means more time. The slow nominal control runs raise its
+mean gains substantially; the paired medians describe the same three comparison
+pairs without discarding those runs. Browser lift is slower in two of three
+pairs and in the overall mean. A consistent improvement across live conditions
+has **not** been established. Headless lift also has one pair that is 18.0%
+slower despite its lower overall mean.
+
+Headless wall time includes recording output; summed physics time is within
+0.11 s of it. Browser timing starts at the first automatic step request and ends
+at the final response, excluding startup, manual steps, screenshots and output
+validation. Both native servers use the same built viewer, headless Chrome 125,
+software WebGL and a 1440×1050 viewport. Browser physics means are 0.8–1.0 s less
+than total wait. All 80 step states, outcomes and work counts match in every
+headless run; all 1,280 timed/warmup browser frames match the headless Rapier
+positions and typed outcomes. Nominal converges throughout; lift step 24 remains
+explicitly approximate.
+
+| Case | Headless process CPU mean, before → after | Headless mean peak RSS, before → after | Browser native-server CPU mean, before → after |
+|---|---:|---:|---:|
+| nominal | 104.44 → 94.76 s | 144.09 → 142.59 MiB | 88.27 → 67.87 s |
+| lift +5 mm | 98.23 → 91.80 s | 127.31 → 129.15 MiB | 80.40 → 80.46 s |
+
+CPU is process user+system time across its threads and may exceed wall time.
+Browser CPU covers the native server only; it excludes Chrome and software
+rendering. RSS includes allocator and recording costs. Smaller AD values do not
+remove the existing contact staging buffers or the need to budget four workers.
+
+| Entrypoint / case | Mean per-run step/response p95, before → after | Mean per-run slowest step/response, before → after |
+|---|---:|---:|
+| Rapier hands / nominal | 2.08 → 1.53 s | 6.00 → 5.23 s |
+| Rapier hands / lift +5 mm | 1.56 → 1.48 s | 5.12 → 5.11 s |
+| Browser / nominal | 1.56 → 1.05 s | 7.63 → 3.42 s |
+| Browser / lift +5 mm | 1.34 → 1.39 s | 4.47 → 3.67 s |
+
+One-minute host load at run start ranged from 3.63 to 17.79 in the headless block
+and 4.15 to 17.58 in the browser block. The blocks ran at different times;
+software rendering also shares CPU resources. Their absolute differences do not
+isolate a rendering effect or qualify hardware GPU rendering.
+
+The separate captured-contact kernel comparison reduces first-order elapsed
+loop time by about 90%, but second-order vertex-face / edge-edge evaluation takes
+9.8% / 13.5% more time. A matched four-input solver screen lowers combined saved
+release-plus-settle time by 11.6% and process CPU by 16.2%; its free/cap controls
+stay within the preset 5% regression limit. These narrower results do not imply
+a 90% task speedup. Remaining second-order cost and the browser lift regression
+need further investigation.
+
+Eight simulated seconds still require about 52 s headless and 38–48 s in the
+measured browser means, with individual responses taking several seconds.
+Wall-clock real time remains unmet. See the
+[qualification boundary](implicit.md#qualification-boundary) for task and
+accuracy limits.
+
+Reproduce the current Rapier case with:
+
+```sh
+cargo run --locked --release --no-default-features --features f64,implicit --example robot_towel_implicit -- --case nominal --cap-policy approximate --workers 4 --output robot-fold.jsonl
+```
+
 ## Implicit towel folding
+
+The implicit timings below are historical measurements of the preceding contact
+implementation. Use the [current matched comparison](#current-implicit-contact-performance)
+above for the coherent parent-primitive contact model and explicit approximate
+cap policy. The following numbers are not current performance claims.
 
 For the experimental f64 shell solver, measure the complete fold, release and
 settle trajectory separately from the XPBD benchmarks above:

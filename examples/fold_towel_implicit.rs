@@ -5,6 +5,9 @@ use rapier_cloth::*;
 #[path = "support/implicit_fixture.rs"]
 mod implicit_fixture;
 use implicit_fixture::Input;
+#[path = "support/implicit_options.rs"]
+mod implicit_options;
+use implicit_options::{CapPolicy, Outcome};
 use serde_json::json;
 use std::{
     fs,
@@ -15,11 +18,13 @@ use std::{
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let mut h = 0.1;
+    let mut cap_policy = CapPolicy::Strict;
     let mut execution = ImplicitExecution::Serial;
     let mut output = None;
     let mut variant = String::from("nominal");
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--cap-policy" => cap_policy = CapPolicy::parse(args.next())?,
             "--case" => variant = args.next().ok_or("--case requires a name")?,
             "--dt" => h = args.next().ok_or("--dt requires 0.04 or 0.1")?.parse()?,
             "--workers" => {
@@ -32,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--output" => output = Some(args.next().ok_or("--output requires a new file path")?),
             "--help" => {
                 println!(
-                    "fold_towel_implicit [--dt 0.04|0.1] [--workers 1|4] [--case NAME] [--output NEW_RECORDING.jsonl]"
+                    "fold_towel_implicit [--dt 0.04|0.1] [--cap-policy strict|approximate] [--workers 1|4] [--case NAME] [--output NEW_RECORDING.jsonl]"
                 );
                 println!("Cases: {}", implicit_fixture::CASES.join(", "));
                 return Ok(());
@@ -97,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }))?;
     cloth.set_implicit_solver(Some(ImplicitSettings {
         execution,
+        cap_policy: cap_policy.into(),
         ..Default::default()
     }))?;
     let handle = world.add_cloth(cloth);
@@ -104,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         out,
         "{}",
         json!({"kind":"config","solver":"implicit","h":input.h,"substeps":1,"case":variant,"friction":friction,
-        "workers":match execution { ImplicitExecution::Serial => 1, ImplicitExecution::Parallel4 => 4 },
+        "cap_policy":cap_policy,"workers":match execution { ImplicitExecution::Serial => 1, ImplicitExecution::Parallel4 => 4 },
         "youngs_modulus":821000.0,"poisson_ratio":0.243,"thickness":input.thickness,
         "density":0.1503,"damping":0.0,"barrier_stiffness":30.0,"friction_velocity":0.001,
         "newton_iterations":80,"velocity_tolerance":0.001,"candidate_pair_limit":10000000,
@@ -113,6 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     out.flush()?;
     let started = Instant::now();
     let mut times = Vec::new();
+    let mut approximate_steps = Vec::new();
     let mut maximum_extension: f64 = 0.0;
     let mut window = Vec::new();
     let duration = input.targets.len() as f64 * input.h;
@@ -155,6 +162,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         times.push(seconds);
+        let outcome = report.cloths[0].1.implicit.expect("implicit outcome");
+        if !outcome.converged {
+            approximate_steps.push(step + 1);
+        }
         let cloth = world.cloth(handle)?;
         let x: Vec<_> = cloth.positions().iter().map(|p| p.to_array()).collect();
         if x.iter().any(|p| p[0].abs() >= 1.0 || p[2].abs() >= 1.0) {
@@ -189,6 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{}",
             json!({"kind":"step","step":step+1,"t":t,"seconds":seconds,
             "pins":cloth.pins().len(),"pinned_particles":cloth.pins().keys().copied().collect::<Vec<_>>(),"rms_speed":rms_speed,"max_speed":max_speed,"max_edge_extension":extension,
+            "outcome":Outcome::from(outcome),"approximate_steps":approximate_steps.len(),
             "iterations":report.cloths[0].1.iterations,"candidate_pairs":report.cloths[0].1.surface_collision.candidate_pairs,
             "ccd_checks":report.cloths[0].1.surface_collision.ccd_checks,"x":x,"v":v})
         )?;
@@ -215,7 +227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .sqrt();
     times.sort_by(f64::total_cmp);
     let simulation_wall: f64 = times.iter().sum();
-    let summary = json!({"kind":"completed","steps":input.targets.len(),"simulated_seconds":duration,
+    let summary = json!({"kind":"completed","steps":input.targets.len(),"approximate_steps":approximate_steps,"simulated_seconds":duration,
         "simulation_wall_seconds":simulation_wall,"total_wall_seconds":started.elapsed().as_secs_f64(),
         "mean_step_seconds":simulation_wall/times.len() as f64,"p95_step_seconds":times[(times.len()-1)*95/100],
         "max_step_seconds":times[times.len()-1],"max_edge_extension":maximum_extension,

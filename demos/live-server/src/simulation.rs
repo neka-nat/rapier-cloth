@@ -1,3 +1,4 @@
+use crate::implicit_options::ImplicitOptions;
 use rapier_cloth::Real;
 use serde::{Deserialize, Serialize};
 mod fold;
@@ -52,6 +53,8 @@ pub enum Command {
     Step,
     Reset {
         scene: SceneKind,
+        #[serde(default)]
+        implicit: Option<ImplicitOptions>,
     },
     SetOptions {
         options: Options,
@@ -131,8 +134,24 @@ impl Demo {
         }
     }
     pub fn command(&mut self, command: Command, request_id: u32) -> Result<Frame, String> {
-        if let Command::Reset { scene } = command {
-            *self = Self::new(scene)?;
+        if let Command::Reset { scene, implicit } = command {
+            let next = if let Some(options) = implicit {
+                if scene != SceneKind::ImplicitTowel {
+                    return Err("Implicit options require the implicit towel scene".into());
+                }
+                #[cfg(all(feature = "f64", feature = "implicit"))]
+                {
+                    Self::Implicit(Box::new(implicit::ImplicitDemo::with_options(options)?))
+                }
+                #[cfg(not(all(feature = "f64", feature = "implicit")))]
+                {
+                    let _ = options;
+                    return Err("Rebuild with f64,implicit to use this scene".into());
+                }
+            } else {
+                Self::new(scene)?
+            };
+            *self = next;
             return Ok(self.frame(request_id, true));
         }
         match self {
@@ -163,7 +182,8 @@ mod unavailable_tests {
         assert!(
             demo.command(
                 Command::Reset {
-                    scene: SceneKind::ImplicitTowel
+                    scene: SceneKind::ImplicitTowel,
+                    implicit: None,
                 },
                 1
             )

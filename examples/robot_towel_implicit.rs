@@ -1,6 +1,8 @@
 //! Rapier end-effector command example using the same task as the implicit live scene.
 #[path = "support/implicit_fixture.rs"]
 mod implicit_fixture;
+#[path = "support/implicit_options.rs"]
+mod implicit_options;
 #[path = "support/implicit_robot.rs"]
 mod implicit_robot;
 use implicit_robot::RobotTowel;
@@ -16,8 +18,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut variant = String::from("nominal");
     let mut output = None;
     let mut workers = 4;
+    let mut cap_policy = implicit_options::CapPolicy::Strict;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--cap-policy" => cap_policy = implicit_options::CapPolicy::parse(args.next())?,
             "--case" => variant = args.next().ok_or("--case requires a name")?,
             "--output" => output = Some(args.next().ok_or("--output requires a new path")?),
             "--workers" => {
@@ -30,7 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "--help" => {
-                println!("robot_towel_implicit [--case NAME] [--workers 1|4] [--output NEW.jsonl]");
+                println!(
+                    "robot_towel_implicit [--case NAME] [--cap-policy strict|approximate] [--workers 1|4] [--output NEW.jsonl]"
+                );
                 println!("Cases: {}", implicit_fixture::CASES.join(", "));
                 return Ok(());
             }
@@ -42,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         ImplicitExecution::Serial
     };
-    let mut task = RobotTowel::new(&variant, execution)?;
+    let mut task = RobotTowel::with_policy(&variant, execution, cap_policy)?;
     let writer: Box<dyn Write> = if let Some(path) = output {
         Box::new(OpenOptions::new().write(true).create_new(true).open(path)?)
     } else {
@@ -53,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         out,
         "{}",
         json!({"kind":"config","solver":"implicit","control":"rapier_end_effectors","case":variant,"workers":workers,
-        "h":task.input.h,"thickness":task.input.thickness,"x":task.input.x,"faces":task.input.faces,"grasp":task.input.grasp})
+        "cap_policy":cap_policy,"h":task.input.h,"thickness":task.input.thickness,"x":task.input.x,"faces":task.input.faces,"grasp":task.input.grasp})
     )?;
     let mut window = vec![];
     while !task.finished() {
@@ -109,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .fold(0.0, Real::max);
     let mut times: Vec<_> = task.samples.iter().map(|s| s.physics_ms).collect();
     times.sort_by(f64::total_cmp);
-    let summary = json!({"kind":"completed","steps":task.step,"settled":settled,"final_window_drift":drift,
+    let summary = json!({"kind":"completed","steps":task.step,"approximate_steps":task.approximate_steps,"settled":settled,"final_window_drift":drift,
         "planar_fold_rms_error":fold,"max_edge_extension":extension,"simulation_wall_seconds":times.iter().sum::<f64>()/1000.0,
         "p95_step_ms":times[(times.len()-1)*95/100],"max_step_ms":times.last(),"held_vertices":task.held_particles().len()});
     writeln!(out, "{summary}")?;

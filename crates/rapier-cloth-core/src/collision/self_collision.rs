@@ -939,3 +939,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(feature = "implicit")]
+#[path = "primitive_queries.rs"]
+mod primitive_queries;

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Omit Hessian storage from first-order implicit contact differentiation while retaining the second-order path, contact result buffers and worker scheduling. Preserve contact energies, gradients, curvature, typed outcomes and qualified folding trajectories exactly.
+
+- Extend `ImplicitExecution::Parallel4` to dense parent-contact energy, gradient and curvature evaluation. Preserve original contact accumulation/error order and the four-thread budget; keep serial execution and small contact batches on the caller. Worker-creation failure retains transactional rollback.
+
+- Add coherent parent-primitive implicit self-contact, compensated scalar energy and stable near-rest membrane energy. Add strict-default `ImplicitCapPolicy`, opt-in final-validated iteration-cap returns and typed `StepReport::implicit` diagnostics. Update complete settings/report literals for these pre-release fields. Approximate returns remain explicitly unconverged; other errors retain rollback behavior.
+- Expose cap policy and outcome history in both implicit examples and the Rapier live scene. Select script/policy at reset, display cumulative approximate steps, and preserve command, release, regrasp and failure-recovery semantics. Qualification is bounded to the documented h=0.1 towel fixture; real-time CPU performance remains open.
+
 - Add `ImplicitSettings::execution` with serial default and opt-in `ImplicitExecution::Parallel4` for deterministic material and sparse-column assembly. Checkpoints retain execution settings; worker creation failure returns `ClothError::ImplicitWorkerSpawnFailed` without committing the affected cloth step. The implicit folding example accepts `--workers 1|4`. Update exhaustive error matches and complete implicit-settings literals as needed.
 - Skip implicit Hessian blocks that will not be stored because they belong to fixed vertices or the upper triangle, and skip block construction during trial energy/gradient evaluation. Preserve numerical contributions, summation order and solver stopping criteria; check hard-target elimination against the full system.
 

@@ -18,7 +18,17 @@ The launcher builds the Rust server with `f64,implicit`. This scene uses four
 CPU workers, one 0.1 s physical solve per request, and one 32×32 towel.
 The library's default execution remains serial.
 
-Press **Resume** for the reference fold, release and settle sequence.
+Press **Resume** for the fold, release and settle sequence. The default is
+**Stop (strict)**. To run the bounded approximate mode, select a **Script**, choose
+**Continue after validation (approximate)** under **At iteration limit**, then
+press **Reset**. Reset applies those selections to a new task. For the 5 mm lift:
+
+**http://127.0.0.1:5173/live.html?scene=implicit_towel&paused=1&case=lift_5mm&cap_policy=approximate**
+
+The solver status displays **Approximate · not converged** for a capped return.
+The cumulative **Approximate steps** count remains visible on later converged
+frames and resets to zero with the task. Accepted approximations continue the
+script; solver errors still stop it.
 For manual operation, leave the task paused, select a hand, use **X/Y/Z ±**
 (5 mm) or **Roll ±** (5 degrees about world X), then press **Step frame**.
 A pose button queues the target without advancing simulation time.
@@ -44,6 +54,8 @@ Use metres, seconds, a Y-up world frame and unit quaternions in **[x, y, z, w]**
 order. The shared Rust adapter accepts:
 
 ```rust,ignore
+// Construction defaults to strict; opt in explicitly when appropriate:
+// RobotTowel::with_policy("lift_5mm", ImplicitExecution::Parallel4, CapPolicy::Approximate)?;
 task.set_pose(0, translation, rotation, task.step + 1)?;
 task.set_pose(1, other_translation, other_rotation, task.step + 1)?;
 task.tick()?; // advances Rapier and cloth together by 0.1 s
@@ -67,12 +79,27 @@ For example, at accepted step 0:
 Read the current pose from `frame.implicit.grippers` before constructing a target.
 Other commands are `step`, `release_gripper`, `grasp_gripper`, and
 `reset` with `scene: "implicit_towel"`. Gripper IDs are 0 (left) and 1 (right).
+A reset can include `implicit: {"variant":"lift_5mm","cap_policy":"approximate"}`;
+omitting it selects nominal/strict. Unknown policies, variants or options are
+rejected before replacing the current world. For example:
+
+```json
+{"request_id":2,"command":{"type":"reset","scene":"implicit_towel","implicit":{"variant":"lift_5mm","cap_policy":"approximate"}}}
+```
+
 A pose response acknowledges the pending target in `implicit.desired`; actual
 body poses and cloth positions change only after a successful `step`.
 For coordinated motion, acknowledge both hands' commands before sending `step`.
 
 Frames also expose the accepted clock, current grasp anchors, `automatic`,
-`completed`, `stopped` and measured extension/speeds. `implicit_available`
+`completed`, `stopped` and measured extension/speeds. `implicit.cap_policy` and
+`implicit.variant` identify the active configuration. `implicit.sample.outcome`
+is null at step zero, otherwise it contains `termination` (`converged` or
+`approximate_iteration_cap`), `converged`, energy and residual forces.
+`implicit.sample.approximate_steps` is cumulative, and `iterations` reports
+actual work. An accepted approximation advances cloth, Rapier and time exactly
+once, with `advanced_substeps = 1`. Its `converged` flag stays false. See
+[the cap-policy contract](implicit.md#iteration-limits-and-accepted-outcomes). `implicit_available`
 advertises server capability. The ordinary f32 server cannot create this scene.
 The browser keeps one request in flight and coalesces unsent commands per hand;
 it does not interpolate poses or accumulate catch-up physics. See the
@@ -95,26 +122,33 @@ new independent world.
 
 ```bash
 cargo run --locked --release --no-default-features --features f64,implicit --example robot_towel_implicit -- --output robot-fold.jsonl
-cargo run --locked --release --no-default-features --features f64,implicit --example robot_towel_implicit -- --case grasp_inset --workers 4
+cargo run --locked --release --no-default-features --features f64,implicit --example robot_towel_implicit -- --case lift_5mm --cap-policy approximate --workers 4
 ```
 
 The output path must be new. JSONL includes actual hand poses, grasp ownership,
 accepted cloth states, timing and terminal status. This diagnostic format is
 separate from the recording viewer's schema; use the live page to inspect robot
-control. `--workers 1` selects serial execution; this example defaults to 4.
+control. Each sample retains its typed outcome and cumulative approximate count.
+`--cap-policy strict|approximate` defaults to strict. `--workers 1` selects serial
+execution; this example defaults to 4.
 
-The nominal Rapier-body path completed all 80 steps locally. Position differences
-from the earlier directly pinned reference were below 2.8e-8 m. All 80 live states
-matched the headless robot example exactly on the same build and host.
+The directly prescribed h=0.1 s fixture passes seven bounded cases with explicit
+approximation: nominal, grasp inset by one grid column, lift increased by 5 mm,
+left release one step early, right release one step late, and friction 0.4/0.6.
+Across their 560 accepted steps, only lift step 24 is approximate. Strict mode
+still rejects that cap. These checks do not qualify arbitrary manual motion.
 
-A bounded h=0.1 screen of the directly prescribed fixture passed the nominal
-case, grasp inset by one grid column, left release one step early, right release
-one step late, and friction 0.4 and 0.6. A sinusoidal lift increase of only 5 mm
-failed at step 24 (2.4 s) under the unchanged 80-iteration budget. These six
-successful cases and one failed case do not qualify arbitrary manual motion.
-Independent geometry checks found no intersections or clearance violations in
-the 591 retained endpoint states, including the failed prefix and robot baseline;
-endpoint sampling is not a continuous-motion proof.
+The current Rapier adapter completes nominal and lift scripts with all 80 live
+frames exactly matching the headless adapter on the same Linux build/host.
+Only lift step 24 is approximate. Independent checks cover their 162 endpoint
+states; fold RMS is about 12.46 / 11.79 mm and both pass the released settling
+window. The lift's maximum vertex difference from direct pin commands is about
+0.727 mm over the path (final RMS 0.0129 mm), so the two control paths are not
+claimed bitwise identical. Continuous-motion protection remains the runtime CCD.
 
-Physical success at h=0.1 and wall-clock responsiveness are separate requirements.
-See [live performance](performance.md#implicit-live-response).
+Physical task success at h=0.1 and wall-clock responsiveness are separate
+requirements. See the [current CPU and browser measurements](performance.md#current-implicit-contact-performance)
+for the parallel parent-contact backend with specialized first-order derivative
+storage. Its qualified task states are unchanged;
+complete-task real time remains unmet. Budget its four workers and temporary
+contact storage alongside the rest of the robot simulator.

@@ -15,6 +15,8 @@ Node.js 22.12 or newer and a WebGL browser. See the
 For live implicit folding and manual Rapier end-effector poses, run
 `npm --prefix demos/viewer run live:implicit` and open
 **http://127.0.0.1:5173/live.html?scene=implicit_towel&paused=1**.
+Choose the script and iteration-limit policy, then Reset to apply them. Strict
+is the default; approximate returns and their cumulative count are displayed.
 See [robot control](../../docs/robot-control.md) for 5 mm pose commands,
 independent releases, failure recovery and measured limits.
 

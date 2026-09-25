@@ -2,6 +2,7 @@
 //! End effectors have no colliders. This is not physical finger pinching or force feedback.
 #![allow(dead_code)]
 use super::implicit_fixture::Input;
+use super::implicit_options::{CapPolicy, Outcome};
 use rapier_cloth::{Real, rapier::prelude::*, *};
 use serde::Serialize;
 use std::time::Instant;
@@ -21,6 +22,8 @@ pub struct RobotTowel {
     pub physics_ms: f64,
     pub report: StepReport,
     pub samples: Vec<Sample>,
+    pub cap_policy: CapPolicy,
+    pub approximate_steps: usize,
 }
 #[derive(Clone, Serialize)]
 pub struct Sample {
@@ -32,9 +35,18 @@ pub struct Sample {
     pub max_edge_extension: Real,
     pub held_vertices: usize,
     pub iterations: usize,
+    pub outcome: Option<Outcome>,
+    pub approximate_steps: usize,
 }
 impl RobotTowel {
     pub fn new(variant: &str, execution: ImplicitExecution) -> Result<Self, String> {
+        Self::with_policy(variant, execution, CapPolicy::Strict)
+    }
+    pub fn with_policy(
+        variant: &str,
+        execution: ImplicitExecution,
+        cap_policy: CapPolicy,
+    ) -> Result<Self, String> {
         let input = Input::load(0.1, variant)?;
         let id = WorldId::new();
         let mut rigid = PhysicsWorld::new();
@@ -84,6 +96,7 @@ impl RobotTowel {
         cloth
             .set_implicit_solver(Some(ImplicitSettings {
                 execution,
+                cap_policy: cap_policy.into(),
                 ..Default::default()
             }))
             .map_err(|e| e.to_string())?;
@@ -117,6 +130,8 @@ impl RobotTowel {
             physics_ms: 0.0,
             report: StepReport::default(),
             samples: vec![],
+            cap_policy,
+            approximate_steps: 0,
         };
         for side in 0..2 {
             task.attach_current(side)?;
@@ -346,6 +361,13 @@ impl RobotTowel {
             }
             Ok(mut report) => {
                 self.report = report.cloths.remove(0).1;
+                if self
+                    .report
+                    .implicit
+                    .is_some_and(|o| o.termination == ImplicitTermination::ApproximateIterationCap)
+                {
+                    self.approximate_steps += 1;
+                }
                 self.desired = desired;
                 self.step += 1;
                 self.samples.push(self.sample());
@@ -375,6 +397,8 @@ impl RobotTowel {
             max_edge_extension: (self.report.max_stretch - 1.0).max(0.0),
             held_vertices: self.held_particles().len(),
             iterations: self.report.iterations,
+            outcome: self.report.implicit.map(Outcome::from),
+            approximate_steps: self.approximate_steps,
         }
     }
 }

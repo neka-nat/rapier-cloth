@@ -1,6 +1,7 @@
 import {test,expect} from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
+import {gunzipSync} from 'node:zlib';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {validateFrame} from '../../src/live-protocol.js';
@@ -20,6 +21,8 @@ test('implicit pose commands, independent release and reset use actual Rapier fr
   await page.goto('/live.html?scene=implicit_towel&paused=1');await idle(page);
   await expect.poll(async()=>(await snapshot(page)).scene).toBe('implicit_towel');await idle(page);
   const initial=await snapshot(page);
+  expect(initial.implicit.cap_policy).toBe("strict");
+  expect(initial.implicit.sample.approximate_steps).toBe(0);
   expect(initial.implicit.sample.held_vertices).toBe(53);
   expect(initial.anchors).toHaveLength(159);
   expect(initial.grippers.every(g=>g.visible)).toBe(true);
@@ -54,16 +57,17 @@ test('implicit pose commands, independent release and reset use actual Rapier fr
   expect((await snapshot(page)).implicit.automatic).toBe(true);
   expect(errors).toEqual([]);
 });
-test('implicit live fold matches headless states through release and settling and measures response cost',async({page},testInfo)=>{
-  test.setTimeout(240_000);
-  const reference=process.env.CLOTH_IMPLICIT_REFERENCE ?? testInfo.outputPath('headless.jsonl');
-  if (!process.env.CLOTH_IMPLICIT_REFERENCE) {
+for (const variant of ['nominal','lift_5mm']) test(`implicit ${variant} fold preserves outcomes and matches headless states through release and settling`,async({page},testInfo)=>{
+  test.setTimeout(600_000);
+  const reference=process.env.CLOTH_IMPLICIT_REFERENCE_DIR ? path.join(process.env.CLOTH_IMPLICIT_REFERENCE_DIR,`${variant}.jsonl.gz`) : testInfo.outputPath('headless.jsonl');
+  if (!process.env.CLOTH_IMPLICIT_REFERENCE_DIR) {
     fs.mkdirSync(path.dirname(reference),{recursive:true});
-    const run=spawnSync('cargo',['run','--locked','--release','--no-default-features','--features','f64,implicit','--example','robot_towel_implicit','--','--output',reference],
-      {cwd:fileURLToPath(new URL('../../../../',import.meta.url)),encoding:'utf8',timeout:120000});
+    const run=spawnSync('cargo',['run','--locked','--release','--no-default-features','--features','f64,implicit','--example','robot_towel_implicit','--','--case',variant,'--cap-policy','approximate','--output',reference],
+      {cwd:fileURLToPath(new URL('../../../../',import.meta.url)),encoding:'utf8',timeout:240000});
     expect(run.status,run.stderr).toBe(0);
   }
-  const rows=fs.readFileSync(reference,'utf8').trim().split('\n').map(JSON.parse);
+  const bytes=fs.readFileSync(reference);
+  const rows=(reference.endsWith('.gz') ? gunzipSync(bytes) : bytes).toString('utf8').trim().split('\n').map(JSON.parse);
   const referenceSteps=rows.filter(r=>r.kind==='step');
   const errors=[], frames=[];
   await page.addInitScript(() => {
@@ -97,10 +101,15 @@ test('implicit live fold matches headless states through release and settling an
       if(f.type==='frame' && f.scene==='implicit_towel' && f.advanced_substeps===1)frames.push(f);
     });
   });
-  await page.goto('/live.html?scene=implicit_towel&paused=1');await idle(page);
+  await page.goto(`/live.html?scene=implicit_towel&paused=1&case=${variant}&cap_policy=approximate`);await idle(page);
   await expect.poll(async()=>(await snapshot(page)).scene).toBe('implicit_towel');await idle(page);
+  if (variant === 'lift_5mm') {
+    for (let i=0;i<24;i++) await advance(page);
+    await expect(page.locator('#solver-state')).toContainText('Approximate · not converged');
+    await page.screenshot({path:testInfo.outputPath('implicit-approximate-step.png'),fullPage:true});
+  }
   await page.getByRole('button',{name:'Resume',exact:true}).click();
-  await expect.poll(async()=>(await snapshot(page)).step,{timeout:120000,intervals:[200]}).toBe(80);
+  await expect.poll(async()=>(await snapshot(page)).step,{timeout:240000,intervals:[200]}).toBe(80);
   await idle(page);
   const final=await snapshot(page);
   expect(final.implicit.stopped).toBeNull();expect(final.implicit.completed).toBe(true);
@@ -110,8 +119,20 @@ test('implicit live fold matches headless states through release and settling an
   for(let i=0;i<frames.length;i++){
     validateFrame(frames[i]);
     expect(frames[i].positions).toEqual(referenceSteps[i].x.flat());
+    for (const key of ['outcome','approximate_steps','iterations']) expect(frames[i].implicit.sample[key]).toEqual(referenceSteps[i].sample[key]);
     expect(frames[i].implicit.grippers.map(g=>({translation:g.translation,rotation:g.rotation}))).toEqual(referenceSteps[i].grippers);
   }
+  const approximate = frames.filter(f=>!f.implicit.sample.outcome.converged);
+  expect(approximate.length).toBe(variant === 'lift_5mm' ? 1 : 0);
+  expect(final.implicit.sample.approximate_steps).toBe(approximate.length);
+  await expect(page.locator('#solver-state')).toContainText(`Approximate steps: ${approximate.length}`);
+  for (const f of approximate) {
+    expect(f.implicit.sample.outcome.termination).toBe('approximate_iteration_cap');
+    expect(f.advanced_substeps).toBe(1); expect(f.implicit.stopped).toBeNull();
+    const corrupted=structuredClone(f);corrupted.implicit.sample.outcome.converged=true;
+    expect(()=>validateFrame(corrupted)).toThrow('implicit outcome');
+  }
+  fs.writeFileSync(testInfo.outputPath('accepted-frames.jsonl'),frames.map(f=>JSON.stringify(f)).join('\n')+'\n');
   expect(frames[39].implicit.sample.held_vertices).toBe(53);
   expect(frames[40].implicit.sample.held_vertices).toBe(0);
   expect(final.positions).toEqual(frames.at(-1).positions.map(Math.fround));
@@ -123,5 +144,9 @@ test('implicit live fold matches headless states through release and settling an
     p95_response_ms:sorted[Math.ceil(sorted.length*.95)-1],max_response_ms:sorted.at(-1)};
   fs.writeFileSync(testInfo.outputPath('implicit-latency.json'),JSON.stringify(metrics,null,2));
   await page.screenshot({path:testInfo.outputPath('implicit-live-settled.png'),fullPage:true});
+  await page.getByRole('button',{name:'Reset',exact:true}).click();await idle(page);
+  const reset=await snapshot(page);
+  expect(reset.step).toBe(0);expect(reset.implicit.sample.approximate_steps).toBe(0);
+  expect(reset.implicit.sample.outcome).toBeNull();expect(reset.implicit.cap_policy).toBe('approximate');
   expect(errors).toEqual([]);
 });

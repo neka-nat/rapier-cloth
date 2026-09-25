@@ -199,6 +199,7 @@ mod tests {
             .command(
                 Command::Reset {
                     scene: SceneKind::FoldTowel,
+                    implicit: None,
                 },
                 4,
             )
@@ -214,6 +215,7 @@ mod tests {
             .command(
                 Command::Reset {
                     scene: SceneKind::Drape,
+                    implicit: None,
                 },
                 5,
             )

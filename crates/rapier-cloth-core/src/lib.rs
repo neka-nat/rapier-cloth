@@ -25,7 +25,10 @@ pub mod diagnostics;
 pub mod implicit;
 pub mod solver;
 #[cfg(feature = "implicit")]
-pub use implicit::{ImplicitExecution, ImplicitSettings, ShellMaterial};
+pub use implicit::{
+    ImplicitCapPolicy, ImplicitExecution, ImplicitOutcome, ImplicitSettings, ImplicitTermination,
+    ShellMaterial,
+};
 pub mod surface;
 pub use cloth::{Cloth, ClothHandle, ClothSet};
 pub use constraints::target::SurfaceTarget;

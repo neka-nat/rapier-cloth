@@ -5,7 +5,9 @@
 #![allow(clippy::needless_range_loop)]
 // Element tensors use explicit component indices to keep their contractions
 // visible; the sparse global system uses checked indices from validated meshes.
+mod contact_elements;
 mod elements;
+mod primitive;
 mod settings;
 mod sparse;
 mod workers;
@@ -17,7 +19,10 @@ use crate::{
 };
 use faer::{Mat, prelude::Solve, sparse::Triplet};
 use nalgebra::SMatrix;
-pub use settings::{ImplicitExecution, ImplicitSettings, ShellMaterial};
+pub use settings::{
+    ImplicitCapPolicy, ImplicitExecution, ImplicitOutcome, ImplicitSettings, ImplicitTermination,
+    ShellMaterial,
+};
 use sparse::SparseSystem;
 
 #[derive(Clone)]
@@ -38,6 +43,93 @@ struct Friction {
     reference: Vec3,
     load: Real,
 }
+// Stable evaluation of the existing potential; forces and curvature are unchanged.
+#[derive(Default)]
+struct EnergySum {
+    sum: Real,
+    correction: Real,
+}
+impl EnergySum {
+    fn add(&mut self, value: Real) {
+        let next = self.sum + value;
+        self.correction += if self.sum.abs() >= value.abs() {
+            (self.sum - next) + value
+        } else {
+            (value - next) + self.sum
+        };
+        self.sum = next;
+    }
+    fn total(&self) -> Real {
+        self.sum + self.correction
+    }
+}
+
+fn membrane_energy(a: Real, b: Real, c: Real, mu: Real, lambda: Real, logj: Real) -> Real {
+    let u = a - 1.0;
+    let v = c - 1.0;
+    let product = u * v - b * b;
+    let t = (u + v) + product; // det(F^T F) - 1, without subtracting 1 afterwards.
+    if t.abs() > 0.125 || !t.is_finite() {
+        return 0.5 * mu * (a + c - 2.0) - mu * logj + 0.5 * lambda * logj * logj;
+    }
+    let log_det = t.ln_1p();
+    // t - log(1+t) = t^2 (1/2 - t/3 + t^2/4 - ...).
+    // At |t|<=1/8, truncation after degree 20 is below 6e-21.
+    let mut polynomial = 0.0;
+    for k in (2..=20).rev() {
+        polynomial = (if k % 2 == 0 { 1.0 } else { -1.0 }) / k as Real + t * polynomial;
+    }
+    let remainder = t * t * polynomial;
+    0.5 * mu * (-product + remainder) + 0.125 * lambda * log_det * log_det
+}
+
+#[cfg(all(test, feature = "f64"))]
+mod precision_tests {
+    use super::*;
+    include!("energy-fixtures.rs");
+    #[test]
+    fn objective_sum_preserves_small_terms_and_signed_cancellation() {
+        let mut e = EnergySum::default();
+        for value in [1e16, 1.0, -1e16, 2.0] {
+            e.add(value);
+        }
+        assert_eq!(e.total(), 3.0);
+        let mut e = EnergySum::default();
+        e.add(0.02);
+        for _ in 0..10000 {
+            e.add(1e-20);
+        }
+        assert_eq!(e.total(), 0.02 + 1e-16);
+    }
+    #[test]
+    fn membrane_energy_matches_independent_seventy_digit_fixtures() {
+        for &(f, expected) in PRECISION_FIXTURES {
+            let f = f.map(Vec3::from_array);
+            let actual = membrane(f, 2.5, 1.7, false).unwrap().0;
+            assert!(
+                (actual - expected).abs() <= 1e-25 + 1e-7 * expected.abs(),
+                "F={f:?}: {actual:e} vs {expected:e}"
+            );
+        }
+    }
+    #[test]
+    fn energy_evaluation_join_keeps_energy_and_derivatives_consistent() {
+        for sign in [-1.0, 1.0] {
+            let stretch = (1.0 + sign * 0.125_f64).sqrt();
+            let f = [Vec3::new(stretch, 0.0, 0.0), Vec3::Y];
+            let (_, g, _) = membrane(f, 2.5, 1.7, true).unwrap();
+            let eps = 1e-7;
+            let mut lo = f;
+            let mut hi = f;
+            lo[0].x -= eps;
+            hi[0].x += eps;
+            let a = membrane(lo, 2.5, 1.7, false).unwrap().0;
+            let b = membrane(hi, 2.5, 1.7, false).unwrap().0;
+            assert!(((b - a) / (2.0 * eps) - g[0].x).abs() < 1e-8);
+        }
+    }
+}
+
 struct Assembly {
     energy: Real,
     gradient: Vec<Real>,
@@ -87,7 +179,7 @@ fn membrane(
         f[0] * inv[0][1] + f[1] * inv[1][1],
     ];
     let p = [f[0] * mu + fc[0] * q, f[1] * mu + fc[1] * q];
-    let e = 0.5 * mu * (a + c - 2.0) - mu * logj + 0.5 * lambda * logj * logj;
+    let e = membrane_energy(a, b, c, mu, lambda, logj);
     let mut h = SMatrix::<Real, 6, 6>::zeros();
     if hessian {
         for j in 0..6 {
@@ -255,6 +347,7 @@ impl<'a> Model<'a> {
         friction: &[Friction],
         hessian: bool,
     ) -> Result<Assembly, ClothError> {
+        let mut energy = EnergySum::default();
         let mut a = Assembly {
             energy: 0.0,
             gradient: vec![0.0; self.count],
@@ -289,7 +382,7 @@ impl<'a> Model<'a> {
         for i in 0..x.len() {
             let w = self.cloth.masses[i] / (self.h * self.h);
             let d = x[i] - self.prediction[i];
-            a.energy += 0.5 * w * d.length_squared();
+            energy.add(0.5 * w * d.length_squared());
             add_gradient(i, d * w);
             add_block(i, i, [[w, 0.0, 0.0], [0.0, w, 0.0], [0.0, 0.0, w]]);
         }
@@ -297,7 +390,7 @@ impl<'a> Model<'a> {
             && self.implicit.execution == ImplicitExecution::Parallel4
             && self.triangles.len() >= 1024
         {
-            elements::assemble(self, x, &mut a.energy, &mut add_gradient, &mut add_block)?;
+            elements::assemble(self, x, &mut energy, &mut add_gradient, &mut add_block)?;
         } else {
             for tri in &self.triangles {
                 let mut f = [Vec3::ZERO; 2];
@@ -308,7 +401,7 @@ impl<'a> Model<'a> {
                 }
                 let (e, g, hf) = membrane(f, self.mu, self.lambda, hessian)
                     .ok_or(ClothError::DegenerateConstraint)?;
-                a.energy += e * tri.volume;
+                energy.add(e * tri.volume);
                 for k in 0..3 {
                     add_gradient(
                         tri.ids[k],
@@ -348,7 +441,7 @@ impl<'a> Model<'a> {
                     .ok_or(ClothError::DegenerateConstraint)?;
                 let d = angle_difference(angle, hinge.rest);
                 let k = hinge.stiffness;
-                a.energy += 0.5 * k * d * d;
+                energy.add(0.5 * k * d * d);
                 for i in 0..4 {
                     add_gradient(hinge.ids[i], g[i] * (k * d));
                     for j in 0..4 {
@@ -364,10 +457,56 @@ impl<'a> Model<'a> {
                 }
             }
         }
+        let mut parent_elements =
+            contact_elements::evaluate(self, x, contacts, hessian)?.map(Vec::into_iter);
         for c in contacts {
+            if primitive::is_parent(c) {
+                let (contact_energy, gradient, curvature) =
+                    if let Some(elements) = &mut parent_elements {
+                        let value = elements.next().expect("missing parent contact")?;
+                        (value.e, value.g, value.h)
+                    } else if hessian {
+                        let value = primitive::evaluate::<true>(
+                            c,
+                            x,
+                            self.cloth.mesh.rest_positions(),
+                            self.band,
+                            self.barrier_stiffness,
+                        )?;
+                        (value.e, value.g, primitive::project(value.h))
+                    } else {
+                        let value = primitive::evaluate::<false>(
+                            c,
+                            x,
+                            self.cloth.mesh.rest_positions(),
+                            self.band,
+                            self.barrier_stiffness,
+                        )?;
+                        (value.e, value.g, SMatrix::<Real, 12, 12>::zeros())
+                    };
+                energy.add(contact_energy);
+                for i in 0..4 {
+                    add_gradient(
+                        c.particles[i] as usize,
+                        Vec3::new(gradient[3 * i], gradient[3 * i + 1], gradient[3 * i + 2]),
+                    );
+                    for j in 0..4 {
+                        if active_block(c.particles[i] as usize, c.particles[j] as usize) {
+                            add_block(
+                                c.particles[i] as usize,
+                                c.particles[j] as usize,
+                                std::array::from_fn(|r| {
+                                    std::array::from_fn(|s| curvature[(3 * i + r, 3 * j + s)])
+                                }),
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
             let b = barrier(c.gap(x), self.band, self.barrier_stiffness)
                 .ok_or(ClothError::UnresolvedSurfaceContact)?;
-            a.energy += b[0];
+            energy.add(b[0]);
             for i in 0..4 {
                 if c.weights[i] != 0.0 {
                     add_gradient(c.particles[i] as usize, c.normal * (b[1] * c.weights[i]));
@@ -400,7 +539,7 @@ impl<'a> Model<'a> {
             let eps = self.implicit.friction_velocity * self.h;
             let len = (u.length_squared() + eps * eps).sqrt();
             let load = c.kinetic_friction * f.load;
-            a.energy += load * (len - eps);
+            energy.add(load * (len - eps));
             for i in 0..4 {
                 if c.weights[i] != 0.0 {
                     add_gradient(c.particles[i] as usize, u * (load / len * c.weights[i]));
@@ -427,6 +566,7 @@ impl<'a> Model<'a> {
                 }
             }
         }
+        a.energy = energy.total();
         if !a.energy.is_finite() || a.gradient.iter().any(|g| !g.is_finite()) {
             return Err(ClothError::NonFiniteState);
         }
@@ -453,7 +593,7 @@ fn query(
     let mut out = Vec::new();
     source.surface_contacts_with_work(old, x, stage, &mut out, &mut engine.work)?;
     if cloth.contact_settings.unwrap().self_collision {
-        engine.generate(old, x, &mut out, false)?;
+        engine.implicit_primitives(x, &mut out)?;
     }
     out.sort_by_key(|c| c.key);
     out.dedup_by_key(|c| c.key);
@@ -548,8 +688,13 @@ pub(crate) fn step(
     let mut friction = Vec::new();
     for contact in initial {
         let gap = contact.gap(&cloth.positions);
-        let b = barrier(gap, model.band, model.barrier_stiffness)
+        let mut b = barrier(gap, model.band, model.barrier_stiffness)
             .ok_or_else(|| failure("initial contact clearance", 0))?;
+        if primitive::is_parent(&contact) {
+            let weight =
+                primitive::normal_weight(&contact, &cloth.positions, cloth.mesh.rest_positions());
+            b[1] *= weight;
+        }
         if b[1] < 0.0 {
             let previous = contact.relative(&cloth.positions);
             let reference = if contact
@@ -589,6 +734,7 @@ pub(crate) fn step(
     )?;
     let mut report = StepReport::default();
     let mut converged = model.count == 0;
+    let mut accepted_updates = 0;
     if model.count == 0 {
         model.assemble(&x, &contacts, &friction, false)?;
     }
@@ -654,7 +800,7 @@ pub(crate) fn step(
             1.0
         };
         if source.continuous_motion() {
-            alpha = alpha.min(external_fraction(
+            let rigid_alpha = external_fraction(
                 source,
                 ContactMotion {
                     start: &x,
@@ -662,7 +808,8 @@ pub(crate) fn step(
                     stage: ContactStage::Iteration,
                 },
                 &mut engine.work,
-            )?);
+            )?;
+            alpha = alpha.min(rigid_alpha);
         }
         let mut accepted = None;
         for _ in 0..implicit.max_line_search_iterations {
@@ -680,7 +827,8 @@ pub(crate) fn step(
                 cloth,
                 settings.max_contacts,
             )?;
-            match model.assemble(&trial, &trial_contacts, &friction, false) {
+            let evaluation = model.assemble(&trial, &trial_contacts, &friction, false);
+            match evaluation {
                 Ok(next) if next.energy <= assembled.energy + 0.0001 * alpha * slope => {
                     accepted = Some((trial, trial_contacts));
                     break;
@@ -694,12 +842,24 @@ pub(crate) fn step(
         if let Some((trial, next_contacts)) = accepted {
             x = trial;
             contacts = next_contacts;
+            accepted_updates += 1;
         } else {
             return Err(failure("line search", iteration));
         }
     }
-    if !converged {
+    let approximate =
+        !converged && implicit.cap_policy == ImplicitCapPolicy::ApproximateWithFinalValidation;
+    if !converged && !approximate {
         return Err(failure("Newton iteration budget", implicit.max_iterations));
+    }
+    if approximate {
+        if accepted_updates != implicit.max_iterations {
+            return Err(failure(
+                "cap without accepted final iterate",
+                report.iterations,
+            ));
+        }
+        validate_approximate_targets(cloth, &x, targets)?;
     }
     if config.self_collision && engine.motion_fraction(&cloth.positions, &x)? < 1.0 {
         return Err(failure("final self sweep", report.iterations));
@@ -726,7 +886,32 @@ pub(crate) fn step(
         cloth,
         settings.max_contacts,
     )?;
-    model.assemble(&x, &contacts, &friction, false)?;
+    let final_assembly = model.assemble(&x, &contacts, &friction, false)?;
+    let force_rms = if model.count == 0 {
+        0.0
+    } else {
+        (final_assembly.gradient.iter().map(|g| g * g).sum::<Real>() / (model.count / 3) as Real)
+            .sqrt()
+    };
+    let force_max = final_assembly
+        .gradient
+        .chunks_exact(3)
+        .map(|g| g.iter().map(|v| v * v).sum::<Real>().sqrt())
+        .fold(0.0, Real::max);
+    if !force_rms.is_finite() || !force_max.is_finite() || !final_assembly.energy.is_finite() {
+        return Err(ClothError::NonFiniteState);
+    }
+    report.implicit = Some(ImplicitOutcome {
+        termination: if approximate {
+            ImplicitTermination::ApproximateIterationCap
+        } else {
+            ImplicitTermination::Converged
+        },
+        converged,
+        energy: final_assembly.energy,
+        force_rms,
+        force_max,
+    });
     report.contacts = contacts.len();
     report.surface_collision = engine.work;
     report.max_stretch = cloth
@@ -752,6 +937,9 @@ pub(crate) fn step(
                 .map(|angle| angle_difference(angle, hinge.rest_angle).abs())
         })
         .fold(0.0, Real::max);
+    if approximate {
+        validate_approximate_extension(report.max_stretch, report.iterations)?;
+    }
     drop(model);
     let velocities: Vec<_> = x
         .iter()
@@ -767,6 +955,32 @@ pub(crate) fn step(
     cloth.contact_history.clear();
     Ok(report)
 }
+
+fn validate_approximate_targets(
+    cloth: &Cloth,
+    x: &[Vec3],
+    targets: &[Target],
+) -> Result<(), ClothError> {
+    if x.iter().any(|p| !p.is_finite()) {
+        return Err(ClothError::NonFiniteState);
+    }
+    if cloth.pins.iter().any(|(&i, &p)| x[i as usize] != p)
+        || targets.iter().any(|t| x[t.particle as usize] != t.position)
+    {
+        return Err(failure("approximate hard target", 80));
+    }
+    Ok(())
+}
+
+fn validate_approximate_extension(stretch: Real, iterations: usize) -> Result<(), ClothError> {
+    if !stretch.is_finite() || stretch >= 1.03 {
+        return Err(failure("approximate extension guard", iterations));
+    }
+    Ok(())
+}
+
+#[cfg(all(test, feature = "f64"))]
+mod cap_policy_tests;
 
 #[cfg(test)]
 mod tests {

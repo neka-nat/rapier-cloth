@@ -90,7 +90,7 @@ impl LegacyDemo {
         let topology = matches!(command, Command::Reset { .. });
         self.advanced_substeps = 0;
         match command {
-            Command::Reset { scene } => *self = Self::new(scene)?,
+            Command::Reset { scene, .. } => *self = Self::new(scene)?,
             Command::SetOptions { options } => self.options = options.validate()?,
             Command::Release => {
                 let cloth = self
@@ -250,6 +250,7 @@ mod tests {
             .command(
                 Command::Reset {
                     scene: SceneKind::Drape,
+                    implicit: None,
                 },
                 4,
             )
@@ -284,6 +285,7 @@ mod tests {
             .command(
                 Command::Reset {
                     scene: SceneKind::Drape,
+                    implicit: None,
                 },
                 1201,
             )

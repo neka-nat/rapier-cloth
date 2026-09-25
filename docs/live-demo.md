@@ -55,6 +55,7 @@ command contract, failure handling and headless reproduction.
 | Release pins | Unpin the edge while retaining its current position and velocity |
 | Release left / right gripper | Release that gripper's grasps without advancing time; the other gripper keeps holding |
 | X/Y/Z ± / Roll ± | Queue the selected implicit hand's next world pose; enter manual mode |
+| Script / At iteration limit | Select implicit script and strict or validated-approximate policy; apply with Reset |
 | Grasp selected patch | Attach that implicit hand's original material patch at its current shape |
 | Measure fold | Pause and measure the current corner alignment, projected overlap and footprint error without stepping |
 | Wireframe / Show markers | Change rendering only |
