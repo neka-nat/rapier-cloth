@@ -36,7 +36,7 @@ for (const row of rows) {
         && o.converged === (o.termination === 'converged') && Number.isFinite(o.energy)
         && ['force_rms','force_max'].every(k=>Number.isFinite(o[k]) && o[k]>=0), 'solver outcome');
       requireValue(row.approximate_steps === count + Number(!o.converged)
-        && (o.converged || config.cap_policy === 'approximate' && row.iterations === 80 && row.max_edge_extension < 0.03), 'approximate history');
+        && (o.converged || config.cap_policy === 'approximate' && row.iterations === (config.newton_iterations ?? 80) && row.max_edge_extension < 0.03), 'approximate history');
     }
     steps.push(row);
   } else {

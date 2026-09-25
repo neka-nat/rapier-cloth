@@ -16,6 +16,8 @@ struct Source {
     fault: Fault,
     iteration_queries: usize,
     final_calls: usize,
+    /// Positions of the first iteration-stage query (the accepted state).
+    initial: Option<Vec<Vec3>>,
 }
 impl ContactSource for Source {
     fn continuous_motion(&self) -> bool {
@@ -59,7 +61,7 @@ impl ContactSource for Source {
     fn surface_contacts(
         &mut self,
         _: &[Vec3],
-        _: &[Vec3],
+        x: &[Vec3],
         stage: ContactStage,
         out: &mut Vec<SurfaceContact>,
     ) -> Result<(), ClothError> {
@@ -70,8 +72,10 @@ impl ContactSource for Source {
         }
         if stage == ContactStage::Iteration {
             self.iteration_queries += 1;
-            if self.fault == Fault::LineSearch && self.iteration_queries > 1 {
-                // Every trial has invalid clearance; the initial iterate query is clear.
+            let initial = self.initial.get_or_insert_with(|| x.to_vec());
+            if self.fault == Fault::LineSearch && initial.as_slice() != x {
+                // Every trial away from the accepted state has invalid
+                // clearance; queries at that state (seed and start) are clear.
                 out.push(SurfaceContact {
                     key: crate::SurfaceContactKey {
                         other_cloth: None,
@@ -118,14 +122,30 @@ fn strict_default_and_reference_profile_restriction_are_explicit() {
         ImplicitSettings::default().cap_policy,
         ImplicitCapPolicy::Strict
     );
-    for (max_iterations, velocity_tolerance) in [(512, 1e-7), (64, 1e-7), (80, 1e-7)] {
+    let approximate = ImplicitSettings {
+        cap_policy: ImplicitCapPolicy::ApproximateWithFinalValidation,
+        ..Default::default()
+    };
+    assert!(approximate.validate().is_ok());
+    for (max_iterations, velocity_tolerance, convergence_window) in [
+        (512, 1e-7, 3),
+        (64, 1e-7, 3),
+        (80, 1e-7, 3),
+        (80, 0.001, 3),
+        (128, 0.001, 1),
+    ] {
         let s = ImplicitSettings {
-            cap_policy: ImplicitCapPolicy::ApproximateWithFinalValidation,
             max_iterations,
             velocity_tolerance,
-            ..Default::default()
+            convergence_window,
+            ..approximate
         };
         assert!(s.validate().is_err());
+        let strict = ImplicitSettings {
+            cap_policy: ImplicitCapPolicy::Strict,
+            ..s
+        };
+        assert!(strict.validate().is_ok());
     }
 }
 
@@ -141,6 +161,7 @@ fn ordinary_success_keeps_converged_status_in_both_policies() {
             fault: Fault::None,
             iteration_queries: 0,
             final_calls: 0,
+            initial: None,
         };
         let r = step(
             &mut c,
@@ -186,6 +207,7 @@ fn opt_in_does_not_swallow_final_sweep_budget_contact_or_line_search_failures() 
                 fault,
                 iteration_queries: 0,
                 final_calls: 0,
+                initial: None,
             };
             let error = step(
                 &mut c,
@@ -241,21 +263,90 @@ fn approximate_state_guard_rejects_nonfinite_broken_grasps_and_three_percent_ext
     let p = c.positions[0];
     c.pin(0, p).unwrap();
     let mut x = c.positions.clone();
-    assert!(validate_approximate_targets(&c, &x, &[]).is_ok());
+    assert!(validate_approximate_targets(&c, &x, &[], 128).is_ok());
     x[1].x = Real::NAN;
-    assert!(validate_approximate_targets(&c, &x, &[]).is_err());
+    assert!(validate_approximate_targets(&c, &x, &[], 128).is_err());
     x = c.positions.clone();
     x[0].y += 0.01;
-    assert!(validate_approximate_targets(&c, &x, &[]).is_err());
+    assert!(validate_approximate_targets(&c, &x, &[], 128).is_err());
     x = c.positions.clone();
     let target = Target {
         particle: 1,
         position: x[1] + Vec3::Y,
         compliance: 0.0,
     };
-    assert!(validate_approximate_targets(&c, &x, &[target]).is_err());
-    assert!(validate_approximate_extension(1.029, 80).is_ok());
+    assert!(validate_approximate_targets(&c, &x, &[target], 128).is_err());
+    assert!(validate_approximate_extension(1.029, 128).is_ok());
     for stretch in [1.03, 1.04, Real::NAN, Real::INFINITY] {
-        assert!(validate_approximate_extension(stretch, 80).is_err());
+        assert!(validate_approximate_extension(stretch, 128).is_err());
+    }
+}
+
+#[test]
+fn a_state_at_rest_stops_on_its_first_direction_while_motion_uses_the_window() {
+    for seed in [ImplicitSeed::Previous, ImplicitSeed::Velocity] {
+        let mut c = cloth();
+        for i in [0, 2] {
+            let p = c.positions[i];
+            c.pin(i as u32, p).unwrap();
+        }
+        let mut source = Source {
+            fault: Fault::None,
+            iteration_queries: 0,
+            final_calls: 0,
+            initial: None,
+        };
+        let settings = SolverSettings {
+            max_substep: 0.1,
+            ..Default::default()
+        };
+        let mut iterations = Vec::new();
+        for _ in 0..200 {
+            let before = c.positions.clone();
+            let velocity = c.velocities.clone();
+            let r = step(
+                &mut c,
+                0.1,
+                Vec3::new(0.0, -9.81, 0.0),
+                &settings,
+                &[],
+                &mut source,
+                ImplicitSettings {
+                    seed,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(r.implicit.unwrap().converged);
+            iterations.push(r.iterations);
+            if r.iterations == 1 {
+                // The first direction was within tolerance and was not applied:
+                // the accepted state is the seed itself.
+                let expected: Vec<Vec3> = before
+                    .iter()
+                    .zip(&velocity)
+                    .enumerate()
+                    .map(|(i, (&p, &v))| match seed {
+                        ImplicitSeed::Previous => p,
+                        ImplicitSeed::Velocity if c.pins.contains_key(&(i as u32)) => p,
+                        ImplicitSeed::Velocity => p + v * 0.1,
+                    })
+                    .collect();
+                assert_eq!(c.positions, expected);
+                if seed == ImplicitSeed::Previous {
+                    assert!(c.velocities.iter().all(|v| *v == Vec3::ZERO));
+                } else {
+                    // The extrapolation is retained as the accepted velocity
+                    // (up to the roundoff of the position difference).
+                    for (a, b) in c.velocities.iter().zip(&velocity) {
+                        assert!(a.distance(*b) <= 1e-9, "{a} {b}");
+                    }
+                }
+                break;
+            }
+        }
+        // Falling motion needs the full three-direction window before stopping.
+        assert!(iterations[0] >= 3, "{seed:?}: {iterations:?}");
+        assert_eq!(iterations.last(), Some(&1), "{seed:?}: {iterations:?}");
     }
 }

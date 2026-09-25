@@ -1,15 +1,31 @@
+//! Parallel material evaluation. Workers write each element's matrix blocks
+//! into their final positions of the assembly and keep energies and gradients
+//! in per-element slots; the caller then accumulates those in mesh order.
 use super::*;
 
-struct Element<const N: usize, const B: usize> {
+pub(super) struct Element<const N: usize> {
     energy: Real,
     gradient: [Vec3; N],
-    blocks: [[[Real; 3]; 3]; B],
 }
-type MembraneElement = Element<3, 6>;
-type BendingElement = Element<4, 10>;
+pub(super) type MembraneElement = Element<3>;
+pub(super) type BendingElement = Element<4>;
 
 fn active(dofs: &[Option<usize>], i: usize, j: usize) -> bool {
     dofs[i].zip(dofs[j]).is_some_and(|(di, dj)| di >= dj)
+}
+
+/// Number of free lower-triangular blocks of an element with these vertices.
+fn block_count(dofs: &[Option<usize>], ids: &[usize]) -> usize {
+    let free = ids.iter().filter(|&&i| dofs[i].is_some()).count();
+    free * (free + 1) / 2
+}
+
+fn block(dofs: &[Option<usize>], i: usize, j: usize, value: [[Real; 3]; 3]) -> Block {
+    Block {
+        row: dofs[i].unwrap() / 3,
+        col: dofs[j].unwrap() / 3,
+        value,
+    }
 }
 
 fn triangle_element(
@@ -18,6 +34,7 @@ fn triangle_element(
     dofs: &[Option<usize>],
     mu: Real,
     lambda: Real,
+    blocks: &mut [Block],
 ) -> Result<MembraneElement, ClothError> {
     let mut f = [Vec3::ZERO; 2];
     for k in 0..3 {
@@ -25,44 +42,42 @@ fn triangle_element(
             f[c] += x[tri.ids[k]] * tri.b[k][c];
         }
     }
-    let (e, g, hf) = membrane(f, mu, lambda, true).ok_or(ClothError::DegenerateConstraint)?;
+    let (e, g, _) = membrane(f, mu, lambda, false).ok_or(ClothError::DegenerateConstraint)?;
     let energy = e * tri.volume;
     let gradient = std::array::from_fn(|k| (g[0] * tri.b[k][0] + g[1] * tri.b[k][1]) * tri.volume);
-    let eig = ((hf + hf.transpose()) * 0.5).symmetric_eigen();
-    let d = SMatrix::<Real, 6, 6>::from_diagonal(&eig.eigenvalues.map(|v| v.max(0.0)));
-    let hp = eig.eigenvectors * d * eig.eigenvectors.transpose();
-    let mut blocks = [[[0.0; 3]; 3]; 6];
+    if blocks.is_empty() {
+        return Ok(Element { energy, gradient });
+    }
+    let hp = membrane::projected_hessian(f, mu, lambda).ok_or(ClothError::DegenerateConstraint)?;
     let mut index = 0;
     for i in 0..3 {
         for j in 0..3 {
             if !active(dofs, tri.ids[i], tri.ids[j]) {
                 continue;
             }
-            let block = &mut blocks[index];
+            let mut value = [[0.0; 3]; 3];
             for u in 0..3 {
                 for v in 0..3 {
                     for r in 0..2 {
                         for s in 0..2 {
-                            block[u][v] +=
+                            value[u][v] +=
                                 tri.volume * tri.b[i][r] * hp[(r * 3 + u, s * 3 + v)] * tri.b[j][s];
                         }
                     }
                 }
             }
+            blocks[index] = block(dofs, tri.ids[i], tri.ids[j], value);
             index += 1;
         }
     }
-    Ok(Element {
-        energy,
-        gradient,
-        blocks,
-    })
+    Ok(Element { energy, gradient })
 }
 
 fn hinge_element(
     hinge: &Hinge,
     x: &[Vec3],
     dofs: &[Option<usize>],
+    blocks: &mut [Block],
 ) -> Result<BendingElement, ClothError> {
     let (angle, g) =
         angle_and_gradients(hinge.ids.map(|i| x[i])).ok_or(ClothError::DegenerateConstraint)?;
@@ -70,130 +85,176 @@ fn hinge_element(
     let k = hinge.stiffness;
     let energy = 0.5 * k * d * d;
     let gradient = std::array::from_fn(|i| g[i] * (k * d));
-    let mut blocks = [[[0.0; 3]; 3]; 10];
+    if blocks.is_empty() {
+        return Ok(Element { energy, gradient });
+    }
     let mut index = 0;
     for i in 0..4 {
         for j in 0..4 {
             if !active(dofs, hinge.ids[i], hinge.ids[j]) {
                 continue;
             }
-            blocks[index] = std::array::from_fn(|u| std::array::from_fn(|v| k * g[i][u] * g[j][v]));
+            let value = std::array::from_fn(|u| std::array::from_fn(|v| k * g[i][u] * g[j][v]));
+            blocks[index] = block(dofs, hinge.ids[i], hinge.ids[j], value);
             index += 1;
         }
     }
-    Ok(Element {
-        energy,
-        gradient,
-        blocks,
-    })
+    Ok(Element { energy, gradient })
 }
 
-type MembraneSlot = Option<Result<MembraneElement, ClothError>>;
-type BendingSlot = Option<Result<BendingElement, ClothError>>;
+pub(super) type MembraneSlot = Option<Result<MembraneElement, ClothError>>;
+pub(super) type BendingSlot = Option<Result<BendingElement, ClothError>>;
 
-type ElementBuffers = (Vec<MembraneSlot>, Vec<BendingSlot>);
+/// Reused per-element results and block offsets.
+#[derive(Default)]
+pub(super) struct ElementBuffers {
+    triangles: Vec<MembraneSlot>,
+    hinges: Vec<BendingSlot>,
+    /// Block offset of every triangle, then of every hinge, relative to the
+    /// start of the material blocks; each list ends with its total.
+    triangle_offsets: Vec<usize>,
+    hinge_offsets: Vec<usize>,
+}
 
-fn evaluate(model: &Model, x: &[Vec3]) -> Result<ElementBuffers, ClothError> {
-    let workers = 4;
-    let mut triangles: Vec<MembraneSlot> = std::iter::repeat_with(|| None)
-        .take(model.triangles.len())
-        .collect();
-    let mut hinges: Vec<BendingSlot> = std::iter::repeat_with(|| None)
-        .take(model.hinges.len())
-        .collect();
-    let fill = |triangles: &[Triangle],
-                hinges: &[Hinge],
+impl ElementBuffers {
+    /// Prepares the offsets; returns the number of material blocks.
+    fn layout(&mut self, model: &Model, hessian: bool) -> usize {
+        let count = |ids: &[usize]| {
+            if hessian {
+                block_count(&model.dofs, ids)
+            } else {
+                0
+            }
+        };
+        self.triangle_offsets.clear();
+        self.triangle_offsets.push(0);
+        for tri in &model.triangles {
+            let next = self.triangle_offsets.last().unwrap() + count(&tri.ids);
+            self.triangle_offsets.push(next);
+        }
+        self.hinge_offsets.clear();
+        self.hinge_offsets.push(0);
+        for hinge in &model.hinges {
+            let next = self.hinge_offsets.last().unwrap() + count(&hinge.ids);
+            self.hinge_offsets.push(next);
+        }
+        self.triangle_offsets.last().unwrap() + self.hinge_offsets.last().unwrap()
+    }
+}
+
+/// Fills the element slots in mesh order and every element's blocks into
+/// `blocks`, which has the length returned by `layout`.
+fn evaluate(
+    model: &Model,
+    x: &[Vec3],
+    buffers: &mut ElementBuffers,
+    blocks: &mut [Block],
+) -> Result<(), ClothError> {
+    let workers = model.workers.lanes();
+    let (nt, nh) = (model.triangles.len(), model.hinges.len());
+    let (triangles, hinges) = (&mut buffers.triangles, &mut buffers.hinges);
+    triangles.clear();
+    triangles.resize_with(nt, || None);
+    hinges.clear();
+    hinges.resize_with(nh, || None);
+    let (toffsets, hoffsets) = (&buffers.triangle_offsets, &buffers.hinge_offsets);
+    let fill = |first_triangle: usize,
                 tout: &mut [MembraneSlot],
-                hout: &mut [BendingSlot]| {
-        for (tri, slot) in triangles.iter().zip(tout) {
+                mut tblocks: &mut [Block],
+                first_hinge: usize,
+                hout: &mut [BendingSlot],
+                mut hblocks: &mut [Block]| {
+        for (k, slot) in tout.iter_mut().enumerate() {
+            let t = first_triangle + k;
+            let (mine, rest) = tblocks.split_at_mut(toffsets[t + 1] - toffsets[t]);
+            tblocks = rest;
             *slot = Some(triangle_element(
-                tri,
+                &model.triangles[t],
                 x,
                 &model.dofs,
                 model.mu,
                 model.lambda,
+                mine,
             ));
         }
-        for (hinge, slot) in hinges.iter().zip(hout) {
-            *slot = Some(hinge_element(hinge, x, &model.dofs));
+        for (k, slot) in hout.iter_mut().enumerate() {
+            let h = first_hinge + k;
+            let (mine, rest) = hblocks.split_at_mut(hoffsets[h + 1] - hoffsets[h]);
+            hblocks = rest;
+            *slot = Some(hinge_element(&model.hinges[h], x, &model.dofs, mine));
         }
     };
-    std::thread::scope(|scope| -> Result<(), ClothError> {
-        let nt = model.triangles.len();
-        let nh = model.hinges.len();
-        let (tout, mut remaining_t) = triangles.split_at_mut(nt / workers);
-        let (hout, mut remaining_h) = hinges.split_at_mut(nh / workers);
-        let mut handles = Vec::new();
-        for i in 1..workers {
-            let ta = i * nt / workers;
-            let tb = (i + 1) * nt / workers;
-            let ha = i * nh / workers;
-            let hb = (i + 1) * nh / workers;
-            let (tout, rest_t) = remaining_t.split_at_mut(tb - ta);
-            let (hout, rest_h) = remaining_h.split_at_mut(hb - ha);
-            remaining_t = rest_t;
-            remaining_h = rest_h;
-            let tris = &model.triangles[ta..tb];
-            let bends = &model.hinges[ha..hb];
-            let fill = &fill;
-            // Scoped lifetimes keep the input/output borrows local. Creation
-            // errors join started workers before returning without a commit.
-            handles.push(workers::spawn(scope, move || {
-                fill(tris, bends, tout, hout)
-            })?);
-        }
-        fill(
-            &model.triangles[..nt / workers],
-            &model.hinges[..nh / workers],
-            tout,
-            hout,
-        );
-        for handle in handles {
-            workers::join(handle);
-        }
-        Ok(())
+    let (mut tblocks, mut hblocks) = blocks.split_at_mut(toffsets[nt]);
+    let (mut tout, mut hout) = (&mut triangles[..], &mut hinges[..]);
+    let mut parts = Vec::with_capacity(workers);
+    for k in 0..workers {
+        let (ta, tb) = (k * nt / workers, (k + 1) * nt / workers);
+        let (ha, hb) = (k * nh / workers, (k + 1) * nh / workers);
+        let (t_slots, rest) = tout.split_at_mut(tb - ta);
+        tout = rest;
+        let (t_blocks, rest) = tblocks.split_at_mut(toffsets[tb] - toffsets[ta]);
+        tblocks = rest;
+        let (h_slots, rest) = hout.split_at_mut(hb - ha);
+        hout = rest;
+        let (h_blocks, rest) = hblocks.split_at_mut(hoffsets[hb] - hoffsets[ha]);
+        hblocks = rest;
+        parts.push((ta, t_slots, t_blocks, ha, h_slots, h_blocks));
+    }
+    let parts = workers::handoff(parts);
+    model.workers.run(workers, |k| {
+        let (ta, t_slots, t_blocks, ha, h_slots, h_blocks) = workers::take(&parts, k);
+        fill(ta, t_slots, t_blocks, ha, h_slots, h_blocks);
     })?;
-    Ok((triangles, hinges))
+    Ok(())
 }
 
+/// Evaluates every material element on the workers, appends its blocks to
+/// `blocks` in mesh order and accumulates energies and gradients in that order.
 pub(super) fn assemble(
     model: &Model,
     x: &[Vec3],
+    hessian: bool,
+    buffers: &mut ElementBuffers,
     energy: &mut EnergySum,
     mut add_gradient: impl FnMut(usize, Vec3),
-    mut add_block: impl FnMut(usize, usize, [[Real; 3]; 3]),
+    blocks: &mut Vec<Block>,
 ) -> Result<(), ClothError> {
-    let (triangles, hinges) = evaluate(model, x)?;
-    for (tri, result) in model.triangles.iter().zip(triangles) {
-        let element = result.expect("unfilled triangle")?;
+    let count = buffers.layout(model, hessian);
+    let base = blocks.len();
+    let placeholder = Block {
+        row: 0,
+        col: 0,
+        value: [[0.0; 3]; 3],
+    };
+    blocks.resize(base + count, placeholder);
+    if let Err(error) = evaluate(model, x, buffers, &mut blocks[base..]) {
+        blocks.truncate(base);
+        return Err(error);
+    }
+    for (tri, result) in model.triangles.iter().zip(&mut buffers.triangles) {
+        let element = match result.take().expect("unfilled triangle") {
+            Ok(element) => element,
+            Err(error) => {
+                blocks.truncate(base);
+                return Err(error);
+            }
+        };
         energy.add(element.energy);
         for k in 0..3 {
             add_gradient(tri.ids[k], element.gradient[k]);
         }
-        let mut block = 0;
-        for i in 0..3 {
-            for j in 0..3 {
-                if !active(&model.dofs, tri.ids[i], tri.ids[j]) {
-                    continue;
-                }
-                add_block(tri.ids[i], tri.ids[j], element.blocks[block]);
-                block += 1;
-            }
-        }
     }
-    for (hinge, result) in model.hinges.iter().zip(hinges) {
-        let element = result.expect("unfilled hinge")?;
+    for (hinge, result) in model.hinges.iter().zip(&mut buffers.hinges) {
+        let element = match result.take().expect("unfilled hinge") {
+            Ok(element) => element,
+            Err(error) => {
+                blocks.truncate(base);
+                return Err(error);
+            }
+        };
         energy.add(element.energy);
-        let mut block = 0;
         for i in 0..4 {
             add_gradient(hinge.ids[i], element.gradient[i]);
-            for j in 0..4 {
-                if !active(&model.dofs, hinge.ids[i], hinge.ids[j]) {
-                    continue;
-                }
-                add_block(hinge.ids[i], hinge.ids[j], element.blocks[block]);
-                block += 1;
-            }
         }
     }
     Ok(())
@@ -209,12 +270,12 @@ mod tests {
                 for (a, b) in a.gradient.iter().zip(&b.gradient) {
                     assert_eq!(a.to_bits(), b.to_bits());
                 }
-                assert_eq!(a.triplets.len(), b.triplets.len());
-                for (a, b) in a.triplets.iter().zip(&b.triplets) {
-                    assert_eq!(
-                        (a.row, a.col, a.val.to_bits()),
-                        (b.row, b.col, b.val.to_bits())
-                    );
+                assert_eq!(a.blocks.len(), b.blocks.len());
+                for (a, b) in a.blocks.iter().zip(&b.blocks) {
+                    assert_eq!((a.row, a.col), (b.row, b.col));
+                    for (a, b) in a.value.iter().flatten().zip(b.value.iter().flatten()) {
+                        assert_eq!(a.to_bits(), b.to_bits());
+                    }
                 }
             }
             (Err(a), Err(b)) => assert_eq!(format!("{a:?}"), format!("{b:?}")),
@@ -237,9 +298,9 @@ mod tests {
     }
     fn compare(model: &mut Model, x: &[Vec3], contacts: &[SurfaceContact], friction: &[Friction]) {
         for hessian in [false, true] {
-            model.implicit.execution = ImplicitExecution::Serial;
+            model.set_execution(ImplicitExecution::Serial);
             let reference = model.assemble(x, contacts, friction, hessian);
-            model.implicit.execution = ImplicitExecution::Parallel4;
+            model.set_execution(ImplicitExecution::Parallel4);
             identical(&reference, &model.assemble(x, contacts, friction, hessian));
         }
     }
@@ -330,9 +391,21 @@ mod tests {
         .unwrap();
         let mut model = Model::new(&c, 0.1, Vec3::ZERO, &[], ImplicitSettings::default()).unwrap();
         compare(&mut model, &c.positions, &[], &[]);
-        let (triangles, hinges) = evaluate(&model, &c.positions).unwrap();
-        assert_eq!(triangles.len(), 1);
-        assert!(triangles[0].as_ref().unwrap().is_ok());
-        assert!(hinges.is_empty());
+        let mut buffers = ElementBuffers::default();
+        let count = buffers.layout(&model, true);
+        assert_eq!(count, 6);
+        let mut blocks = vec![
+            Block {
+                row: 0,
+                col: 0,
+                value: [[0.0; 3]; 3]
+            };
+            count
+        ];
+        evaluate(&model, &c.positions, &mut buffers, &mut blocks).unwrap();
+        assert_eq!(buffers.triangles.len(), 1);
+        assert!(buffers.triangles[0].as_ref().unwrap().is_ok());
+        assert!(buffers.hinges.is_empty());
+        assert!(blocks.iter().all(|b| b.row >= b.col));
     }
 }

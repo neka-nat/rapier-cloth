@@ -104,9 +104,10 @@ for (const variant of ['nominal','lift_5mm']) test(`implicit ${variant} fold pre
   await page.goto(`/live.html?scene=implicit_towel&paused=1&case=${variant}&cap_policy=approximate`);await idle(page);
   await expect.poll(async()=>(await snapshot(page)).scene).toBe('implicit_towel');await idle(page);
   if (variant === 'lift_5mm') {
+    // The former iteration-cap step now converges within the default budget.
     for (let i=0;i<24;i++) await advance(page);
-    await expect(page.locator('#solver-state')).toContainText('Approximate · not converged');
-    await page.screenshot({path:testInfo.outputPath('implicit-approximate-step.png'),fullPage:true});
+    await expect(page.locator('#solver-state')).toContainText('Converged · Approximate steps: 0');
+    await page.screenshot({path:testInfo.outputPath('implicit-lift-step-24.png'),fullPage:true});
   }
   await page.getByRole('button',{name:'Resume',exact:true}).click();
   await expect.poll(async()=>(await snapshot(page)).step,{timeout:240000,intervals:[200]}).toBe(80);
@@ -123,7 +124,7 @@ for (const variant of ['nominal','lift_5mm']) test(`implicit ${variant} fold pre
     expect(frames[i].implicit.grippers.map(g=>({translation:g.translation,rotation:g.rotation}))).toEqual(referenceSteps[i].grippers);
   }
   const approximate = frames.filter(f=>!f.implicit.sample.outcome.converged);
-  expect(approximate.length).toBe(variant === 'lift_5mm' ? 1 : 0);
+  expect(approximate.length).toBe(0);
   expect(final.implicit.sample.approximate_steps).toBe(approximate.length);
   await expect(page.locator('#solver-state')).toContainText(`Approximate steps: ${approximate.length}`);
   for (const f of approximate) {

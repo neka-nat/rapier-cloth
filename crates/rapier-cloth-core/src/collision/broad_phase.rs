@@ -158,6 +158,124 @@ impl Hierarchy {
         }
         Ok(())
     }
+    /// Nodes at `depth` below the root, or shallower leaves, in traversal order.
+    #[cfg(feature = "implicit")]
+    pub fn frontier(&self, depth: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        if self.nodes.is_empty() {
+            return out;
+        }
+        let mut stack = vec![(0, 0)];
+        while let Some((node, level)) = stack.pop() {
+            match self.nodes[node].children {
+                Some([a, b]) if level < depth => {
+                    stack.push((b, level + 1));
+                    stack.push((a, level + 1));
+                }
+                _ => out.push(node),
+            }
+        }
+        out
+    }
+    #[cfg(feature = "implicit")]
+    fn leaf(&self, node: usize) -> &[usize] {
+        &self.order[self.nodes[node].range.clone()]
+    }
+    /// Visits every pair of primitives with overlapping bounds between the
+    /// subtree `a` of this hierarchy and the subtree `b` of `other`. `nodes_*`
+    /// are refitted node bounds and `primitives_*` the primitive bounds.
+    #[cfg(feature = "implicit")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn visit_pairs(
+        &self,
+        a: usize,
+        nodes_a: &[Bounds],
+        primitives_a: &[Bounds],
+        other: &Hierarchy,
+        b: usize,
+        nodes_b: &[Bounds],
+        primitives_b: &[Bounds],
+        stack: &mut Vec<(usize, usize)>,
+        mut visit: impl FnMut(usize, usize) -> Result<(), ClothError>,
+    ) -> Result<(), ClothError> {
+        stack.clear();
+        stack.push((a, b));
+        while let Some((i, j)) = stack.pop() {
+            if !nodes_a[i].overlaps(nodes_b[j]) {
+                continue;
+            }
+            match (self.nodes[i].children, other.nodes[j].children) {
+                (Some([a0, a1]), Some([b0, b1])) => {
+                    stack.extend([(a1, b1), (a1, b0), (a0, b1), (a0, b0)]);
+                }
+                (Some([a0, a1]), None) => stack.extend([(a1, j), (a0, j)]),
+                (None, Some([b0, b1])) => stack.extend([(i, b1), (i, b0)]),
+                (None, None) => {
+                    for &p in self.leaf(i) {
+                        for &q in other.leaf(j) {
+                            if primitives_a[p].overlaps(primitives_b[q]) {
+                                visit(p, q)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Visits every unordered pair `(p, q)` with `p < q` and overlapping bounds
+    /// between the subtrees `a <= b` of this hierarchy; each pair once.
+    #[cfg(feature = "implicit")]
+    pub fn visit_self_pairs(
+        &self,
+        a: usize,
+        b: usize,
+        nodes: &[Bounds],
+        primitives: &[Bounds],
+        stack: &mut Vec<(usize, usize)>,
+        mut visit: impl FnMut(usize, usize) -> Result<(), ClothError>,
+    ) -> Result<(), ClothError> {
+        stack.clear();
+        stack.push((a.min(b), a.max(b)));
+        while let Some((i, j)) = stack.pop() {
+            if !nodes[i].overlaps(nodes[j]) {
+                continue;
+            }
+            if i == j {
+                match self.nodes[i].children {
+                    Some([c0, c1]) => stack.extend([(c1, c1), (c0, c1), (c0, c0)]),
+                    None => {
+                        let leaf = self.leaf(i);
+                        for (k, &p) in leaf.iter().enumerate() {
+                            for &q in &leaf[k + 1..] {
+                                if primitives[p].overlaps(primitives[q]) {
+                                    visit(p.min(q), p.max(q))?;
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            match (self.nodes[i].children, self.nodes[j].children) {
+                (Some([a0, a1]), Some([b0, b1])) => {
+                    stack.extend([(a1, b1), (a1, b0), (a0, b1), (a0, b0)]);
+                }
+                (Some([a0, a1]), None) => stack.extend([(a1, j), (a0, j)]),
+                (None, Some([b0, b1])) => stack.extend([(i, b1), (i, b0)]),
+                (None, None) => {
+                    for &p in self.leaf(i) {
+                        for &q in self.leaf(j) {
+                            if primitives[p].overlaps(primitives[q]) {
+                                visit(p.min(q), p.max(q))?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn query(
         &self,

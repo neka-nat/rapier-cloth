@@ -13,11 +13,22 @@ use std::sync::Arc;
 pub(crate) struct CollisionTopology {
     triangles: Hierarchy,
     edges: Hierarchy,
+    /// Vertex partition for the implicit solver's pairwise traversals against
+    /// the triangles.
+    #[cfg(feature = "implicit")]
+    vertices: Hierarchy,
 }
 impl CollisionTopology {
     pub fn new(mesh: &ClothMesh) -> Self {
         let positions = mesh.rest_positions();
         Self {
+            #[cfg(feature = "implicit")]
+            vertices: Hierarchy::new(
+                &positions
+                    .iter()
+                    .map(|&p| Bounds::point(p))
+                    .collect::<Vec<_>>(),
+            ),
             triangles: Hierarchy::new(
                 &mesh
                     .triangles()
@@ -196,6 +207,206 @@ fn retain_contact(
     Ok(())
 }
 
+/// Read-only geometry shared by the lanes of one query batch.
+struct Scene<'a> {
+    mesh: &'a ClothMesh,
+    topology: &'a CollisionTopology,
+    triangle_bounds: &'a [Bounds],
+    triangle_nodes: &'a [Bounds],
+    edge_bounds: &'a [Bounds],
+    edge_nodes: &'a [Bounds],
+    /// Query bounds of every vertex and the refitted vertex nodes, plus the
+    /// edge bounds expanded by half the query reach; implicit queries only.
+    #[cfg(feature = "implicit")]
+    vertex_bounds: &'a [Bounds],
+    #[cfg(feature = "implicit")]
+    vertex_nodes: &'a [Bounds],
+    #[cfg(feature = "implicit")]
+    edge_half: &'a [Bounds],
+    #[cfg(feature = "implicit")]
+    edge_nodes_half: &'a [Bounds],
+    settings: ClothContactSettings,
+}
+
+/// Rejects the first intersecting non-incident triangle pair whose lower index
+/// is in `triangles`, using the current static bounds.
+fn intersections(
+    scene: &Scene<'_>,
+    positions: &[Vec3],
+    triangles: std::ops::Range<usize>,
+    stack: &mut Vec<usize>,
+    candidates: &mut Vec<usize>,
+    work: &mut CollisionWork,
+) -> Result<(), ClothError> {
+    for a in triangles {
+        scene.topology.triangles.query(
+            scene.triangle_bounds[a],
+            a + 1,
+            scene.triangle_bounds,
+            scene.triangle_nodes,
+            stack,
+            candidates,
+            work,
+            scene.settings.limits,
+        )?;
+        let ta = scene.mesh.triangles()[a];
+        for &b in candidates.iter() {
+            let tb = scene.mesh.triangles()[b];
+            if ta.iter().any(|v| tb.contains(v)) {
+                continue;
+            }
+            if triangles_intersect(
+                ta.map(|i| positions[i as usize]),
+                tb.map(|i| positions[i as usize]),
+            )
+            .ok_or(ClothError::DegenerateConstraint)?
+            {
+                return Err(ClothError::InitialSelfIntersection {
+                    triangles: [a as u32, b as u32],
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pairs whose swept bounds come within the contact activation distance. Every
+/// pair in contact anywhere along the swept motion is included.
+#[derive(Debug, Default)]
+pub(crate) struct SweptPairs {
+    pub faces: Vec<[u32; 2]>,
+    pub edges: Vec<[u32; 2]>,
+}
+
+/// Certifies linear motion of the vertex-face pairs of `vertices` and the
+/// edge-edge pairs whose first edge is in `edges`; returns the safe fraction.
+/// With `pairs`, also records every non-incident pair within activation range.
+#[allow(clippy::too_many_arguments)]
+fn sweep(
+    scene: &Scene<'_>,
+    start: &[Vec3],
+    end: &[Vec3],
+    vertices: std::ops::Range<usize>,
+    edges: std::ops::Range<usize>,
+    stack: &mut Vec<usize>,
+    candidates: &mut Vec<usize>,
+    work: &mut CollisionWork,
+    out: &mut Vec<SurfaceContact>,
+    mut pairs: Option<&mut SweptPairs>,
+) -> Result<Real, ClothError> {
+    let settings = scene.settings;
+    let separation = settings.thickness * 0.9;
+    let reach = if pairs.is_some() {
+        separation.max(settings.thickness + settings.activation_margin)
+    } else {
+        separation
+    };
+    let mut fraction: Real = 1.0;
+    for vertex in vertices {
+        let swept = Bounds::points([start[vertex], end[vertex]]);
+        let certify = swept.expanded(separation);
+        scene.topology.triangles.query(
+            swept.expanded(reach),
+            0,
+            scene.triangle_bounds,
+            scene.triangle_nodes,
+            stack,
+            candidates,
+            work,
+            settings.limits,
+        )?;
+        for &face in candidates.iter() {
+            let triangle = scene.mesh.triangles()[face];
+            if triangle.contains(&(vertex as u32)) {
+                continue;
+            }
+            if let Some(pairs) = pairs.as_deref_mut() {
+                pairs.faces.push([vertex as u32, face as u32]);
+                // Certify exactly the pairs of a separation-only query.
+                if !certify.overlaps(scene.triangle_bounds[face]) {
+                    continue;
+                }
+            }
+            let ids = [
+                vertex,
+                triangle[0] as usize,
+                triangle[1] as usize,
+                triangle[2] as usize,
+            ];
+            let next = certify_linear_motion(
+                CcdFeature::VertexFace,
+                ids.map(|i| start[i]),
+                ids.map(|i| end[i]),
+                separation,
+                work,
+                settings.limits,
+            )?;
+            fraction = fraction.min(next.fraction());
+            if next.fraction() < 1.0 {
+                let c = swept_contact(
+                    CcdFeature::VertexFace,
+                    ids.map(|i| i as u32),
+                    face as u32,
+                    start,
+                    end,
+                    next.fraction(),
+                    settings,
+                )?;
+                retain_contact(out, c, work, settings.limits)?;
+            }
+        }
+    }
+    for a in edges {
+        let certify = scene.edge_bounds[a].expanded(separation);
+        scene.topology.edges.query(
+            scene.edge_bounds[a].expanded(reach),
+            a + 1,
+            scene.edge_bounds,
+            scene.edge_nodes,
+            stack,
+            candidates,
+            work,
+            settings.limits,
+        )?;
+        let ea = scene.mesh.edges()[a].vertices;
+        for &b in candidates.iter() {
+            let eb = scene.mesh.edges()[b].vertices;
+            if ea.iter().any(|v| eb.contains(v)) {
+                continue;
+            }
+            if let Some(pairs) = pairs.as_deref_mut() {
+                pairs.edges.push([a as u32, b as u32]);
+                if !certify.overlaps(scene.edge_bounds[b]) {
+                    continue;
+                }
+            }
+            let ids = [ea[0], ea[1], eb[0], eb[1]].map(|i| i as usize);
+            let next = certify_linear_motion(
+                CcdFeature::EdgeEdge,
+                ids.map(|i| start[i]),
+                ids.map(|i| end[i]),
+                separation,
+                work,
+                settings.limits,
+            )?;
+            fraction = fraction.min(next.fraction());
+            if next.fraction() < 1.0 {
+                let c = swept_contact(
+                    CcdFeature::EdgeEdge,
+                    ids.map(|i| i as u32),
+                    0,
+                    start,
+                    end,
+                    next.fraction(),
+                    settings,
+                )?;
+                retain_contact(out, c, work, settings.limits)?;
+            }
+        }
+    }
+    Ok(fraction)
+}
+
 /// Reusable bounds and pair buffers. The immutable hierarchy belongs to the
 /// mesh; binding a different cloth refits geometry and never transfers history.
 #[derive(Debug)]
@@ -208,6 +419,14 @@ pub(crate) struct SelfCollision {
     edge_bounds: Vec<Bounds>,
     triangle_nodes: Vec<Bounds>,
     edge_nodes: Vec<Bounds>,
+    #[cfg(feature = "implicit")]
+    vertex_bounds: Vec<Bounds>,
+    #[cfg(feature = "implicit")]
+    vertex_nodes: Vec<Bounds>,
+    #[cfg(feature = "implicit")]
+    edge_half: Vec<Bounds>,
+    #[cfg(feature = "implicit")]
+    edge_nodes_half: Vec<Bounds>,
     stack: Vec<usize>,
     candidates: Vec<usize>,
     generated: Vec<SurfaceContact>,
@@ -217,6 +436,18 @@ pub(crate) struct SelfCollision {
     cached_positions: Vec<Vec3>,
     cached_previous: Vec<Vec3>,
     contact_cache_valid: bool,
+    /// Lanes for implicit-solver queries; none keeps every query serial.
+    #[cfg(feature = "implicit")]
+    workers: Option<std::sync::Arc<crate::implicit::workers::Workers>>,
+    /// Pairs recorded by the latest collecting sweep.
+    #[cfg(feature = "implicit")]
+    swept: SweptPairs,
+    #[cfg(feature = "implicit")]
+    swept_ready: bool,
+    /// Positions, self contacts and candidate work of the latest full
+    /// implicit-solver query; a query at identical positions reuses them.
+    #[cfg(feature = "implicit")]
+    primitive_cache: Option<(Vec<Vec3>, Vec<SurfaceContact>, usize)>,
 }
 impl SelfCollision {
     pub fn new(mesh: Arc<ClothMesh>, settings: ClothContactSettings) -> Self {
@@ -230,6 +461,14 @@ impl SelfCollision {
             edge_bounds: vec![],
             triangle_nodes: vec![],
             edge_nodes: vec![],
+            #[cfg(feature = "implicit")]
+            vertex_bounds: vec![],
+            #[cfg(feature = "implicit")]
+            vertex_nodes: vec![],
+            #[cfg(feature = "implicit")]
+            edge_half: vec![],
+            #[cfg(feature = "implicit")]
+            edge_nodes_half: vec![],
             stack: vec![],
             candidates: vec![],
             generated: vec![],
@@ -239,6 +478,14 @@ impl SelfCollision {
             cached_positions: vec![],
             cached_previous: vec![],
             contact_cache_valid: false,
+            #[cfg(feature = "implicit")]
+            workers: None,
+            #[cfg(feature = "implicit")]
+            swept: SweptPairs::default(),
+            #[cfg(feature = "implicit")]
+            swept_ready: false,
+            #[cfg(feature = "implicit")]
+            primitive_cache: None,
         }
     }
     pub fn begin(&mut self, mesh: Arc<ClothMesh>, settings: ClothContactSettings) {
@@ -256,26 +503,68 @@ impl SelfCollision {
         self.motion_contacts.clear();
     }
     fn refit(&mut self, positions: &[Vec3]) -> Result<(), ClothError> {
-        self.triangle_bounds.clear();
-        self.edge_bounds.clear();
-        self.triangle_bounds.extend(
-            self.mesh
-                .triangles()
-                .iter()
-                .map(|t| Bounds::points(t.map(|i| positions[i as usize]))),
-        );
-        self.edge_bounds.extend(
-            self.mesh
-                .edges()
-                .iter()
-                .map(|e| Bounds::points(e.vertices.map(|i| positions[i as usize]))),
-        );
-        self.topology
-            .triangles
-            .refit(&self.triangle_bounds, &mut self.triangle_nodes)?;
-        self.topology
-            .edges
-            .refit(&self.edge_bounds, &mut self.edge_nodes)?;
+        self.fit_bounds(&|i: u32| [positions[i as usize]])
+    }
+    /// Recomputes every primitive's bounds from the points of its vertices (one
+    /// per vertex for a static fit, two for a swept fit) and refits both
+    /// hierarchies. Large meshes fill the bounds on the query lanes.
+    fn fit_bounds<const N: usize>(
+        &mut self,
+        points: &(dyn Fn(u32) -> [Vec3; N] + Sync),
+    ) -> Result<(), ClothError> {
+        #[cfg(feature = "implicit")]
+        let workers = self.workers.clone().filter(|w| w.lanes() > 1);
+        let Self {
+            mesh,
+            topology,
+            triangle_bounds,
+            edge_bounds,
+            triangle_nodes,
+            edge_nodes,
+            ..
+        } = self;
+        let (triangles, edges) = (mesh.triangles(), mesh.edges());
+        triangle_bounds.clear();
+        triangle_bounds.resize(triangles.len(), Bounds::point(Vec3::ZERO));
+        edge_bounds.clear();
+        edge_bounds.resize(edges.len(), Bounds::point(Vec3::ZERO));
+        let fill =
+            |first_triangle: usize, tri: &mut [Bounds], first_edge: usize, ed: &mut [Bounds]| {
+                for (k, out) in tri.iter_mut().enumerate() {
+                    *out = Bounds::points(
+                        triangles[first_triangle + k]
+                            .iter()
+                            .flat_map(|&i| points(i)),
+                    );
+                }
+                for (k, out) in ed.iter_mut().enumerate() {
+                    *out = Bounds::points(
+                        edges[first_edge + k]
+                            .vertices
+                            .iter()
+                            .flat_map(|&i| points(i)),
+                    );
+                }
+            };
+        #[cfg(feature = "implicit")]
+        if let Some(workers) = workers.filter(|_| triangles.len() >= 1024) {
+            primitive_queries::fill_bounds_parallel(&workers, &fill, triangle_bounds, edge_bounds)?;
+            // The two hierarchies are independent; refit them side by side.
+            let parts = crate::implicit::workers::handoff(vec![
+                (&topology.triangles, &triangle_bounds[..], triangle_nodes),
+                (&topology.edges, &edge_bounds[..], edge_nodes),
+            ]);
+            for result in workers.run(2, |k| {
+                let (hierarchy, bounds, nodes) = crate::implicit::workers::take(&parts, k);
+                hierarchy.refit(bounds, nodes)
+            })? {
+                result?;
+            }
+            return Ok(());
+        }
+        fill(0, triangle_bounds, 0, edge_bounds);
+        topology.triangles.refit(triangle_bounds, triangle_nodes)?;
+        topology.edges.refit(edge_bounds, edge_nodes)?;
         Ok(())
     }
 
@@ -283,6 +572,32 @@ impl SelfCollision {
     /// Swept boxes enclose both endpoints of every primitive; no static query
     /// from before the projection is reused as a swept candidate envelope.
     pub fn motion_fraction(&mut self, start: &[Vec3], end: &[Vec3]) -> Result<Real, ClothError> {
+        if !self.prepare_sweep(start, end)? {
+            return Ok(1.0);
+        }
+        let mut out = std::mem::take(&mut self.motion_contacts);
+        let mut stack = std::mem::take(&mut self.stack);
+        let mut candidates = std::mem::take(&mut self.candidates);
+        let mut work = self.work;
+        let result = sweep(
+            &self.scene(),
+            start,
+            end,
+            0..start.len(),
+            0..self.mesh.edges().len(),
+            &mut stack,
+            &mut candidates,
+            &mut work,
+            &mut out,
+            None,
+        );
+        (self.motion_contacts, self.stack, self.candidates, self.work) =
+            (out, stack, candidates, work);
+        self.finish_sweep(result?)
+    }
+    /// Validates a motion and refits swept bounds. Returns false for a common
+    /// translation, which preserves relative geometry.
+    fn prepare_sweep(&mut self, start: &[Vec3], end: &[Vec3]) -> Result<bool, ClothError> {
         self.motion_contacts.clear();
         if start.len() != self.mesh.rest_positions().len()
             || end.len() != start.len()
@@ -290,133 +605,19 @@ impl SelfCollision {
         {
             return Err(ClothError::NonFiniteState);
         }
-        // Common translation preserves relative geometry. Compare local
-        // endpoint positions, avoiding cancellation of large displacements.
+        // Compare local endpoint positions, avoiding cancellation of large
+        // displacements.
         if start
             .iter()
             .zip(end)
             .all(|(a, b)| *a - start[0] == *b - end[0])
         {
-            return Ok(1.0);
+            return Ok(false);
         }
-        let separation = self.settings.thickness * 0.9;
-        self.triangle_bounds.clear();
-        self.edge_bounds.clear();
-        self.triangle_bounds.extend(
-            self.mesh.triangles().iter().map(|t| {
-                Bounds::points(t.iter().flat_map(|&i| [start[i as usize], end[i as usize]]))
-            }),
-        );
-        self.edge_bounds.extend(self.mesh.edges().iter().map(|e| {
-            Bounds::points(
-                e.vertices
-                    .iter()
-                    .flat_map(|&i| [start[i as usize], end[i as usize]]),
-            )
-        }));
-        self.topology
-            .triangles
-            .refit(&self.triangle_bounds, &mut self.triangle_nodes)?;
-        self.topology
-            .edges
-            .refit(&self.edge_bounds, &mut self.edge_nodes)?;
-        let mut fraction: Real = 1.0;
-        for vertex in 0..start.len() {
-            self.topology.triangles.query(
-                Bounds::points([start[vertex], end[vertex]]).expanded(separation),
-                0,
-                &self.triangle_bounds,
-                &self.triangle_nodes,
-                &mut self.stack,
-                &mut self.candidates,
-                &mut self.work,
-                self.settings.limits,
-            )?;
-            for &face in &self.candidates {
-                let triangle = self.mesh.triangles()[face];
-                if triangle.contains(&(vertex as u32)) {
-                    continue;
-                }
-                let ids = [
-                    vertex,
-                    triangle[0] as usize,
-                    triangle[1] as usize,
-                    triangle[2] as usize,
-                ];
-                let next = certify_linear_motion(
-                    CcdFeature::VertexFace,
-                    ids.map(|i| start[i]),
-                    ids.map(|i| end[i]),
-                    separation,
-                    &mut self.work,
-                    self.settings.limits,
-                )?;
-                fraction = fraction.min(next.fraction());
-                if next.fraction() < 1.0 {
-                    let c = swept_contact(
-                        CcdFeature::VertexFace,
-                        ids.map(|i| i as u32),
-                        face as u32,
-                        start,
-                        end,
-                        next.fraction(),
-                        self.settings,
-                    )?;
-                    retain_contact(
-                        &mut self.motion_contacts,
-                        c,
-                        &mut self.work,
-                        self.settings.limits,
-                    )?;
-                }
-            }
-        }
-        for a in 0..self.mesh.edges().len() {
-            self.topology.edges.query(
-                self.edge_bounds[a].expanded(separation),
-                a + 1,
-                &self.edge_bounds,
-                &self.edge_nodes,
-                &mut self.stack,
-                &mut self.candidates,
-                &mut self.work,
-                self.settings.limits,
-            )?;
-            let ea = self.mesh.edges()[a].vertices;
-            for &b in &self.candidates {
-                let eb = self.mesh.edges()[b].vertices;
-                if ea.iter().any(|v| eb.contains(v)) {
-                    continue;
-                }
-                let ids = [ea[0], ea[1], eb[0], eb[1]].map(|i| i as usize);
-                let next = certify_linear_motion(
-                    CcdFeature::EdgeEdge,
-                    ids.map(|i| start[i]),
-                    ids.map(|i| end[i]),
-                    separation,
-                    &mut self.work,
-                    self.settings.limits,
-                )?;
-                fraction = fraction.min(next.fraction());
-                if next.fraction() < 1.0 {
-                    let c = swept_contact(
-                        CcdFeature::EdgeEdge,
-                        ids.map(|i| i as u32),
-                        0,
-                        start,
-                        end,
-                        next.fraction(),
-                        self.settings,
-                    )?;
-                    retain_contact(
-                        &mut self.motion_contacts,
-                        c,
-                        &mut self.work,
-                        self.settings.limits,
-                    )?;
-                }
-            }
-        }
+        self.fit_bounds(&|i: u32| [start[i as usize], end[i as usize]])?;
+        Ok(true)
+    }
+    fn finish_sweep(&mut self, fraction: Real) -> Result<Real, ClothError> {
         if fraction < 1.0 {
             self.work.limited_advances += 1;
         }
@@ -429,35 +630,46 @@ impl SelfCollision {
         )?;
         Ok(fraction)
     }
+    fn scene(&self) -> Scene<'_> {
+        Scene {
+            mesh: &self.mesh,
+            topology: &self.topology,
+            triangle_bounds: &self.triangle_bounds,
+            triangle_nodes: &self.triangle_nodes,
+            edge_bounds: &self.edge_bounds,
+            edge_nodes: &self.edge_nodes,
+            #[cfg(feature = "implicit")]
+            vertex_bounds: &self.vertex_bounds,
+            #[cfg(feature = "implicit")]
+            vertex_nodes: &self.vertex_nodes,
+            #[cfg(feature = "implicit")]
+            edge_half: &self.edge_half,
+            #[cfg(feature = "implicit")]
+            edge_nodes_half: &self.edge_nodes_half,
+            settings: self.settings,
+        }
+    }
     fn validate_initial(&mut self, positions: &[Vec3]) -> Result<(), ClothError> {
-        for a in 0..self.mesh.triangles().len() {
-            self.topology.triangles.query(
-                self.triangle_bounds[a],
-                a + 1,
-                &self.triangle_bounds,
-                &self.triangle_nodes,
-                &mut self.stack,
-                &mut self.candidates,
-                &mut self.work,
-                self.settings.limits,
-            )?;
-            let ta = self.mesh.triangles()[a];
-            for &b in &self.candidates {
-                let tb = self.mesh.triangles()[b];
-                if ta.iter().any(|v| tb.contains(v)) {
-                    continue;
-                }
-                if triangles_intersect(
-                    ta.map(|i| positions[i as usize]),
-                    tb.map(|i| positions[i as usize]),
-                )
-                .ok_or(ClothError::DegenerateConstraint)?
-                {
-                    return Err(ClothError::InitialSelfIntersection {
-                        triangles: [a as u32, b as u32],
-                    });
-                }
-            }
+        #[cfg(feature = "implicit")]
+        let checked = self.workers.as_ref().is_some_and(|w| w.lanes() > 1)
+            && positions.len() >= primitive_queries::PARALLEL_VERTICES
+            && self.validate_initial_lanes(positions)?;
+        #[cfg(not(feature = "implicit"))]
+        let checked = false;
+        if !checked {
+            let mut stack = std::mem::take(&mut self.stack);
+            let mut candidates = std::mem::take(&mut self.candidates);
+            let mut work = self.work;
+            let result = intersections(
+                &self.scene(),
+                positions,
+                0..self.mesh.triangles().len(),
+                &mut stack,
+                &mut candidates,
+                &mut work,
+            );
+            (self.stack, self.candidates, self.work) = (stack, candidates, work);
+            result?;
         }
         self.initial_checked = true;
         self.checked_initial_positions.clear();

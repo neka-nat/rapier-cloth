@@ -154,7 +154,42 @@ The scaling benchmark's `total` excludes Rapier's rigid-body step. It is therefo
 a different scope from `physics_frame` above. Timings are serial CPU measurements;
 larger grids are not automatically suitable for real-time use.
 
-## Current implicit contact performance
+## Implicit solver timing
+
+These measurements use the current implementation on an Intel Core i9-13900H
+laptop (Linux x86_64, Rust 1.93.0, release, f64): one 32×32 towel, h=0.1 s,
+80 steps (8 simulated seconds), `ImplicitExecution::Parallel4` and the strict
+iteration policy. Times are the example's summed per-step solve time
+(`simulation_wall_seconds`).
+
+| Configuration | 8 s task | Notes |
+|---|---:|---|
+| Preceding implementation, four workers | 34–35 s | Nominal; same host, not pinned |
+| Current, pinned to four P-cores, load average 3–3.6 | 7.2–7.7 s | Nominal; interleaved single runs |
+| Current, seven conditions, two repeats each, load average about 3 | 7.6–8.4 s | Medians per condition; `right_late`, `grasp_inset` and `left_early` exceed 8 s |
+| Current, sustained or busy host | above 8 s | Laptop clocks fall to 0.4–3.8 GHz at 94–101 °C |
+| Current, `Serial`, pinned to one P-core | 7.9–8.4 s | Nominal 7.9 s, `grasp_inset` 8.2–8.4 s; interleaved four-worker runs took 8.0–8.6 s at load average 4–6 |
+
+The seven towel conditions take 567–604 Newton iterations each; the slowest single
+step (the lift condition's step 24, 79 iterations) takes about 0.7 s. In an
+instrumented nominal run, sparse Cholesky factorization and solves take about 50%
+of the time, continuous self-contact sweeps about 12%, material and contact
+assembly about 13%, matrix loading about 9% and line-search energies about 6%.
+One factorization of the roughly 3,000-unknown system takes 4–7 ms and is
+compute-bound; parallel, single-precision and nested-dissection variants were
+slower on this host. Because that serial share dominates, four workers now save
+about 0.5 s over `Serial` under light load and nothing on a busy host, while
+using 11.3–12.1 s of CPU time instead of 7.9 s; a single core is a reasonable
+budget for one towel.
+
+The target of finishing the 8 s task within 8 s of solve time on four threads is
+met on this laptop for the nominal, lift and friction conditions at a load
+average of about 3, and missed by 0.1–0.4 s for the three conditions that hold
+the fold longer; sustained thermal throttling changes throughput by about 40%.
+Measure on the intended host under its intended load, and compare configurations
+with interleaved runs.
+
+## Earlier implicit contact performance
 
 The current implementation omits unused Hessian storage from first-order contact
 differentiation. It retains the second-order formulas, contact result buffers,
@@ -243,7 +278,7 @@ cargo run --locked --release --no-default-features --features f64,implicit --exa
 ## Implicit towel folding
 
 The implicit timings below are historical measurements of the preceding contact
-implementation. Use the [current matched comparison](#current-implicit-contact-performance)
+implementation. Use the [earlier matched comparison](#earlier-implicit-contact-performance)
 above for the coherent parent-primitive contact model and explicit approximate
 cap policy. The following numbers are not current performance claims.
 

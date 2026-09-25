@@ -1,5 +1,6 @@
-//! One distance-based potential per parent VF/EE pair. Exact local derivatives
-//! are computed before the local Hessian is projected for the Newton direction.
+//! One distance-based potential per parent VF/EE pair. Energy and gradient are
+//! exact; the Newton system uses the barrier's Gauss-Newton curvature along the
+//! gap gradient, which is positive semidefinite without an eigen-decomposition.
 use super::*;
 use crate::SurfaceFeature;
 use crate::collision::geometry::{closest_segments, closest_triangle};
@@ -298,13 +299,24 @@ pub(super) fn normal_weight(c: &SurfaceContact, x: &[Vec3], rest: &[Vec3]) -> Re
     let q = std::array::from_fn(|i| std::array::from_fn(|j| Jet::<false>::scalar(p[i][j])));
     mollifier(c, q, rest).e
 }
-pub(super) fn evaluate<const H: bool>(
+/// Energy, gradient and Gauss-Newton curvature `weight * normal * normalᵀ` of
+/// one parent contact. `normal` is the gap gradient and `weight` the mollified
+/// barrier second derivative, so the curvature is never indefinite. It omits
+/// the barrier-slope and mollifier curvature terms of the exact Hessian.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Term {
+    pub e: Real,
+    pub g: Gradient,
+    pub weight: Real,
+    pub normal: Gradient,
+}
+fn evaluate_parts<const H: bool>(
     c: &SurfaceContact,
     x: &[Vec3],
     rest: &[Vec3],
     band: Real,
     k: Real,
-) -> Result<Jet<H>, ClothError>
+) -> Result<(Jet<H>, Real, Gradient), ClothError>
 where
     Order<H>: Curvature,
 {
@@ -319,17 +331,51 @@ where
     let b = barrier(gap.e, band, k).ok_or(ClothError::UnresolvedSurfaceContact)?;
     // Check feasibility before weighting even at exact parallelism, where m=0.
     if b[0] == 0. {
-        return Ok(Jet::scalar(0.));
+        return Ok((Jet::scalar(0.), 0., Gradient::zeros()));
     }
-    let value = gap.compose(b[0], b[1], b[2]) * mollifier(c, q, rest);
+    let m = mollifier(c, q, rest);
+    let weight = b[2] * m.e;
+    let value = gap.compose(b[0], b[1], b[2]) * m;
     if !value.e.is_finite()
         || value.g.iter().any(|v| !v.is_finite())
         || (H && !Order::<H>::finite(value.h))
+        || !weight.is_finite()
+        || gap.g.iter().any(|v| !v.is_finite())
     {
         return Err(ClothError::NonFiniteState);
     }
-    Ok(value)
+    Ok((value, weight, gap.g))
 }
+/// Exact local derivatives, retained as a test oracle for `gauss_newton`.
+#[cfg(all(test, feature = "f64"))]
+pub(super) fn evaluate<const H: bool>(
+    c: &SurfaceContact,
+    x: &[Vec3],
+    rest: &[Vec3],
+    band: Real,
+    k: Real,
+) -> Result<Jet<H>, ClothError>
+where
+    Order<H>: Curvature,
+{
+    evaluate_parts(c, x, rest, band, k).map(|(value, _, _)| value)
+}
+pub(super) fn gauss_newton(
+    c: &SurfaceContact,
+    x: &[Vec3],
+    rest: &[Vec3],
+    band: Real,
+    k: Real,
+) -> Result<Term, ClothError> {
+    let (value, weight, normal) = evaluate_parts::<false>(c, x, rest, band, k)?;
+    Ok(Term {
+        e: value.e,
+        g: value.g,
+        weight,
+        normal,
+    })
+}
+#[cfg(all(test, feature = "f64"))]
 pub(super) fn project(h: Hessian) -> Hessian {
     let eig = ((h + h.transpose()) * 0.5).symmetric_eigen();
     let d = Hessian::from_diagonal(&eig.eigenvalues.map(|v| v.max(0.)));
@@ -609,5 +655,62 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn gauss_newton_keeps_first_order_values_and_uses_the_gap_gradient() {
+        let eps = 1e-8;
+        for (p, edge) in examples() {
+            let c = contact(p, edge);
+            let first = evaluate::<false>(&c, &p, &p, 0.000318, 30.).unwrap();
+            let term = gauss_newton(&c, &p, &p, 0.000318, 30.).unwrap();
+            assert_eq!(term.e.to_bits(), first.e.to_bits());
+            for i in 0..12 {
+                assert_eq!(term.g[i].to_bits(), first.g[i].to_bits());
+            }
+            // Every example is inside the barrier band with a positive mollifier.
+            assert!(term.weight > 0.);
+            // Hold the closest-feature branch fixed while differentiating the gap.
+            let gap = |y: [Vec3; 4]| {
+                let q =
+                    std::array::from_fn(|i| std::array::from_fn(|j| Jet::<false>::scalar(y[i][j])));
+                distance_squared(&c, p, q).unwrap().e.sqrt() - c.separation
+            };
+            for j in 0..12 {
+                let mut lo = p;
+                let mut hi = p;
+                lo[j / 3][j % 3] -= eps;
+                hi[j / 3][j % 3] += eps;
+                let fd = (gap(hi) - gap(lo)) / (2. * eps);
+                assert!(
+                    (fd - term.normal[j]).abs() < 1e-6 + 1e-4 * term.normal[j].abs(),
+                    "gap gradient {j}: {fd} {}",
+                    term.normal[j]
+                );
+            }
+            // Without mollification, the exact and Gauss-Newton curvatures share
+            // the dominant barrier term along the gap gradient.
+            let along_gn = term.weight * term.normal.norm_squared();
+            assert!(along_gn > 0.);
+            if normal_weight(&c, &p, &p) == 1. {
+                let exact = evaluate::<true>(&c, &p, &p, 0.000318, 30.).unwrap().h;
+                let n = term.normal / term.normal.norm();
+                let along_exact = (n.transpose() * exact * n)[(0, 0)];
+                assert!(
+                    (along_exact - along_gn).abs() <= 0.05 * along_gn,
+                    "normal curvature {along_exact} {along_gn}"
+                );
+            }
+        }
+        // Outside the band there is no energy, force or curvature.
+        let p = [
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::new(0., 0.001, 0.),
+            Vec3::new(1., 0.001, 0.3),
+        ];
+        let term = gauss_newton(&contact(p, true), &p, &p, 0.000318, 30.).unwrap();
+        assert_eq!((term.e, term.weight), (0., 0.));
+        assert_eq!(term.g, Gradient::zeros());
+        assert_eq!(term.normal, Gradient::zeros());
     }
 }

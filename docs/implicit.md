@@ -33,6 +33,23 @@ to permit the requested step size.
 
 ## Iteration limits and accepted outcomes
 
+Newton starts from `ImplicitSettings::seed`: with the default
+`ImplicitSeed::Velocity`, free vertices begin at their previous position plus
+`velocity × h`, shortened until the continuous checks pass and every contact
+keeps positive clearance (falling back to the previous positions otherwise);
+`ImplicitSeed::Previous` always starts at the previous positions. Both seeds
+converge to the same objective; the velocity seed saves about 10–20% of the
+iterations on the towel task and lets a residual velocity below the tolerance
+persist, where the previous-position seed would zero it.
+
+A step converges when `convergence_window` consecutive Newton directions (default
+3) have an RMS displacement per time step at or below `velocity_tolerance`
+(default 0.001 m/s), or when the first direction of the step already does: a
+state at rest, or a consistent extrapolated state, then stays where it is. The step is limited to `max_iterations`
+Newton iterations (default 128). A smaller window stops sooner but can accept the
+low point of an oscillating iteration far from the solution; on the 5 mm lift
+condition, a window of 1 left one step about 10 mm from its converged state.
+
 The implicit solver defaults to `ImplicitCapPolicy::Strict`: an unconverged
 iteration cap rejects the step. To explicitly accept a bounded approximation:
 
@@ -45,14 +62,15 @@ cloth.set_implicit_solver(Some(ImplicitSettings {
 }))?;
 ```
 
-This policy requires `max_iterations = 80` and `velocity_tolerance = 0.001` m/s.
-It returns the last accepted Newton iterate only after all 80 updates were
+This policy requires the default iteration cap, tolerance and convergence window.
+It returns the last accepted Newton iterate only after every update was
 accepted and the final physical sweep, contact/budget, finite-state, hard-target
 and less-than-3% edge-extension checks pass. Line-search, factorization, contact,
 CCD, worker and budget failures still reject the step. It adds no hidden
 physical substeps and does not enlarge the work budgets. Checkpoints retain the
-policy. Acceptance of a configuration is separate from task qualification: the
-current approximation evidence covers the documented f64, 32×32 towel at h=0.1 s.
+policy. Acceptance of a configuration is separate from task qualification. With
+the default settings, all seven documented towel conditions converge in strict
+mode, so none of them currently exercises this policy.
 
 For every accepted implicit step, `StepReport::implicit` contains an
 `ImplicitOutcome` with typed `termination`, `converged`, objective `energy` (J),
@@ -66,14 +84,21 @@ XPBD reports have no implicit outcome.
 
 ## CPU execution
 
-Trial contact evaluations store only scalar energy and its gradient in their
-internal differentiation values. Newton assemblies retain full second-order
-curvature. This reduces intermediate storage without changing contact formulas,
-solver tolerances, result ordering or the execution settings below.
+Contact energy and forces are exact. The Newton matrix uses each contact's
+Gauss-Newton curvature `m b'' ∇g ∇gᵀ` (barrier second derivative times the gap
+gradient outer product), which is positive semidefinite without a per-contact
+eigen-decomposition; the omitted curvature terms are small inside the barrier
+band. Matrix blocks are summed in assembly order into a pattern that only grows
+during a physical step, so its symbolic factorization is usually reused. The
+self-contact sweep of each Newton direction records the pairs within contact
+range, and line-search trial points evaluate only those pairs.
 
 Serial execution is the default. To use the calling thread and up to three
-additional native threads for material, parent-contact and sparse matrix assembly, select
-`Parallel4` explicitly:
+additional native threads for material and parent-contact evaluation and for
+self-contact queries and sweeps, select `Parallel4` explicitly. On the towel
+task the serial sparse factorization dominates, so four workers save about
+0.5 s of the 8 s solve under light load and nothing on a busy host (see
+[performance.md](performance.md#implicit-solver-timing)):
 
 ```rust
 use rapier_cloth::{ImplicitExecution, ImplicitSettings};
@@ -84,21 +109,27 @@ cloth.set_implicit_solver(Some(ImplicitSettings {
 }))?;
 ```
 
-Execution settings are per cloth and preserved by checkpoints. The application
-controls scheduling across cloths; the library does not install a global pool
-or set CPU affinity. Budget these workers alongside the robot simulator's own
-threads. Small meshes and nonparallel phases run on the caller. Parallel
-assembly preserves the serial contribution and summation order. Parent contacts
-are evaluated in parallel only for batches of at least 1,024 parent pairs; their
-energy, gradient, curvature and numerical errors are consumed in original contact
-order. Temporary per-contact results are discarded after each assembly. Material,
-contact and sparse workers run in separate scopes within the same four-thread
-budget; this does not extend determinism guarantees across CPUs, compilers or precisions.
+Execution settings are per cloth and preserved by checkpoints. Each physical
+step creates its own three-thread [rayon](https://crates.io/crates/rayon) pool
+at its first parallel phase and joins it when the step ends; the library does
+not install a global pool or set CPU affinity. The application controls
+scheduling across cloths. Budget these workers alongside the robot simulator's
+own threads. Small meshes and nonparallel phases run on the caller. Parallel work
+preserves the serial contribution and summation order, so `Serial` and `Parallel4`
+give identical results on the same build and host. Parent contacts and friction
+contacts are evaluated in parallel only for batches of at least 1,024 and 512
+contacts, and self-contact queries only for meshes of at least 1,024 vertices.
+Those queries and sweeps traverse the vertex, edge and triangle hierarchies
+pairwise from a fixed set of subtree pairs, which the lanes take in turn; contacts,
+recorded pairs, work counts and numerical errors return to that fixed order before
+they are consumed. Temporary results do
+not survive a physical step. The four-thread budget does not extend determinism
+guarantees across CPUs, compilers or precisions.
 
-The target must support native thread creation. A creation failure returns
-`ClothError::ImplicitWorkerSpawnFailed`, joins workers already started, and leaves
-that cloth's physical state unchanged. Retry after resources become available,
-or select `Serial`. A world containing multiple cloths still follows the
+The target must support native thread creation. A pool creation failure returns
+`ClothError::ImplicitWorkerSpawnFailed` and leaves that cloth's physical state
+unchanged. Retry after resources become available, or select `Serial`. A world
+containing multiple cloths still follows the
 [world checkpoint and recovery contract](integration.md#failures-and-recovery);
 Rapier state and application commands are separate. Unexpected programmer panics
 remain panics, as on the serial path. No numerical factor, worker or optimizer
@@ -116,7 +147,7 @@ The contact activation margin is the barrier width and must be positive.
 The default barrier stiffness is 30 N/m per contact. Implicit self-contact uses
 a coherent unsigned-distance potential for each parent vertex-face or edge-edge
 pair, retaining parent multiplicity at shared features. Edge-edge contacts use
-a rest-geometry mollifier consistently in energy and derivatives. This differs
+a rest-geometry mollifier consistently in energy and forces. This differs
 from the XPBD contact feature reduction. Scalar energy accumulation is compensated,
 and the membrane energy uses a stable near-rest expression. Initial geometry must have
 positive clearance; this solver does not recover initially overlapping layers.
@@ -129,8 +160,8 @@ exact static sticking or use `static_friction`. Hard particle pins and hard
 vertex attachments are supported; compliant targets and weighted surface
 attachments currently return an error. Coupling remains one-way.
 
-Sparse Newton solves use optional faer and nalgebra dependencies. Iteration and
-line-search work are bounded. In strict mode, numerical exhaustion returns
+Sparse Newton solves use the optional faer and nalgebra dependencies, and
+`Parallel4` the optional rayon dependency. Iteration and line-search work are bounded. In strict mode, numerical exhaustion returns
 `ClothError::ImplicitSolverFailed`; collision budgets retain their existing error
 types. A failed solve leaves the cloth's physical state unchanged. Application
 commands and the separate Rapier state still follow the
@@ -175,8 +206,7 @@ accuracy guarantees.
 Use `--case NAME` for the bounded variants: `nominal`, `grasp_inset`, `lift_5mm`,
 `left_early`, `right_late`, `friction_low`, and `friction_high`. See the
 [condition screen and robot adapter](robot-control.md#headless-reproduction-and-evidence)
-for results. The 5 mm lift reaches the iteration cap in strict mode; explicit
-approximate mode completes the seven screened conditions. The recording converter
+for results. With the default settings all seven conditions converge in strict mode. The recording converter
 below validates the nominal pin-command fixture; changed grasp/motion/release
 commands use diagnostic JSONL rather than that converter.
 
@@ -240,25 +270,24 @@ The optional `implicit_towel` live scene uses the shared Rapier pose adapter.
 Measure complete-task CPU cost separately from numerical success at a large
 physical step; a 0.1 s step does not by itself establish wall-clock real time.
 
-The current public implementation replays the seven h=0.1 s conditions with
-explicit approximation: 560 accepted steps, 559 converged and one approximate
-return (`lift_5mm`, step 24). Position, velocity, residuals and work counts match
-the qualified solver on this Linux host. Independent endpoint checks cover all
-567 states including initial states; continuous safety still depends on runtime
-CCD. Serial and four-worker saved-input controls match on the same build/host.
-These results do not qualify arbitrary manual commands or other cloths.
+The current implementation completes the seven h=0.1 s conditions in strict
+mode: all 560 accepted steps converge, the maximum edge extension is 1.48% and
+the planar fold error is 12.5–12.9 mm. At every step, the vertex RMS position
+difference from the preceding implementation's trajectories stays within
+1.50 mm; for the 5 mm lift, the difference from a fully converged solve of that
+implementation stays within 0.81 mm. Repeated runs and `Serial`/`Parallel4` give
+identical results on the same build and host. Continuous safety depends on the
+runtime CCD, whose certified pairs are unchanged; the independent endpoint
+geometry audits of the preceding implementation have not been repeated. These
+results do not qualify arbitrary manual commands or other cloths.
 
-Task completion does not imply reference-solution accuracy. For the lift case,
-the final RMS position difference from a tighter, converged reference trajectory
-was about 17.52 mm, despite passing the fold and settling checks. The capped
-step remains explicitly unconverged.
+Task completion does not imply reference-solution accuracy: `Converged` is a
+Newton-displacement criterion, not a bound on the distance to the exact
+backward-Euler trajectory.
 
-The earlier implementation completed both fixture step sizes and supported the
-historical [timing comparisons](performance.md#implicit-towel-folding), including
-about 14.81 s for an 8 s h=0.1 task with four workers. Those timings do not describe
-the current parent-primitive contact model. The [current matched CPU and browser comparison](performance.md#current-implicit-contact-performance)
-measures first-order contact storage specialization on top of parallel contact
-evaluation, with exact states/status/work on the qualified paths. Whole-task
-gains are smaller than the first-order kernel improvement and vary with host
-load. Wall-clock real time remains unmet; budget CPU time, worker count and
-process memory alongside the rest of the simulator.
+See [implicit solver timing](performance.md#implicit-solver-timing) for the
+current cost of the 8 s task: about 7.2–8.4 s of solve time with four workers
+on this laptop under light background load, and more in sustained runs that
+throttle. Wall-clock real time is not guaranteed; budget CPU time, worker count
+and process memory alongside the rest of the simulator. Older timings in that
+guide describe preceding implementations.

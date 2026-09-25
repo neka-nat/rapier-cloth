@@ -1,3 +1,5 @@
+// The implicit solver's default iteration cap (ImplicitSettings::max_iterations).
+const MAX_NEWTON_ITERATIONS = 128;
 const vector = (a, n) => Array.isArray(a) && a.length === n && a.every(Number.isFinite);
 const index = (i, count) => Number.isSafeInteger(i) && i >= 0 && i < count;
 const quaternion = q => vector(q, 4) && Math.abs(q.reduce((s, x) => s + x*x, 0) - 1) < 1e-3;
@@ -16,7 +18,7 @@ export function validateFrame(frame) {
   requireValue(Number.isFinite(frame.h) && Math.abs(frame.h - expectedH) < 1e-9
     && Math.abs(frame.time - frame.step * expectedH) < 1e-5, 'step size');
   requireValue(frame.substeps === substeps && index(frame.advanced_substeps, substeps + 1) && frame.advanced_substeps <= frame.step, 'accepted substeps');
-  requireValue(implicit ? Number.isSafeInteger(frame.iterations) && frame.iterations >= 0 && frame.iterations <= 80 : frame.iterations === 8, 'iterations');
+  requireValue(implicit ? Number.isSafeInteger(frame.iterations) && frame.iterations >= 0 && frame.iterations <= MAX_NEWTON_ITERATIONS : frame.iterations === 8, 'iterations');
   requireValue(Array.isArray(frame.pins) && frame.pins.length <= 1024 && frame.pins.every(i => index(i, 1024)), 'pins');
   if (frame.triangles !== undefined) requireValue(Array.isArray(frame.triangles) && frame.triangles.length === 5766 && frame.triangles.every(i => index(i, 1024)), 'triangles');
   requireValue(['physics_ms','p95_stretch','max_penetration','max_target_error','contacts'].every(k => nonnegative(frame[k])), 'diagnostics');
@@ -99,5 +101,5 @@ function validateImplicit(frame) {
     && o.converged === (o.termination === 'converged') && Number.isFinite(o.energy)
     && nonnegative(o.force_rms) && nonnegative(o.force_max), 'implicit outcome');
   if (!o.converged) requireValue(fold.cap_policy === 'approximate' && s.approximate_steps > 0
-    && frame.iterations === 80 && s.max_edge_extension < 0.03, 'approximate validation');
+    && frame.iterations === MAX_NEWTON_ITERATIONS && s.max_edge_extension < 0.03, 'approximate validation');
 }

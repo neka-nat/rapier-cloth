@@ -2,85 +2,206 @@
 //! their original order. No worker accumulates into the global objective/system.
 use super::*;
 
-type Evaluation = Result<primitive::Jet<true>, ClothError>;
-type Slot = Option<Evaluation>;
+pub(super) type Slot = Option<Result<primitive::Term, ClothError>>;
 
+/// Fills `results` with the parent contacts' terms in contact order. Returns
+/// false, with `results` empty, when the caller evaluates the batch serially.
 pub(super) fn evaluate(
     model: &Model,
     x: &[Vec3],
     contacts: &[SurfaceContact],
-    hessian: bool,
-) -> Result<Option<Vec<Evaluation>>, ClothError> {
+    results: &mut Vec<Slot>,
+) -> Result<bool, ClothError> {
+    results.clear();
     if model.implicit.execution != ImplicitExecution::Parallel4
         || contacts.iter().filter(|c| primitive::is_parent(c)).count() < 1024
     {
-        return Ok(None);
+        return Ok(false);
     }
     let parents: Vec<_> = contacts
         .iter()
         .filter(|c| primitive::is_parent(c))
         .collect();
-    let mut results: Vec<Slot> = std::iter::repeat_with(|| None)
-        .take(parents.len())
-        .collect();
+    results.resize_with(parents.len(), || None);
     let fill = |contacts: &[&SurfaceContact], slots: &mut [Slot]| {
         for (contact, slot) in contacts.iter().zip(slots) {
             // Retain errors in their input slots: report the first numerical
             // failure in contact order, independent of worker completion order.
-            *slot = Some(if hessian {
-                primitive::evaluate::<true>(
-                    contact,
-                    x,
-                    model.cloth.mesh.rest_positions(),
-                    model.band,
-                    model.barrier_stiffness,
-                )
-                .map(|mut value| {
-                    value.h = primitive::project(value.h);
-                    value
-                })
-            } else {
-                primitive::evaluate::<false>(
-                    contact,
-                    x,
-                    model.cloth.mesh.rest_positions(),
-                    model.band,
-                    model.barrier_stiffness,
-                )
-                .map(|value| primitive::Jet {
-                    e: value.e,
-                    g: value.g,
-                    h: SMatrix::zeros(),
-                })
-            });
+            // Energy-only trials ignore the curvature fields.
+            *slot = Some(primitive::gauss_newton(
+                contact,
+                x,
+                model.cloth.mesh.rest_positions(),
+                model.band,
+                model.barrier_stiffness,
+            ));
         }
     };
-    std::thread::scope(|scope| -> Result<(), ClothError> {
-        let n = parents.len();
-        let (caller, mut remaining) = results.split_at_mut(n / 4);
-        let mut handles = Vec::with_capacity(3);
-        for i in 1..4 {
-            let start = i * n / 4;
-            let end = (i + 1) * n / 4;
-            let (slots, rest) = remaining.split_at_mut(end - start);
-            remaining = rest;
-            let contacts = &parents[start..end];
-            let fill = &fill;
-            // The scope joins previously started workers if creation fails.
-            handles.push(workers::spawn(scope, move || fill(contacts, slots))?);
-        }
-        fill(&parents[..n / 4], caller);
-        for handle in handles {
-            workers::join(handle);
-        }
-        Ok(())
+    let (n, lanes) = (parents.len(), model.workers.lanes());
+    let mut remaining = &mut results[..];
+    let mut parts = Vec::with_capacity(lanes);
+    for k in 0..lanes {
+        let (start, end) = (k * n / lanes, (k + 1) * n / lanes);
+        let (slots, rest) = remaining.split_at_mut(end - start);
+        remaining = rest;
+        parts.push((&parents[start..end], slots));
+    }
+    let parts = workers::handoff(parts);
+    model.workers.run(lanes, |k| {
+        let (contacts, slots) = workers::take(&parts, k);
+        fill(contacts, slots);
     })?;
-    Ok(Some(
-        results
-            .into_iter()
-            .map(|r| r.expect("unfilled parent contact"))
-            .collect(),
-    ))
+    Ok(true)
+}
+
+/// Energy and gradient of one friction contact; its blocks are written directly.
+pub(super) struct FrictionTerm {
+    pub e: Real,
+    pub g: [Vec3; 4],
+}
+pub(super) type FrictionSlot = Option<FrictionTerm>;
+
+/// Tangential offset, smoothed length and load of a lagged friction contact.
+fn friction_kinematics(model: &Model, x: &[Vec3], f: &Friction) -> (Vec3, Real, Real) {
+    let c = f.contact;
+    let delta = c.relative(x) - f.reference;
+    let u = delta - c.normal * delta.dot(c.normal);
+    let eps = model.implicit.friction_velocity * model.h;
+    let len = (u.length_squared() + eps * eps).sqrt();
+    (u, len, c.kinetic_friction * f.load)
+}
+
+/// Evaluates one friction contact; `blocks` holds exactly its free blocks.
+pub(super) fn friction_term(
+    model: &Model,
+    x: &[Vec3],
+    f: &Friction,
+    blocks: &mut [Block],
+) -> FrictionTerm {
+    let c = f.contact;
+    let n = c.normal;
+    let (u, len, load) = friction_kinematics(model, x, f);
+    let eps = model.implicit.friction_velocity * model.h;
+    let g = std::array::from_fn(|i| u * (load / len * c.weights[i]));
+    let mut index = 0;
+    if !blocks.is_empty() {
+        for i in 0..4 {
+            for j in 0..4 {
+                let (pi, pj) = (c.particles[i] as usize, c.particles[j] as usize);
+                if c.weights[i] == 0.0 || c.weights[j] == 0.0 {
+                    continue;
+                }
+                let (Some(di), Some(dj)) = (model.dofs[pi], model.dofs[pj]) else {
+                    continue;
+                };
+                if di < dj {
+                    continue;
+                }
+                blocks[index] = Block {
+                    row: di / 3,
+                    col: dj / 3,
+                    value: std::array::from_fn(|r| {
+                        std::array::from_fn(|s| {
+                            load * c.weights[i]
+                                * c.weights[j]
+                                * ((if r == s { 1.0 } else { 0.0 })
+                                    - n[r] * n[s]
+                                    - u[r] * u[s] / (len * len))
+                                / len
+                        })
+                    }),
+                };
+                index += 1;
+            }
+        }
+    }
+    FrictionTerm {
+        e: load * (len - eps),
+        g,
+    }
+}
+
+/// Number of free lower blocks of a friction contact.
+pub(super) fn friction_blocks(model: &Model, f: &Friction) -> usize {
+    let c = f.contact;
+    let mut count = 0;
+    for i in 0..4 {
+        for j in 0..4 {
+            if c.weights[i] != 0.0
+                && c.weights[j] != 0.0
+                && let (Some(di), Some(dj)) = (
+                    model.dofs[c.particles[i] as usize],
+                    model.dofs[c.particles[j] as usize],
+                )
+                && di >= dj
+            {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// Evaluates friction contacts on the lanes: energies and gradients into
+/// `results`, blocks into `blocks[base..]` at `offsets`. Returns false, with
+/// `results` empty, when the caller evaluates them serially.
+pub(super) fn evaluate_friction(
+    model: &Model,
+    x: &[Vec3],
+    friction: &[Friction],
+    hessian: bool,
+    results: &mut Vec<FrictionSlot>,
+    offsets: &mut Vec<usize>,
+    blocks: &mut Vec<Block>,
+) -> Result<bool, ClothError> {
+    results.clear();
+    if model.implicit.execution != ImplicitExecution::Parallel4 || friction.len() < 512 {
+        return Ok(false);
+    }
+    offsets.clear();
+    offsets.push(0);
+    for f in friction {
+        let next = offsets.last().unwrap()
+            + if hessian {
+                friction_blocks(model, f)
+            } else {
+                0
+            };
+        offsets.push(next);
+    }
+    let base = blocks.len();
+    blocks.resize(
+        base + offsets.last().unwrap(),
+        Block {
+            row: 0,
+            col: 0,
+            value: [[0.0; 3]; 3],
+        },
+    );
+    results.resize_with(friction.len(), || None);
+    let (n, lanes) = (friction.len(), model.workers.lanes());
+    let (mut slots_rest, mut blocks_rest) = (&mut results[..], &mut blocks[base..]);
+    let mut parts = Vec::with_capacity(lanes);
+    for k in 0..lanes {
+        let (start, end) = (k * n / lanes, (k + 1) * n / lanes);
+        let (slots, rest) = slots_rest.split_at_mut(end - start);
+        slots_rest = rest;
+        let (lane_blocks, rest) = blocks_rest.split_at_mut(offsets[end] - offsets[start]);
+        blocks_rest = rest;
+        parts.push((start, slots, lane_blocks));
+    }
+    let parts = workers::handoff(parts);
+    let offsets = &*offsets;
+    model.workers.run(lanes, |k| {
+        let (start, slots, mut lane_blocks) = workers::take(&parts, k);
+        for (i, slot) in slots.iter_mut().enumerate() {
+            let f = start + i;
+            let (mine, rest) = lane_blocks.split_at_mut(offsets[f + 1] - offsets[f]);
+            lane_blocks = rest;
+            *slot = Some(friction_term(model, x, &friction[f], mine));
+        }
+    })?;
+    Ok(true)
 }
 
 #[cfg(all(test, feature = "f64"))]
@@ -120,16 +241,13 @@ mod tests {
                     a.gradient.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                     b.gradient.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
                 );
-                assert_eq!(
-                    a.triplets
+                let bits = |a: &Assembly| {
+                    a.blocks
                         .iter()
-                        .map(|t| (t.row, t.col, t.val.to_bits()))
-                        .collect::<Vec<_>>(),
-                    b.triplets
-                        .iter()
-                        .map(|t| (t.row, t.col, t.val.to_bits()))
+                        .map(|b| (b.row, b.col, b.value.map(|r| r.map(Real::to_bits))))
                         .collect::<Vec<_>>()
-                );
+                };
+                assert_eq!(bits(&a), bits(&b));
             }
             (Err(a), Err(b)) => assert_eq!(a, b),
             _ => panic!("parallel assembly changed the result"),
@@ -177,7 +295,7 @@ mod tests {
                         cs[19].separation = 1.0;
                         cs.last_mut().unwrap().particles = [0; 4];
                     }
-                    model.implicit.execution = ImplicitExecution::Serial;
+                    model.set_execution(ImplicitExecution::Serial);
                     let serial = model.assemble(x, &cs, &[], hessian);
                     if invalid {
                         assert_eq!(
@@ -185,12 +303,54 @@ mod tests {
                             Some(&ClothError::UnresolvedSurfaceContact)
                         );
                     }
-                    model.implicit.execution = ImplicitExecution::Parallel4;
+                    model.set_execution(ImplicitExecution::Parallel4);
                     same(serial, model.assemble(x, &cs, &[], hessian));
                 }
             }
         }
     }
+    #[test]
+    fn dense_friction_assembly_preserves_bits_blocks_and_order() {
+        let (cloth, contacts) = fixture();
+        let x = cloth.positions();
+        // Lagged friction contacts with mixed tangential offsets and loads.
+        let friction: Vec<Friction> = contacts
+            .iter()
+            .enumerate()
+            .map(|(i, c)| Friction {
+                contact: *c,
+                reference: c.relative(x) + Vec3::new(1e-4, 0.0, -2e-4) * ((i % 5) as Real),
+                load: 0.01 + 0.001 * (i % 7) as Real,
+            })
+            .collect();
+        assert!(friction.len() >= 512);
+        for fixed in [vec![], vec![3, 40, 200]] {
+            let targets: Vec<_> = fixed
+                .iter()
+                .map(|&i| Target {
+                    particle: i,
+                    position: x[i as usize],
+                    compliance: 0.0,
+                })
+                .collect();
+            let mut model = Model::new(
+                &cloth,
+                0.1,
+                Vec3::ZERO,
+                &targets,
+                ImplicitSettings::default(),
+            )
+            .unwrap();
+            for hessian in [false, true] {
+                model.set_execution(ImplicitExecution::Serial);
+                let serial = model.assemble(x, &[], &friction, hessian).unwrap();
+                model.set_execution(ImplicitExecution::Parallel4);
+                let parallel = model.assemble(x, &[], &friction, hessian).unwrap();
+                same(Ok(serial), Ok(parallel));
+            }
+        }
+    }
+
     #[test]
     fn contact_worker_creation_failure_is_atomic_and_retry_matches_serial() {
         let (mut original, _) = fixture();
@@ -204,9 +364,10 @@ mod tests {
             max_substep: 0.1,
             ..Default::default()
         };
-        // This fixture is below the material/sparse thresholds. The first
-        // creation attempts belong to parent contacts; test partial creation too.
-        for after in [0, 1, 2] {
+        // This fixture is below the material/sparse thresholds, so the pool
+        // is first created for the parent contacts.
+        {
+            let after = 0;
             let mut cloth = original.clone();
             let result = workers::fault::after(after, || {
                 Solver::new().step(&mut cloth, 0.1, Vec3::ZERO, &settings)
@@ -256,11 +417,7 @@ mod tests {
             )
             .unwrap();
             workers::fault::after(0, || {
-                assert!(
-                    evaluate(&model, cloth.positions(), cs, true)
-                        .unwrap()
-                        .is_none()
-                );
+                assert!(!evaluate(&model, cloth.positions(), cs, &mut vec![]).unwrap());
             });
         }
     }

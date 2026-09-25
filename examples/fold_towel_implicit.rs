@@ -100,11 +100,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
     }))?;
-    cloth.set_implicit_solver(Some(ImplicitSettings {
+    let implicit = ImplicitSettings {
         execution,
         cap_policy: cap_policy.into(),
         ..Default::default()
-    }))?;
+    };
+    cloth.set_implicit_solver(Some(implicit))?;
     let handle = world.add_cloth(cloth);
     writeln!(
         out,
@@ -113,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "cap_policy":cap_policy,"workers":match execution { ImplicitExecution::Serial => 1, ImplicitExecution::Parallel4 => 4 },
         "youngs_modulus":821000.0,"poisson_ratio":0.243,"thickness":input.thickness,
         "density":0.1503,"damping":0.0,"barrier_stiffness":30.0,"friction_velocity":0.001,
-        "newton_iterations":80,"velocity_tolerance":0.001,"candidate_pair_limit":10000000,
+        "newton_iterations":implicit.max_iterations,"velocity_tolerance":implicit.velocity_tolerance,"convergence_window":implicit.convergence_window,"seed":format!("{:?}", implicit.seed).to_lowercase(),"candidate_pair_limit":10000000,
         "ccd_check_limit":10000000,"x":input.x,"masses":world.cloth(handle)?.masses()})
     )?;
     out.flush()?;

@@ -66,8 +66,9 @@ The live demo uses a [separate request/response protocol](live-demo.md#architect
 
 ## Implicit replay profile (v2)
 
-The [converter](../demos/viewer/scripts/convert-implicit.mjs) produces a separate
-v2 profile from `fold_towel_implicit` JSONL. Geometry, bodies, frame ordering and
+The viewer's converter (`npm --prefix demos/viewer run convert:implicit`, see the
+[implicit guide](implicit.md#watch-the-motion)) produces a separate v2 profile
+from `fold_towel_implicit` JSONL. Geometry, bodies, frame ordering and
 outcome fields follow v1. The required `config.solver` is `implicit` and
 `precision` is `f64`. Other v2 solvers and unknown schema versions are rejected.
 

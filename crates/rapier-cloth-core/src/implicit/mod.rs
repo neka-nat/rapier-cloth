@@ -7,23 +7,23 @@
 // visible; the sparse global system uses checked indices from validated meshes.
 mod contact_elements;
 mod elements;
+mod membrane;
 mod primitive;
 mod settings;
 mod sparse;
-mod workers;
+pub(crate) mod workers;
 use crate::collision::self_collision::SelfCollision;
 use crate::constraints::bend::{angle_and_gradients, angle_difference};
 use crate::{
     Cloth, ClothError, ContactMotion, ContactSource, ContactStage, Real, SolverSettings,
     StepReport, SurfaceContact, Target, Vec3,
 };
-use faer::{Mat, prelude::Solve, sparse::Triplet};
 use nalgebra::SMatrix;
 pub use settings::{
-    ImplicitCapPolicy, ImplicitExecution, ImplicitOutcome, ImplicitSettings, ImplicitTermination,
-    ShellMaterial,
+    ImplicitCapPolicy, ImplicitExecution, ImplicitOutcome, ImplicitSeed, ImplicitSettings,
+    ImplicitTermination, ShellMaterial,
 };
-use sparse::SparseSystem;
+use sparse::{Block, SparseSystem};
 
 #[derive(Clone)]
 struct Triangle {
@@ -130,10 +130,17 @@ mod precision_tests {
     }
 }
 
+#[derive(Default)]
 struct Assembly {
     energy: Real,
     gradient: Vec<Real>,
-    triplets: Vec<Triplet<usize, usize, Real>>,
+    /// Lower 3×3 blocks in assembly order; empty for energy-only evaluations.
+    blocks: Vec<Block>,
+    /// Reused per-element and per-contact results of the parallel evaluators.
+    elements: elements::ElementBuffers,
+    terms: Vec<contact_elements::Slot>,
+    friction_terms: Vec<contact_elements::FrictionSlot>,
+    friction_offsets: Vec<usize>,
 }
 
 fn failure(phase: &'static str, iterations: usize) -> ClothError {
@@ -214,6 +221,35 @@ fn membrane(
     Some((e, p, h))
 }
 
+fn push_gradient(dofs: &[Option<usize>], gradient: &mut [Real], i: usize, g: Vec3) {
+    if let Some(d) = dofs[i] {
+        for c in 0..3 {
+            gradient[d + c] += g[c];
+        }
+    }
+}
+
+/// Appends a free lower-triangular block; other blocks are not stored.
+fn push_block(
+    dofs: &[Option<usize>],
+    hessian: bool,
+    blocks: &mut Vec<Block>,
+    i: usize,
+    j: usize,
+    value: [[Real; 3]; 3],
+) {
+    if hessian
+        && let (Some(di), Some(dj)) = (dofs[i], dofs[j])
+        && di >= dj
+    {
+        blocks.push(Block {
+            row: di / 3,
+            col: dj / 3,
+            value,
+        });
+    }
+}
+
 struct Model<'a> {
     cloth: &'a Cloth,
     triangles: Vec<Triangle>,
@@ -227,8 +263,21 @@ struct Model<'a> {
     band: Real,
     barrier_stiffness: Real,
     implicit: ImplicitSettings,
+    /// The step's lanes; created on the first parallel phase.
+    workers: std::sync::Arc<workers::Workers>,
 }
 impl<'a> Model<'a> {
+    #[cfg(test)]
+    fn set_execution(&mut self, execution: ImplicitExecution) {
+        self.implicit.execution = execution;
+        self.workers = std::sync::Arc::new(workers::Workers::new(
+            if execution == ImplicitExecution::Parallel4 {
+                4
+            } else {
+                1
+            },
+        ));
+    }
     fn new(
         cloth: &'a Cloth,
         h: Real,
@@ -338,6 +387,13 @@ impl<'a> Model<'a> {
             band: config.activation_margin,
             barrier_stiffness: implicit.barrier_stiffness,
             implicit,
+            workers: std::sync::Arc::new(workers::Workers::new(
+                if implicit.execution == ImplicitExecution::Parallel4 {
+                    4
+                } else {
+                    1
+                },
+            )),
         })
     }
     fn assemble(
@@ -347,50 +403,54 @@ impl<'a> Model<'a> {
         friction: &[Friction],
         hessian: bool,
     ) -> Result<Assembly, ClothError> {
+        let mut a = Assembly::default();
+        self.assemble_into(x, contacts, friction, hessian, &mut a)?;
+        Ok(a)
+    }
+    /// `assemble` into reused buffers; `a` is fully overwritten on success.
+    fn assemble_into(
+        &self,
+        x: &[Vec3],
+        contacts: &[SurfaceContact],
+        friction: &[Friction],
+        hessian: bool,
+        a: &mut Assembly,
+    ) -> Result<(), ClothError> {
         let mut energy = EnergySum::default();
-        let mut a = Assembly {
-            energy: 0.0,
-            gradient: vec![0.0; self.count],
-            triplets: Vec::new(),
-        };
-        let mut add_gradient = |i: usize, g: Vec3| {
-            if let Some(d) = self.dofs[i] {
-                for c in 0..3 {
-                    a.gradient[d + c] += g[c];
-                }
-            }
-        };
+        a.energy = 0.0;
+        a.gradient.clear();
+        a.gradient.resize(self.count, 0.0);
+        a.blocks.clear();
+        let dofs = &self.dofs;
         // Only free, lower-triangular blocks reach the sparse matrix. Check
         // before constructing their tensors, including on energy-only trials.
-        let active_block = |i: usize, j: usize| {
-            hessian
-                && self.dofs[i]
-                    .zip(self.dofs[j])
-                    .is_some_and(|(di, dj)| di >= dj)
-        };
-        let mut add_block = |i: usize, j: usize, block: [[Real; 3]; 3]| {
-            if hessian && let (Some(di), Some(dj)) = (self.dofs[i], self.dofs[j]) {
-                for u in 0..3 {
-                    for v in 0..3 {
-                        if di + u >= dj + v {
-                            a.triplets.push(Triplet::new(di + u, dj + v, block[u][v]));
-                        }
-                    }
-                }
-            }
-        };
+        let active_block =
+            |i: usize, j: usize| hessian && dofs[i].zip(dofs[j]).is_some_and(|(di, dj)| di >= dj);
         for i in 0..x.len() {
             let w = self.cloth.masses[i] / (self.h * self.h);
             let d = x[i] - self.prediction[i];
             energy.add(0.5 * w * d.length_squared());
-            add_gradient(i, d * w);
-            add_block(i, i, [[w, 0.0, 0.0], [0.0, w, 0.0], [0.0, 0.0, w]]);
+            push_gradient(dofs, &mut a.gradient, i, d * w);
+            push_block(
+                dofs,
+                hessian,
+                &mut a.blocks,
+                i,
+                i,
+                [[w, 0.0, 0.0], [0.0, w, 0.0], [0.0, 0.0, w]],
+            );
         }
-        if hessian
-            && self.implicit.execution == ImplicitExecution::Parallel4
-            && self.triangles.len() >= 1024
-        {
-            elements::assemble(self, x, &mut energy, &mut add_gradient, &mut add_block)?;
+        if self.implicit.execution == ImplicitExecution::Parallel4 && self.triangles.len() >= 1024 {
+            let gradient = &mut a.gradient;
+            elements::assemble(
+                self,
+                x,
+                hessian,
+                &mut a.elements,
+                &mut energy,
+                |i: usize, g: Vec3| push_gradient(dofs, gradient, i, g),
+                &mut a.blocks,
+            )?;
         } else {
             for tri in &self.triangles {
                 let mut f = [Vec3::ZERO; 2];
@@ -399,20 +459,20 @@ impl<'a> Model<'a> {
                         f[c] += x[tri.ids[k]] * tri.b[k][c];
                     }
                 }
-                let (e, g, hf) = membrane(f, self.mu, self.lambda, hessian)
+                let (e, g, _) = membrane(f, self.mu, self.lambda, false)
                     .ok_or(ClothError::DegenerateConstraint)?;
                 energy.add(e * tri.volume);
                 for k in 0..3 {
-                    add_gradient(
+                    push_gradient(
+                        dofs,
+                        &mut a.gradient,
                         tri.ids[k],
                         (g[0] * tri.b[k][0] + g[1] * tri.b[k][1]) * tri.volume,
                     );
                 }
                 if hessian {
-                    let eig = ((hf + hf.transpose()) * 0.5).symmetric_eigen();
-                    let d =
-                        SMatrix::<Real, 6, 6>::from_diagonal(&eig.eigenvalues.map(|v| v.max(0.0)));
-                    let hp = eig.eigenvectors * d * eig.eigenvectors.transpose();
+                    let hp = membrane::projected_hessian(f, self.mu, self.lambda)
+                        .ok_or(ClothError::DegenerateConstraint)?;
                     for i in 0..3 {
                         for j in 0..3 {
                             if !active_block(tri.ids[i], tri.ids[j]) {
@@ -431,7 +491,7 @@ impl<'a> Model<'a> {
                                     }
                                 }
                             }
-                            add_block(tri.ids[i], tri.ids[j], block);
+                            push_block(dofs, hessian, &mut a.blocks, tri.ids[i], tri.ids[j], block);
                         }
                     }
                 }
@@ -443,12 +503,15 @@ impl<'a> Model<'a> {
                 let k = hinge.stiffness;
                 energy.add(0.5 * k * d * d);
                 for i in 0..4 {
-                    add_gradient(hinge.ids[i], g[i] * (k * d));
+                    push_gradient(dofs, &mut a.gradient, hinge.ids[i], g[i] * (k * d));
                     for j in 0..4 {
                         if !active_block(hinge.ids[i], hinge.ids[j]) {
                             continue;
                         }
-                        add_block(
+                        push_block(
+                            dofs,
+                            hessian,
+                            &mut a.blocks,
                             hinge.ids[i],
                             hinge.ids[j],
                             std::array::from_fn(|u| std::array::from_fn(|v| k * g[i][u] * g[j][v])),
@@ -457,46 +520,45 @@ impl<'a> Model<'a> {
                 }
             }
         }
-        let mut parent_elements =
-            contact_elements::evaluate(self, x, contacts, hessian)?.map(Vec::into_iter);
+        let parallel = contact_elements::evaluate(self, x, contacts, &mut a.terms)?;
+        let mut parent_terms = a.terms.iter_mut();
         for c in contacts {
             if primitive::is_parent(c) {
-                let (contact_energy, gradient, curvature) =
-                    if let Some(elements) = &mut parent_elements {
-                        let value = elements.next().expect("missing parent contact")?;
-                        (value.e, value.g, value.h)
-                    } else if hessian {
-                        let value = primitive::evaluate::<true>(
-                            c,
-                            x,
-                            self.cloth.mesh.rest_positions(),
-                            self.band,
-                            self.barrier_stiffness,
-                        )?;
-                        (value.e, value.g, primitive::project(value.h))
-                    } else {
-                        let value = primitive::evaluate::<false>(
-                            c,
-                            x,
-                            self.cloth.mesh.rest_positions(),
-                            self.band,
-                            self.barrier_stiffness,
-                        )?;
-                        (value.e, value.g, SMatrix::<Real, 12, 12>::zeros())
-                    };
-                energy.add(contact_energy);
+                let term = if parallel {
+                    parent_terms
+                        .next()
+                        .and_then(Option::take)
+                        .expect("missing parent contact")?
+                } else {
+                    primitive::gauss_newton(
+                        c,
+                        x,
+                        self.cloth.mesh.rest_positions(),
+                        self.band,
+                        self.barrier_stiffness,
+                    )?
+                };
+                energy.add(term.e);
+                let (g, n) = (term.g, term.normal);
                 for i in 0..4 {
-                    add_gradient(
+                    push_gradient(
+                        dofs,
+                        &mut a.gradient,
                         c.particles[i] as usize,
-                        Vec3::new(gradient[3 * i], gradient[3 * i + 1], gradient[3 * i + 2]),
+                        Vec3::new(g[3 * i], g[3 * i + 1], g[3 * i + 2]),
                     );
                     for j in 0..4 {
                         if active_block(c.particles[i] as usize, c.particles[j] as usize) {
-                            add_block(
+                            push_block(
+                                dofs,
+                                hessian,
+                                &mut a.blocks,
                                 c.particles[i] as usize,
                                 c.particles[j] as usize,
                                 std::array::from_fn(|r| {
-                                    std::array::from_fn(|s| curvature[(3 * i + r, 3 * j + s)])
+                                    std::array::from_fn(|s| {
+                                        term.weight * n[3 * i + r] * n[3 * j + s]
+                                    })
                                 }),
                             );
                         }
@@ -509,12 +571,20 @@ impl<'a> Model<'a> {
             energy.add(b[0]);
             for i in 0..4 {
                 if c.weights[i] != 0.0 {
-                    add_gradient(c.particles[i] as usize, c.normal * (b[1] * c.weights[i]));
+                    push_gradient(
+                        dofs,
+                        &mut a.gradient,
+                        c.particles[i] as usize,
+                        c.normal * (b[1] * c.weights[i]),
+                    );
                     for j in 0..4 {
                         if c.weights[j] != 0.0
                             && active_block(c.particles[i] as usize, c.particles[j] as usize)
                         {
-                            add_block(
+                            push_block(
+                                dofs,
+                                hessian,
+                                &mut a.blocks,
                                 c.particles[i] as usize,
                                 c.particles[j] as usize,
                                 std::array::from_fn(|u| {
@@ -531,36 +601,69 @@ impl<'a> Model<'a> {
                 }
             }
         }
-        for f in friction {
-            let c = f.contact;
-            let n = c.normal;
-            let delta = c.relative(x) - f.reference;
-            let u = delta - n * delta.dot(n);
-            let eps = self.implicit.friction_velocity * self.h;
-            let len = (u.length_squared() + eps * eps).sqrt();
-            let load = c.kinetic_friction * f.load;
-            energy.add(load * (len - eps));
-            for i in 0..4 {
-                if c.weights[i] != 0.0 {
-                    add_gradient(c.particles[i] as usize, u * (load / len * c.weights[i]));
-                    for j in 0..4 {
-                        if c.weights[j] != 0.0
-                            && active_block(c.particles[i] as usize, c.particles[j] as usize)
-                        {
-                            add_block(
-                                c.particles[i] as usize,
-                                c.particles[j] as usize,
-                                std::array::from_fn(|r| {
-                                    std::array::from_fn(|s| {
-                                        load * c.weights[i]
-                                            * c.weights[j]
-                                            * ((if r == s { 1.0 } else { 0.0 })
-                                                - n[r] * n[s]
-                                                - u[r] * u[s] / (len * len))
-                                            / len
-                                    })
-                                }),
-                            );
+        if contact_elements::evaluate_friction(
+            self,
+            x,
+            friction,
+            hessian,
+            &mut a.friction_terms,
+            &mut a.friction_offsets,
+            &mut a.blocks,
+        )? {
+            for (f, term) in friction.iter().zip(&mut a.friction_terms) {
+                let term = term.take().expect("unfilled friction contact");
+                energy.add(term.e);
+                for i in 0..4 {
+                    if f.contact.weights[i] != 0.0 {
+                        push_gradient(
+                            dofs,
+                            &mut a.gradient,
+                            f.contact.particles[i] as usize,
+                            term.g[i],
+                        );
+                    }
+                }
+            }
+        } else {
+            for f in friction {
+                let c = f.contact;
+                let n = c.normal;
+                let delta = c.relative(x) - f.reference;
+                let u = delta - n * delta.dot(n);
+                let eps = self.implicit.friction_velocity * self.h;
+                let len = (u.length_squared() + eps * eps).sqrt();
+                let load = c.kinetic_friction * f.load;
+                energy.add(load * (len - eps));
+                for i in 0..4 {
+                    if c.weights[i] != 0.0 {
+                        push_gradient(
+                            dofs,
+                            &mut a.gradient,
+                            c.particles[i] as usize,
+                            u * (load / len * c.weights[i]),
+                        );
+                        for j in 0..4 {
+                            if c.weights[j] != 0.0
+                                && active_block(c.particles[i] as usize, c.particles[j] as usize)
+                            {
+                                push_block(
+                                    dofs,
+                                    hessian,
+                                    &mut a.blocks,
+                                    c.particles[i] as usize,
+                                    c.particles[j] as usize,
+                                    std::array::from_fn(|r| {
+                                        std::array::from_fn(|s| {
+                                            load * c.weights[i]
+                                                * c.weights[j]
+                                                * ((if r == s { 1.0 } else { 0.0 })
+                                                    - n[r] * n[s]
+                                                    - u[r] * u[s] / (len * len))
+                                                / len
+                                        })
+                                    }),
+                                );
+                            }
                         }
                     }
                 }
@@ -570,10 +673,13 @@ impl<'a> Model<'a> {
         if !a.energy.is_finite() || a.gradient.iter().any(|g| !g.is_finite()) {
             return Err(ClothError::NonFiniteState);
         }
-        Ok(a)
+        Ok(())
     }
 }
 
+/// `swept`: `x` lies on the motion of the latest collecting self sweep, whose
+/// recorded pairs replace the hierarchy query.
+#[allow(clippy::too_many_arguments)]
 fn query(
     source: &mut impl ContactSource,
     engine: &mut SelfCollision,
@@ -582,6 +688,7 @@ fn query(
     stage: ContactStage,
     cloth: &Cloth,
     limit: usize,
+    swept: bool,
 ) -> Result<Vec<SurfaceContact>, ClothError> {
     let mut particles = Vec::new();
     source.contacts(old, x, cloth.material.contact_radius, stage, &mut particles)?;
@@ -592,7 +699,9 @@ fn query(
     }
     let mut out = Vec::new();
     source.surface_contacts_with_work(old, x, stage, &mut out, &mut engine.work)?;
-    if cloth.contact_settings.unwrap().self_collision {
+    if cloth.contact_settings.unwrap().self_collision
+        && !(swept && engine.implicit_swept_primitives(x, &mut out)?)
+    {
         engine.implicit_primitives(x, &mut out)?;
     }
     out.sort_by_key(|c| c.key);
@@ -619,6 +728,33 @@ fn external_fraction(
     let fraction = source.motion_fraction(motion, work)?;
     if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
         return Err(ClothError::InvalidSurfaceContact("invalid motion fraction"));
+    }
+    Ok(fraction)
+}
+
+/// Certifies the motion from the accepted `positions` to `end` with both
+/// continuous checks; the self sweep records its pairs for a query at `end`.
+fn certify(
+    engine: &mut SelfCollision,
+    source: &mut impl ContactSource,
+    config: crate::ClothContactSettings,
+    positions: &[Vec3],
+    end: &[Vec3],
+) -> Result<Real, ClothError> {
+    let mut fraction: Real = 1.0;
+    if config.self_collision {
+        fraction = fraction.min(engine.implicit_motion_fraction(positions, end, true)?);
+    }
+    if source.continuous_motion() {
+        fraction = fraction.min(external_fraction(
+            source,
+            ContactMotion {
+                start: positions,
+                end,
+                stage: ContactStage::Prediction,
+            },
+            &mut engine.work,
+        )?);
     }
     Ok(fraction)
 }
@@ -653,6 +789,7 @@ pub(crate) fn step(
     let config = cloth.contact_settings.unwrap();
     let mut engine = SelfCollision::new(cloth.mesh.clone(), config);
     engine.begin(cloth.mesh.clone(), config);
+    engine.set_workers(std::sync::Arc::clone(&model.workers));
     let mut x = cloth.positions.clone();
     for (&i, &p) in &cloth.pins {
         x[i as usize] = p;
@@ -668,22 +805,51 @@ pub(crate) fn step(
         ContactStage::Stabilization,
         cloth,
         settings.max_contacts,
+        false,
     )?;
-    if config.self_collision && engine.motion_fraction(&cloth.positions, &x)? < 1.0 {
-        return Err(failure("grasp initialization sweep", 0));
+    let mut certified = false;
+    if implicit.seed == ImplicitSeed::Velocity && model.count > 0 {
+        // Extrapolate the free vertices, shortening the extrapolation until
+        // the continuous checks pass and every contact keeps clearance.
+        let mut scale: Real = 1.0;
+        for attempt in 0..4 {
+            let trial: Vec<Vec3> = x
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| match model.dofs[i] {
+                    Some(_) => p + cloth.velocities[i] * (h * scale),
+                    None => p,
+                })
+                .collect();
+            let fraction = certify(&mut engine, source, config, &cloth.positions, &trial)?;
+            if fraction >= 1.0 {
+                let contacts = query(
+                    source,
+                    &mut engine,
+                    &cloth.positions,
+                    &trial,
+                    ContactStage::Iteration,
+                    cloth,
+                    settings.max_contacts,
+                    true,
+                )?;
+                if contacts.iter().all(|c| c.gap(&trial) > 0.0) {
+                    x = trial;
+                    certified = true;
+                    break;
+                }
+                scale *= 0.5;
+            } else {
+                scale *= 0.9 * fraction;
+            }
+            if attempt == 3 || scale * h * cloth.mesh.area().sqrt() < 1e-12 {
+                break;
+            }
+        }
     }
-    if source.continuous_motion()
-        && external_fraction(
-            source,
-            ContactMotion {
-                start: &cloth.positions,
-                end: &x,
-                stage: ContactStage::Prediction,
-            },
-            &mut engine.work,
-        )? < 1.0
-    {
-        return Err(failure("initial rigid sweep", 0));
+    // The pins' motion ends at `x`, so this sweep's pairs serve the first query.
+    if !certified && certify(&mut engine, source, config, &cloth.positions, &x)? < 1.0 {
+        return Err(failure("grasp initialization sweep", 0));
     }
     let mut friction = Vec::new();
     for contact in initial {
@@ -731,6 +897,7 @@ pub(crate) fn step(
         ContactStage::Iteration,
         cloth,
         settings.max_contacts,
+        true,
     )?;
     let mut report = StepReport::default();
     let mut converged = model.count == 0;
@@ -738,35 +905,36 @@ pub(crate) fn step(
     if model.count == 0 {
         model.assemble(&x, &contacts, &friction, false)?;
     }
-    // Match the author solver's RMS Newton-displacement / h criterion and its
-    // three-iteration window, rather than imposing an unrelated maximum norm.
+    // Use the author solver's RMS Newton-displacement / h criterion over a
+    // configurable window (default three, as in the author solver).
+    let window = implicit.convergence_window;
     let mut residual_window = std::collections::VecDeque::new();
-    let mut sparse = SparseSystem::new(implicit.execution);
+    let mut sparse = SparseSystem::new(std::sync::Arc::clone(&model.workers));
+    let mut assembled = Assembly::default();
+    let mut trial_eval = Assembly::default();
     for iteration in 0..if model.count == 0 {
         0
     } else {
         implicit.max_iterations
     } {
-        let assembled = model.assemble(&x, &contacts, &friction, true)?;
-        let matrix = sparse.matrix(model.count, &assembled.triplets, iteration)?;
-
-        let factor = sparse.factor(matrix.as_ref(), iteration)?;
-        let rhs = Mat::from_fn(model.count, 1, |i, _| -assembled.gradient[i]);
-        let solution = factor.solve(rhs.as_ref());
+        model.assemble_into(&x, &contacts, &friction, true, &mut assembled)?;
+        sparse.load(model.count, &assembled.blocks, iteration)?;
+        let mut solution: Vec<Real> = assembled.gradient.iter().map(|g| -g).collect();
+        sparse.solve(&mut solution, iteration)?;
         let direction: Vec<Vec3> = model
             .dofs
             .iter()
             .map(|i| {
                 i.map_or(Vec3::ZERO, |d| {
-                    Vec3::new(solution[(d, 0)], solution[(d + 1, 0)], solution[(d + 2, 0)])
+                    Vec3::new(solution[d], solution[d + 1], solution[d + 2])
                 })
             })
             .collect();
         let slope: Real = assembled
             .gradient
             .iter()
-            .enumerate()
-            .map(|(i, g)| g * solution[(i, 0)])
+            .zip(&solution)
+            .map(|(g, d)| g * d)
             .sum();
         report.iterations = iteration + 1;
         let newton_rms = (direction.iter().map(|v| v.length_squared()).sum::<Real>()
@@ -774,15 +942,19 @@ pub(crate) fn step(
             .sqrt()
             / h;
         residual_window.push_back(newton_rms);
-        if residual_window.len() > 3 {
+        if residual_window.len() > window {
             residual_window.pop_front();
         }
         let roundoff_motion = direction
             .iter()
             .all(|d| d.length() <= Real::EPSILON * 128.0 * cloth.mesh.area().sqrt());
+        // A step whose first direction is already small starts at (or was
+        // seeded at) a consistent state; later single small directions can be
+        // the low point of an oscillation.
         if newton_rms == 0.0
             || roundoff_motion
-            || (residual_window.len() == 3
+            || (iteration == 0 && newton_rms <= implicit.velocity_tolerance)
+            || (residual_window.len() == window
                 && residual_window
                     .iter()
                     .all(|&r| r <= implicit.velocity_tolerance))
@@ -795,7 +967,8 @@ pub(crate) fn step(
         }
         let full: Vec<_> = x.iter().zip(&direction).map(|(&p, &d)| p + d).collect();
         let mut alpha = if config.self_collision {
-            engine.motion_fraction(&x, &full)?
+            // Record pairs in range of this motion for the line-search queries.
+            engine.implicit_motion_fraction(&x, &full, true)?
         } else {
             1.0
         };
@@ -826,10 +999,12 @@ pub(crate) fn step(
                 ContactStage::Iteration,
                 cloth,
                 settings.max_contacts,
+                true,
             )?;
-            let evaluation = model.assemble(&trial, &trial_contacts, &friction, false);
+            let evaluation =
+                model.assemble_into(&trial, &trial_contacts, &friction, false, &mut trial_eval);
             match evaluation {
-                Ok(next) if next.energy <= assembled.energy + 0.0001 * alpha * slope => {
+                Ok(()) if trial_eval.energy <= assembled.energy + 0.0001 * alpha * slope => {
                     accepted = Some((trial, trial_contacts));
                     break;
                 }
@@ -859,9 +1034,10 @@ pub(crate) fn step(
                 report.iterations,
             ));
         }
-        validate_approximate_targets(cloth, &x, targets)?;
+        validate_approximate_targets(cloth, &x, targets, report.iterations)?;
     }
-    if config.self_collision && engine.motion_fraction(&cloth.positions, &x)? < 1.0 {
+    // The final state ends this sweep, so its recorded pairs serve the final query.
+    if config.self_collision && engine.implicit_motion_fraction(&cloth.positions, &x, true)? < 1.0 {
         return Err(failure("final self sweep", report.iterations));
     }
     if source.continuous_motion()
@@ -885,8 +1061,10 @@ pub(crate) fn step(
         ContactStage::Final,
         cloth,
         settings.max_contacts,
+        true,
     )?;
-    let final_assembly = model.assemble(&x, &contacts, &friction, false)?;
+    model.assemble_into(&x, &contacts, &friction, false, &mut trial_eval)?;
+    let final_assembly = trial_eval;
     let force_rms = if model.count == 0 {
         0.0
     } else {
@@ -960,6 +1138,7 @@ fn validate_approximate_targets(
     cloth: &Cloth,
     x: &[Vec3],
     targets: &[Target],
+    iterations: usize,
 ) -> Result<(), ClothError> {
     if x.iter().any(|p| !p.is_finite()) {
         return Err(ClothError::NonFiniteState);
@@ -967,7 +1146,7 @@ fn validate_approximate_targets(
     if cloth.pins.iter().any(|(&i, &p)| x[i as usize] != p)
         || targets.iter().any(|t| x[t.particle as usize] != t.position)
     {
-        return Err(failure("approximate hard target", 80));
+        return Err(failure("approximate hard target", iterations));
     }
     Ok(())
 }
@@ -1047,7 +1226,7 @@ mod tests {
             assert_eq!(reduced.energy, full.energy);
             assert_eq!(trial.energy, full.energy);
             assert_eq!(trial.gradient, reduced.gradient);
-            assert!(trial.triplets.is_empty());
+            assert!(trial.blocks.is_empty());
             let free: Vec<_> = (0..full.gradient.len())
                 .filter(|i| !fixed.contains(&((*i / 3) as u32)))
                 .collect();
@@ -1057,23 +1236,21 @@ mod tests {
             );
             // Eliminating hard targets must produce the principal submatrix,
             // retaining every contribution and its original addition order.
+            let vertices: Vec<_> = (0..x.len())
+                .filter(|v| !fixed.contains(&(*v as u32)))
+                .collect();
             let expected: Vec<_> = full
-                .triplets
+                .blocks
                 .iter()
-                .filter_map(|t| {
-                    Some((
-                        free.iter().position(|&i| i == t.row)?,
-                        free.iter().position(|&i| i == t.col)?,
-                        t.val,
-                    ))
+                .filter_map(|b| {
+                    Some(Block {
+                        row: vertices.iter().position(|&v| v == b.row)?,
+                        col: vertices.iter().position(|&v| v == b.col)?,
+                        value: b.value,
+                    })
                 })
                 .collect();
-            let actual: Vec<_> = reduced
-                .triplets
-                .iter()
-                .map(|t| (t.row, t.col, t.val))
-                .collect();
-            assert_eq!(actual, expected);
+            assert_eq!(reduced.blocks, expected);
         }
     }
 

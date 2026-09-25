@@ -25,7 +25,9 @@ press **Reset**. Reset applies those selections to a new task. For the 5 mm lift
 
 **http://127.0.0.1:5173/live.html?scene=implicit_towel&paused=1&case=lift_5mm&cap_policy=approximate**
 
-The solver status displays **Approximate · not converged** for a capped return.
+With the default solver settings the scripted conditions converge, so this policy
+only takes effect if a step reaches the iteration limit, for example during manual
+operation. The solver status displays **Approximate · not converged** for a capped return.
 The cumulative **Approximate steps** count remains visible on later converged
 frames and resets to zero with the task. Accepted approximations continue the
 script; solver errors still stop it.
@@ -132,23 +134,19 @@ control. Each sample retains its typed outcome and cumulative approximate count.
 `--cap-policy strict|approximate` defaults to strict. `--workers 1` selects serial
 execution; this example defaults to 4.
 
-The directly prescribed h=0.1 s fixture passes seven bounded cases with explicit
-approximation: nominal, grasp inset by one grid column, lift increased by 5 mm,
-left release one step early, right release one step late, and friction 0.4/0.6.
-Across their 560 accepted steps, only lift step 24 is approximate. Strict mode
-still rejects that cap. These checks do not qualify arbitrary manual motion.
+The directly prescribed h=0.1 s fixture passes seven bounded cases in strict
+mode: nominal, grasp inset by one grid column, lift increased by 5 mm, left
+release one step early, right release one step late, and friction 0.4/0.6. All
+560 accepted steps converge; the lift's former capped step 24 converges in about
+90 iterations. These checks do not qualify arbitrary manual motion.
 
-The current Rapier adapter completes nominal and lift scripts with all 80 live
-frames exactly matching the headless adapter on the same Linux build/host.
-Only lift step 24 is approximate. Independent checks cover their 162 endpoint
-states; fold RMS is about 12.46 / 11.79 mm and both pass the released settling
-window. The lift's maximum vertex difference from direct pin commands is about
-0.727 mm over the path (final RMS 0.0129 mm), so the two control paths are not
-claimed bitwise identical. Continuous-motion protection remains the runtime CCD.
+The Rapier adapter completes the nominal and lift scripts with all 80 live frames
+exactly matching the headless adapter on the same Linux build/host. Direct pin
+commands and the Rapier adapter are separate control paths and are not claimed
+bitwise identical. Continuous-motion protection remains the runtime CCD.
 
 Physical task success at h=0.1 and wall-clock responsiveness are separate
-requirements. See the [current CPU and browser measurements](performance.md#current-implicit-contact-performance)
-for the parallel parent-contact backend with specialized first-order derivative
-storage. Its qualified task states are unchanged;
-complete-task real time remains unmet. Budget its four workers and temporary
-contact storage alongside the rest of the robot simulator.
+requirements. See the [current solver timing](performance.md#implicit-solver-timing):
+the 8 s task takes about 8.5–14 s of solve time with four workers, depending on
+host load and temperature, so real time is not guaranteed. Budget the four
+workers alongside the rest of the robot simulator.
