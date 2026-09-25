@@ -50,14 +50,51 @@ pub(super) struct SparseSystem {
     /// Fill-reducing ordering and factor size of the latest analysis. A grown
     /// pattern first tries this ordering, which is much cheaper than a new one.
     ordering: Option<(Vec<usize>, usize)>,
+    /// Set by `begin_step`: the next load defines the step's pattern exactly.
+    fresh: bool,
+    /// The current analysis used a fresh fill-reducing ordering.
+    amd_ordering: bool,
 }
 
 impl SparseSystem {
+    #[cfg(test)]
     pub fn new(workers: std::sync::Arc<workers::Workers>) -> Self {
         Self {
             workers,
             ..Self::default()
         }
+    }
+
+    /// Starts a physical step. The previous step's pattern and symbolic
+    /// analysis survive only if the step's first matrix has exactly that
+    /// pattern and the analysis used a fresh ordering; the step then computes
+    /// what a new system would compute, so results never depend on history.
+    pub fn begin_step(&mut self, workers: std::sync::Arc<workers::Workers>) {
+        self.workers = workers;
+        self.fresh = true;
+    }
+
+    /// Makes `blocks` the exact pattern. An unchanged pattern keeps its fresh
+    /// analysis; anything else is analyzed anew.
+    fn set_pattern(&mut self, blocks: &[Block]) {
+        let mut columns: Vec<Vec<usize>> = vec![Vec::new(); self.columns.len()];
+        for b in blocks {
+            columns[b.col].push(b.row);
+        }
+        for rows in columns.iter_mut() {
+            rows.sort_unstable();
+            rows.dedup();
+        }
+        if columns == self.columns && !self.col_ptr.is_empty() {
+            if !self.amd_ordering {
+                self.factor = None;
+                self.ordering = None;
+            }
+            return;
+        }
+        self.columns = columns;
+        self.ordering = None;
+        self.rebuild();
     }
 
     /// Sums `blocks` in input order into the lower-triangular matrix of
@@ -79,8 +116,8 @@ impl SparseSystem {
                 ..Self::default()
             };
         }
-        if self.col_ptr.is_empty() {
-            self.grow(blocks.iter().map(|b| (b.row, b.col)));
+        if std::mem::take(&mut self.fresh) || self.col_ptr.is_empty() {
+            self.set_pattern(blocks);
         }
         // New block pairs grow the pattern; the values are then summed again.
         loop {
@@ -184,7 +221,7 @@ impl SparseSystem {
 
     /// Symbolic analysis of the current pattern. The previous ordering is kept
     /// when it does not enlarge the factor by more than a tenth.
-    fn analyze(&self) -> Result<SymbolicCholesky<usize>, faer::sparse::FaerError> {
+    fn analyze(&self) -> Result<(SymbolicCholesky<usize>, bool), faer::sparse::FaerError> {
         let pattern = self.matrix().symbolic();
         let n = pattern.nrows();
         if let Some((forward, previous)) = &self.ordering
@@ -201,15 +238,16 @@ impl SparseSystem {
                 Default::default(),
             )?;
             if reused.len_val() <= previous + previous / 10 {
-                return Ok(reused);
+                return Ok((reused, false));
             }
         }
-        factorize_symbolic_cholesky(
+        let fresh = factorize_symbolic_cholesky(
             pattern,
             Side::Lower,
             SymmetricOrdering::Amd,
             Default::default(),
-        )
+        )?;
+        Ok((fresh, true))
     }
 
     fn matrix(&self) -> SparseColMatRef<'_, usize, Real> {
@@ -230,9 +268,10 @@ impl SparseSystem {
             return Ok(());
         }
         if self.factor.is_none() {
-            let symbolic = self
+            let (symbolic, amd) = self
                 .analyze()
                 .map_err(|_| failure("factorization", iteration))?;
+            self.amd_ordering = amd;
             self.ordering = symbolic
                 .perm()
                 .map(|perm| (perm.arrays().0.to_vec(), symbolic.len_val()));
@@ -533,5 +572,48 @@ mod tests {
         assert!(system.values[3].is_nan());
         assert_eq!(system.values[5], Real::INFINITY);
         assert!(system.solve(&mut [1.0; 3], 9).is_err());
+    }
+
+    #[test]
+    fn step_boundaries_reuse_only_an_identical_fresh_analysis_and_match_new_systems() {
+        let n = 40;
+        let base: Vec<Block> = (0..n)
+            .map(|i| block(i, i, 1.0))
+            .chain((1..n).map(|i| block(i, i - 1, 0.1)))
+            .collect();
+        let mut grown = base.clone();
+        grown.extend((7..n).step_by(5).map(|i| block(i, i - 7, 0.05)));
+        // Steps: base; base (reused); base then grown mid-step; grown; base.
+        let steps: Vec<Vec<&[Block]>> = vec![
+            vec![&base],
+            vec![&base],
+            vec![&base, &grown],
+            vec![&grown],
+            vec![&base],
+        ];
+        let mut persistent = SparseSystem::default();
+        let mut kept = Vec::new();
+        for loads in &steps {
+            persistent.begin_step(Default::default());
+            let mut fresh = SparseSystem::default();
+            for (iteration, blocks) in loads.iter().enumerate() {
+                let had = persistent.factor.is_some();
+                persistent.load(3 * n, blocks, iteration).unwrap();
+                if iteration == 0 {
+                    kept.push(had && persistent.factor.is_some());
+                }
+                fresh.load(3 * n, blocks, iteration).unwrap();
+                let mut x: Vec<Real> = (0..3 * n).map(|i| (i % 7) as Real - 3.0).collect();
+                let mut y = x.clone();
+                persistent.solve(&mut x, iteration).unwrap();
+                fresh.solve(&mut y, iteration).unwrap();
+                assert!(x.iter().zip(&y).all(|(a, b)| a.to_bits() == b.to_bits()));
+            }
+        }
+        // Only an identical pattern analyzed with a fresh ordering is kept.
+        assert_eq!(
+            (kept[0], kept[1], kept[2], kept[4]),
+            (false, true, true, false)
+        );
     }
 }

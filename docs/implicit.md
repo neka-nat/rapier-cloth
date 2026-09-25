@@ -123,7 +123,9 @@ Those queries and sweeps traverse the vertex, edge and triangle hierarchies
 pairwise from a fixed set of subtree pairs, which the lanes take in turn; contacts,
 recorded pairs, work counts and numerical errors return to that fixed order before
 they are consumed. Temporary results do
-not survive a physical step. The four-thread budget does not extend determinism
+not survive a physical step, except the Newton matrix pattern and its symbolic
+analysis, which the next step reuses only when its first matrix has the same
+pattern (the analysis it would otherwise recompute), so results are unchanged. The four-thread budget does not extend determinism
 guarantees across CPUs, compilers or precisions.
 
 The target must support native thread creation. A pool creation failure returns

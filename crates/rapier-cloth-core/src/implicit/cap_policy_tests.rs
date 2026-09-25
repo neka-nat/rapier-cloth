@@ -177,6 +177,7 @@ fn ordinary_success_keeps_converged_status_in_both_policies() {
                 cap_policy,
                 ..Default::default()
             },
+            &mut super::Cache::default(),
         )
         .unwrap();
         let status = r.implicit.unwrap();
@@ -223,6 +224,7 @@ fn opt_in_does_not_swallow_final_sweep_budget_contact_or_line_search_failures() 
                     cap_policy,
                     ..Default::default()
                 },
+                &mut super::Cache::default(),
             )
             .unwrap_err();
             match fault {
@@ -315,6 +317,7 @@ fn a_state_at_rest_stops_on_its_first_direction_while_motion_uses_the_window() {
                     seed,
                     ..Default::default()
                 },
+                &mut super::Cache::default(),
             )
             .unwrap();
             assert!(r.implicit.unwrap().converged);

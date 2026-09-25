@@ -94,6 +94,8 @@ pub struct Solver {
     stabilization_lambda: Vec<Real>,
     stretches: Vec<Real>,
     self_collision: Option<SelfCollision>,
+    #[cfg(feature = "implicit")]
+    implicit_cache: crate::implicit::Cache,
     contact_settings: Option<ClothContactSettings>,
     surface_high_water: usize,
     external_collision_work: CollisionWork,
@@ -162,6 +164,7 @@ impl Solver {
                 external_targets,
                 source,
                 implicit,
+                &mut self.implicit_cache,
             );
         }
         if !gravity.is_finite() {

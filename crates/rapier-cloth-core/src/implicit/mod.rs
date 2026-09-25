@@ -759,6 +759,20 @@ fn certify(
     Ok(fraction)
 }
 
+/// Derived solver data kept between physical steps. It never changes a
+/// result: only work that a new step would repeat identically is reused.
+#[derive(Default)]
+pub(crate) struct Cache {
+    sparse: SparseSystem,
+}
+
+impl std::fmt::Debug for Cache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cache").finish_non_exhaustive()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn step(
     cloth: &mut Cloth,
     h: Real,
@@ -767,6 +781,7 @@ pub(crate) fn step(
     targets: &[Target],
     source: &mut impl ContactSource,
     implicit: ImplicitSettings,
+    cache: &mut Cache,
 ) -> Result<StepReport, ClothError> {
     settings.validate(h)?;
     implicit.validate()?;
@@ -909,7 +924,8 @@ pub(crate) fn step(
     // configurable window (default three, as in the author solver).
     let window = implicit.convergence_window;
     let mut residual_window = std::collections::VecDeque::new();
-    let mut sparse = SparseSystem::new(std::sync::Arc::clone(&model.workers));
+    let sparse = &mut cache.sparse;
+    sparse.begin_step(std::sync::Arc::clone(&model.workers));
     let mut assembled = Assembly::default();
     let mut trial_eval = Assembly::default();
     for iteration in 0..if model.count == 0 {
