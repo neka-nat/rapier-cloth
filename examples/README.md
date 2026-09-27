@@ -13,6 +13,7 @@ results; they do not open a window.
 | [fold_towel.rs](fold_towel.rs) | Experimental dual-gripper fold with audited partial/failure recordings |
 | [robot_towel_implicit.rs](robot_towel_implicit.rs) | Rapier end-effector poses and ideal grasps; shared with the implicit live demo |
 | [fold_towel_implicit.rs](fold_towel_implicit.rs) | Experimental global shell solve; h=0.1 fold/release/settle and explicit cap policy |
+| [fold_shirt_implicit.rs](fold_shirt_implicit.rs) | A parametric sewn T-shirt folded by two ideal grippers on the implicit solver; schema-2 recording |
 
 ```bash
 cargo run --locked --release --example hanging_cloth
@@ -23,6 +24,7 @@ cargo run --locked --release --example pick_and_place -- --help
 cargo run --locked --release --example fold_towel -- --help
 cargo run --locked --release --no-default-features --features f64,implicit --example fold_towel_implicit -- --dt 0.1
 cargo run --locked --release --no-default-features --features f64,implicit --example fold_towel_implicit -- --case lift_5mm --cap-policy approximate --workers 4
+cargo run --locked --release --no-default-features --features f64,implicit --example fold_shirt_implicit -- --spacing 0.05 --output target/fold_shirt.json
 ```
 
 Add `--no-default-features --features f64` before `--example` to use f64. Do not use

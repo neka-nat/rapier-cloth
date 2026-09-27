@@ -337,3 +337,104 @@ fn collision_budget_failure_keeps_the_cloth_and_can_be_retried() {
     c.set_contact_settings(Some(contact)).unwrap();
     solver.step(&mut c, 0.1, -Vec3::Y, &settings()).unwrap();
 }
+
+#[test]
+fn a_pinned_layer_lifting_resting_cloth_seeds_by_pushing_it_ahead() {
+    struct SelfOnly;
+    impl ContactSource for SelfOnly {
+        fn contacts(
+            &mut self,
+            _: &[Vec3],
+            _: &[Vec3],
+            _: Real,
+            _: ContactStage,
+            _: &mut Vec<Contact>,
+        ) -> Result<(), ClothError> {
+            Ok(())
+        }
+        fn surface_contacts(
+            &mut self,
+            _: &[Vec3],
+            _: &[Vec3],
+            _: ContactStage,
+            _: &mut Vec<SurfaceContact>,
+        ) -> Result<(), ClothError> {
+            Ok(())
+        }
+        fn transport_surface_anchor(
+            &mut self,
+            _: &SurfaceContact,
+            _: Vec3,
+            _: Real,
+        ) -> Result<Vec3, ClothError> {
+            Err(ClothError::InvalidSurfaceContact("no rigid surfaces"))
+        }
+    }
+    // A pinned 3x3 patch with a free copy resting on it, one thickness plus
+    // one band above; gravity settles the free patch into the band first.
+    let patch = GridBuilder::new(3, 3).size(0.1, 0.1).build().unwrap();
+    let count = patch.rest_positions().len();
+    let mut positions = patch.rest_positions().to_vec();
+    positions.extend(patch.rest_positions().iter().map(|p| *p + Vec3::Y * 0.002));
+    let mut triangles = patch.triangles().to_vec();
+    triangles.extend(
+        patch
+            .triangles()
+            .iter()
+            .map(|t| t.map(|i| i + count as u32)),
+    );
+    let mut c = Cloth::new(
+        ClothMesh::new(positions, triangles).unwrap(),
+        ClothMaterial {
+            damping: 0.0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    c.set_contact_settings(Some(ClothContactSettings {
+        thickness: 0.001,
+        activation_margin: 0.001,
+        continuous_self_collision: true,
+        ..Default::default()
+    }))
+    .unwrap();
+    c.set_implicit_solver(Some(ImplicitSettings::default()))
+        .unwrap();
+    let base: Vec<Vec3> = c.positions()[..count].to_vec();
+    for (i, p) in base.iter().enumerate() {
+        c.pin(i as u32, *p).unwrap();
+    }
+    let gravity = Vec3::new(0.0, -9.81, 0.0);
+    let mut solver = Solver::new();
+    for _ in 0..3 {
+        solver
+            .step_with_contacts(&mut c, 0.1, gravity, &settings(), &[], &mut SelfOnly)
+            .unwrap();
+    }
+    let resting = c.positions()[count..].to_vec();
+    assert!(
+        resting.iter().all(|p| p.y < 0.002 && p.y > 0.0009),
+        "{resting:?}"
+    );
+    // Lift the pinned patch by 2 cm within one step: the resting cloth cannot
+    // be certified where it lies, so the seed must push it ahead.
+    let lift = Vec3::Y * 0.02;
+    for (i, p) in base.iter().enumerate() {
+        c.pin(i as u32, *p + lift).unwrap();
+    }
+    let report = solver
+        .step_with_contacts(&mut c, 0.1, gravity, &settings(), &[], &mut SelfOnly)
+        .unwrap();
+    assert!(
+        report.implicit.is_some_and(|o| o.converged),
+        "{:?}",
+        report.implicit
+    );
+    for (i, p) in c.positions()[count..].iter().enumerate() {
+        let below = c.positions()[i];
+        assert!(
+            p.y - below.y > 0.0009,
+            "free vertex {i} at {p:?} was not carried above {below:?}"
+        );
+    }
+}

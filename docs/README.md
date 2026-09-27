@@ -11,6 +11,7 @@ example. These guides describe supported behavior and runnable workflows.
 | [Rapier end-effector control](robot-control.md) | Command two ideal grasp frames in headless and live implicit simulations |
 | [Implicit shell solver](implicit.md) | Run the experimental f64 fold, release and settle example |
 | [Surface selection and grasping](grasping.md) | Select exposed material points or patches and attach them to grippers |
+| [Garments](garments.md) | Build a sewn T-shirt mesh, place and pinch it, and run the folding example |
 | [Compatibility and limitations](compatibility.md) | Check precision, toolchain and collision support |
 | [Recording format](recording-format.md) | Read the versioned JSON used by the replay viewer |
 | [Performance](performance.md) | Measure physics cost and interpret frame timings |

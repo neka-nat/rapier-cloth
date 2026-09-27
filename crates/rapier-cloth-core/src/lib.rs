@@ -16,6 +16,8 @@ pub mod mesh;
 pub use error::ClothError;
 pub use material::ClothMaterial;
 pub use mesh::{ClothMesh, GridBuilder};
+pub mod garment;
+pub use garment::{Garment, GarmentLayers, TShirtPattern};
 pub mod cloth;
 pub mod collision;
 pub use collision::{ClothContactSettings, CollisionBudgetKind, CollisionLimits, CollisionWork};

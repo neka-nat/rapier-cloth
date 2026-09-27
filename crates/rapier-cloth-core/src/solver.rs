@@ -382,8 +382,8 @@ impl Solver {
             // stretch recovery. Certify the completed trial from the previous
             // accepted pose, and scale every contributing multiplier together.
             self.query(source, None, radius, ContactStage::Iteration, settings)?;
-            self.project_contacts(radius, settings.max_contacts)?;
-            self.project_surface_contacts(source, h, settings.max_contacts, &cloth.mesh)?;
+            self.project_contacts(radius, settings.max_contacts, false)?;
+            self.project_surface_contacts(source, h, settings.max_contacts, &cloth.mesh, false)?;
             let fraction = self.accept_motion(source, ContactStage::Iteration)?;
             if fraction < 1.0 {
                 for (value, &before) in self
@@ -418,23 +418,22 @@ impl Solver {
                 // to restore full thickness; otherwise repeated elastic trials
                 // consume its small numerical clearance without ever activating
                 // normal contact. This correction has its own certified sweep.
+                // It only pushes features outward: a contact whose accumulated
+                // multiplier would pull its point back to the target gap can
+                // pivot a neighbouring feature towards the obstacle, and the
+                // shortened batch would then never regain clearance.
                 self.query(source, None, radius, ContactStage::Iteration, settings)?;
                 self.capture_motion();
-                self.project_contacts(radius, settings.max_contacts)?;
-                self.project_surface_contacts(source, h, settings.max_contacts, &cloth.mesh)?;
+                self.project_contacts(radius, settings.max_contacts, true)?;
+                self.project_surface_contacts(source, h, settings.max_contacts, &cloth.mesh, true)?;
                 let fraction = self.accept_motion(source, ContactStage::Iteration)?;
                 self.scale_contact_motion(fraction)?;
             }
         }
-        // Also certify the observable substep's linear endpoint sweep, rather
-        // than relying only on the piecewise path of accepted solver batches.
-        if self.continuous_motion()
-            && self.motion_fraction(source, ContactStage::Final, Some(&cloth.positions))? < 1.0
-        {
-            return Err(ClothError::UnresolvedContinuousCollision(
-                "final substep sweep is not clear",
-            ));
-        }
+        // The certified path is the sequence of accepted batches above. The
+        // substep's straight chord is not certified separately: a vertex that
+        // rounds a convex obstacle edge within one substep has a clear
+        // piecewise path whose chord cuts the corner.
         for i in 0..self.positions.len() {
             if self.weights[i] == 0.0 {
                 self.velocities[i] = (self.positions[i] - cloth.positions[i]) / h;
@@ -703,13 +702,14 @@ impl Solver {
     ) -> Result<(), ClothError> {
         if !self.continuous_motion() {
             self.query(source, None, radius, ContactStage::Prediction, settings)?;
-            self.project_contacts(radius, settings.max_contacts)?;
-            return self.project_surface_contacts(source, h, settings.max_contacts, mesh);
+            self.project_contacts(radius, settings.max_contacts, false)?;
+            return self.project_surface_contacts(source, h, settings.max_contacts, mesh, false);
         }
         // CCD supplies contact witnesses at an intermediate safe query pose.
         // Solve those contacts against the full inertial prediction. Scaling the
         // inertial displacement itself would damp tangential motion even with
         // zero friction, and lose part of the normal support impulse.
+        let mut certified: Real = 0.0;
         for _ in 0..settings.iterations {
             self.motion_trial.clone_from(&self.positions);
             let fraction = self.motion_fraction(source, ContactStage::Prediction, None)?;
@@ -720,15 +720,28 @@ impl Solver {
             }
             self.query(source, None, radius, ContactStage::Prediction, settings)?;
             self.positions.copy_from_slice(&self.motion_trial);
-            self.project_contacts(radius, settings.max_contacts)?;
-            self.project_surface_contacts(source, h, settings.max_contacts, mesh)?;
-            if self.motion_fraction(source, ContactStage::Prediction, None)? == 1.0 {
+            self.project_contacts(radius, settings.max_contacts, false)?;
+            self.project_surface_contacts(source, h, settings.max_contacts, mesh, false)?;
+            let after = self.motion_fraction(source, ContactStage::Prediction, None)?;
+            if after == 1.0 {
                 return Ok(());
             }
+            // The witnesses describe the prediction's endpoint. A feature that
+            // only grazes an obstacle along the way (a protruding hull vertex
+            // under a sliding sheet) can satisfy every witness at the endpoint
+            // while the path still dips below the swept minimum, so the
+            // projection changes nothing and another attempt would repeat it.
+            if after <= certified.max(fraction) {
+                break;
+            }
+            certified = after;
         }
-        Err(ClothError::UnresolvedContinuousCollision(
-            "prediction contact solve did not converge",
-        ))
+        // Keep the certified prefix of the projected prediction instead of
+        // failing: the path stays certified and the elastic batches continue
+        // from there; only the grazing feature loses part of its inertial
+        // motion in this substep.
+        self.accept_motion(source, ContactStage::Prediction)?;
+        Ok(())
     }
     fn capture_motion(&mut self) {
         if self.continuous_motion() {
@@ -962,12 +975,17 @@ impl Solver {
         Ok(corrected)
     }
 
+    /// Projects the queried surface contacts. With `restore`, only contacts
+    /// short of their target gap are pushed outward, without friction or
+    /// coupled support blocks: the pass that follows a shortened batch must
+    /// not move any feature towards an obstacle.
     fn project_surface_contacts(
         &mut self,
         source: &mut impl ContactSource,
         h: Real,
         limit: usize,
         mesh: &crate::ClothMesh,
+        restore: bool,
     ) -> Result<(), ClothError> {
         self.next_surface_states.clear();
         self.surface_solve_order.clear();
@@ -1054,6 +1072,16 @@ impl Solver {
         // forces can increase or release; no support inverse mass is zeroed.
         for &index in &self.surface_solve_order {
             let contact = self.surface_states[index].contact;
+            if restore {
+                if contact.gap(&self.positions) < 0.0 {
+                    contact.project_validated(
+                        &mut self.positions,
+                        &self.weights,
+                        &mut self.surface_states[index].normal_lambda,
+                    )?;
+                }
+                continue;
+            }
             let supports = std::array::from_fn(|i| {
                 if contact.weights[i] == 0.0 || self.surface_states[index].friction.external() {
                     return None;
@@ -1119,7 +1147,14 @@ impl Solver {
         *high_water = (*high_water).max(count);
         Ok(())
     }
-    fn project_contacts(&mut self, radius: Real, limit: usize) -> Result<(), ClothError> {
+    /// Projects the queried particle contacts; `restore` as in
+    /// `project_surface_contacts`.
+    fn project_contacts(
+        &mut self,
+        radius: Real,
+        limit: usize,
+        restore: bool,
+    ) -> Result<(), ClothError> {
         self.next_contact_states.clear();
         let mut old = self.contact_states.iter().peekable();
         for &c in &self.contacts {
@@ -1146,9 +1181,11 @@ impl Solver {
             }
             state.contact = c;
             let constraint = (self.positions[i] - c.point).dot(c.normal) - radius;
-            let next = (state.lambda - constraint / self.weights[i]).max(0.0);
-            self.positions[i] += c.normal * ((next - state.lambda) * self.weights[i]);
-            state.lambda = next;
+            if !(restore && constraint >= 0.0) {
+                let next = (state.lambda - constraint / self.weights[i]).max(0.0);
+                self.positions[i] += c.normal * ((next - state.lambda) * self.weights[i]);
+                state.lambda = next;
+            }
             self.next_contact_states.push(state);
             if !self.positions[i].is_finite() {
                 return Err(ClothError::NonFiniteState);
@@ -1250,7 +1287,7 @@ mod contact_state_tests {
             }
             let unconstrained = solver.positions.clone();
             solver
-                .project_surface_contacts(&mut NoContacts, 1.0 / 240.0, 16, &mesh)
+                .project_surface_contacts(&mut NoContacts, 1.0 / 240.0, 16, &mesh, false)
                 .unwrap();
             let fraction = solver
                 .accept_motion(&mut ShortenOnce(true), ContactStage::Iteration)
@@ -1338,7 +1375,7 @@ mod contact_state_tests {
                 expected_positions[i] += c.normal * ((next - state.lambda) * solver.weights[i]);
                 state.lambda = next;
             }
-            solver.project_contacts(0.005, 10).unwrap();
+            solver.project_contacts(0.005, 10, false).unwrap();
             assert_eq!(solver.positions, expected_positions);
             assert_eq!(solver.contact_states.len(), expected.len());
             for (actual, (key, oracle)) in solver.contact_states.iter().zip(&expected) {
@@ -1352,7 +1389,7 @@ mod contact_state_tests {
         solver.contacts.truncate(1);
         solver.contacts[0].key.external = 99;
         assert!(matches!(
-            solver.project_contacts(0.005, 10),
+            solver.project_contacts(0.005, 10, false),
             Err(ClothError::ContactBudgetExceeded { limit: 10 })
         ));
     }

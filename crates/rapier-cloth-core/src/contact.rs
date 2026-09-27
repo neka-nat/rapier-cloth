@@ -27,12 +27,15 @@ pub enum ContactStage {
     Final,
 }
 
-/// Proposed linear cloth motion. Prediction and Final span the source's whole
-/// physical substep. Stabilization uses its previous obstacle pose; Iteration
-/// holds obstacles at their current pose while cloth constraints are corrected.
-/// An iteration combines elastic, target and contact projections into a trial
-/// before checking it. A shortened trial may require a separately checked
-/// contact correction to restore thickness. Intermediate trials are not states
+/// Proposed linear cloth motion. Prediction spans the source's whole physical
+/// substep. Stabilization uses its previous obstacle pose; Iteration holds
+/// obstacles at their current pose while cloth constraints are corrected. The
+/// built-in solvers certify the accepted path segment by segment and request no
+/// `Final`-stage sweep of the substep's chord; that variant is kept for
+/// compatibility and still names the final contact query. An iteration combines
+/// elastic, target and contact projections into a trial before checking it. A
+/// shortened trial is followed by a separately checked correction that only
+/// pushes features outward to full thickness. Intermediate trials are not states
 /// committed to the cloth, and callback counts are not fixed per iteration.
 #[derive(Debug, Clone, Copy)]
 pub struct ContactMotion<'a> {
@@ -103,6 +106,14 @@ pub trait ContactSource {
     ) -> Result<(), ClothError> {
         Ok(())
     }
+
+    /// The swept witnesses of the most recent `motion_fraction`: contacts of the
+    /// features that limited it, taken at the certified stop pose and expressed
+    /// at the obstacle's ending pose. The implicit solver seeds cloth that an
+    /// arriving obstacle reaches ahead of it from these alone, because a
+    /// contact query at the stop positions would see the obstacle's ending
+    /// pose overlapping resting cloth. The default has none.
+    fn swept_witnesses(&mut self, _out: &mut Vec<SurfaceContact>) {}
 
     /// Surface callback with the same work counters used by built-in collision.
     /// Charge work against the owning cloth's configured limits before querying.

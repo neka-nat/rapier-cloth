@@ -16,6 +16,7 @@ work and performance measurements. For a graphical simulation, start with the
 | [fold_towel](../examples/fold_towel.rs) | Experimental dual-gripper towel folding with continuous self/rigid contact | Audited summary and optional recording, including a partial result if the solver stops |
 | [robot_towel_implicit](../examples/robot_towel_implicit.rs) | Two Rapier end-effector poses with hard vertex grasps | Shared headless/live task; f64,implicit; see [robot control](robot-control.md) |
 | [fold_towel_implicit](../examples/fold_towel_implicit.rs) | Global implicit shell solve with recorded folding commands at 0.04 or 0.1 s | Task summary and optional per-step JSONL diagnostics; requires f64,implicit |
+| [fold_shirt_implicit](../examples/fold_shirt_implicit.rs) | A parametric sewn T-shirt folded by two ideal grippers: sleeves in, hem to the shoulders | Garment metrics and an optional schema-2 recording; requires f64,implicit; see [garments](garments.md) |
 
 ```bash
 cargo run --locked --release --example hanging_cloth
@@ -25,13 +26,15 @@ cargo run --locked --release --example surface_grasp
 cargo run --locked --release --example pick_and_place
 ```
 
-The default precision is f32. The examples above support f64; `fold_towel_implicit` and
-`robot_towel_implicit` require f64 and the additional `implicit` feature:
+The default precision is f32. The examples above support f64; `fold_towel_implicit`,
+`robot_towel_implicit` and `fold_shirt_implicit` require f64 and the additional
+`implicit` feature:
 
 ```bash
 cargo run --locked --release --no-default-features --features f64 --example hanging_cloth
 cargo run --locked --release --no-default-features --features f64,implicit --example fold_towel_implicit -- --dt 0.1
 cargo run --locked --release --no-default-features --features f64,implicit --example fold_towel_implicit -- --dt 0.1 --workers 4
+cargo run --locked --release --no-default-features --features f64,implicit --example fold_shirt_implicit -- --spacing 0.05 --output target/fold_shirt.json
 ```
 
 These examples stop on simulation errors. Follow the
@@ -110,6 +113,16 @@ surface attachments cannot be encoded in v1. The table displayed by the viewer
 is a finite box representing the physical half-space. The
 [live towel scene](live-demo.md#experimental-towel-task) uses the same task and
 provides independent gripper release and on-demand shape measurements.
+
+## T-shirt folding
+
+`fold_shirt_implicit` builds a sewn T-shirt from `TShirtPattern`, lays it on a
+table and folds it with two ideal grippers on the implicit solver; the
+[garments guide](garments.md#folding-example) describes the script, the gates
+and the flags. The default 2 cm mesh has 2202 vertices and takes several
+seconds per 0.1 s step; `--spacing 0.05` gives a quick 355-vertex run. The
+recording opens in the viewer below, which scales its camera preset to the
+recording's extent.
 
 ## Replay in the browser
 

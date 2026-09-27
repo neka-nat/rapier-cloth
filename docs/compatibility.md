@@ -29,10 +29,11 @@ The project does not promise bitwise determinism across CPUs or precisions.
 |---|---|---|
 | Cloth mesh | Fixed, oriented triangle topology | Tearing, remeshing and automatic repair |
 | Material | Edge-length and dihedral XPBD constraints; optional isotropic Neo-Hookean shell | Calibrated directional fabric |
-| Fixed obstacles | Spheres, boxes, capsules, half-spaces | Arbitrary triangle meshes and compound shapes |
-| Moving obstacles | Kinematic spheres, boxes and capsules within the motion budget | Dynamic obstacle contacts and unrestricted fast motion |
+| Fixed obstacles | Spheres, boxes, capsules, half-spaces, convex hulls, and compounds of those solids (for example convex decompositions) | Triangle meshes, height fields and other composite shapes |
+| Moving obstacles | Kinematic spheres, boxes, capsules, convex hulls and their compounds; within the motion budget for discrete queries, certified by sweeps for continuous ones | Dynamic obstacle contacts and unrestricted fast motion |
 | Coupling | One-way obstacle-to-cloth interaction | Cloth reaction forces on dynamic rigid bodies |
 | Cloth collision | Particle contacts/static particle sweeps, opt-in self-contact and whole-triangle rigid contacts, separate optional continuous checks | Cloth-to-cloth collision and unrestricted continuous motion |
+| Garments | A parametric sewn T-shirt as one mesh (shared seam vertices, flat-folded rest state) with landmarks and layer patches; see [garments](garments.md) | Anisotropic or per-panel materials, seam stiffness, curved patterns, several garments colliding |
 | Grasping | Pins and body-local attachment targets | Grasping based only on static friction |
 | Recovery | In-memory checkpoint of one cloth world | Public serialized checkpoints or automatic Rapier rollback |
 
@@ -40,12 +41,14 @@ Unsupported collision candidates return errors. Filter unrelated colliders when
 necessary. A thin obstacle can pass between vertices of a coarse cloth mesh;
 particle collision does not test entire triangle interiors. The separate
 `rigid_surface_collision` setting covers triangle interiors against the supported
-primitives, using half the physical thickness as the rigid offset. It replaces
+primitives with exact vertex, edge and face distances, using half the physical
+thickness as the rigid offset. It replaces
 particle contacts for that cloth. Those queries are discrete unless
 `continuous_rigid_collision` is also enabled. The latter checks primitive sweeps
 and correction batches, independently of self-collision. It uses a declared
 COM-linear/angular endpoint trajectory and rejects velocity-based commands reaching
-half a turn per external step. The existing kinematic motion budget also applies.
+half a turn per external step. The kinematic motion budget applies only while some
+cloth in the world relies on discrete or particle contacts.
 Changed collider shapes/local poses, unsupported dynamic obstacles, unresolvable
 initial gaps and unresolved final separation return typed errors. See the
 [continuous rigid contact contract](integration.md#continuous-rigid-surface-collision)
@@ -56,8 +59,8 @@ checks nonincident vertex-face and edge-edge proximity, with a physical thicknes
 independent of particle radius. It refreshes bounds after constraint iterations,
 rejects preexisting intersections and fails on exhausted work/contact limits.
 Fast motion or constraint corrections can still cross between discrete queries.
-The additional `continuous_self_collision` option bounds accepted self-motion
-and the final linear substep sweep, with explicit convergence/work failures.
+The additional `continuous_self_collision` option bounds every accepted
+self-motion batch, with explicit convergence/work failures.
 The [implicit solver guide](implicit.md) describes a separate 32×32 towel task
 and its acceptance checks. These experiments do not qualify arbitrary robotic
 folding, moving rigid contact with the implicit solver, or real-time performance.

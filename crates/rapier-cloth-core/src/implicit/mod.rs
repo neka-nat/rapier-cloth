@@ -148,6 +148,19 @@ fn failure(phase: &'static str, iterations: usize) -> ClothError {
 }
 
 /// Returns barrier energy, its gap derivative and second derivative.
+/// Rounds of pushing resting cloth ahead of an arriving obstacle when seeding.
+const PUSH_SEED_ATTEMPTS: usize = 16;
+/// Gap, as a fraction of the barrier band, that the push seed leaves between the
+/// cloth it moves and the arriving obstacle; small enough for a squeeze between
+/// two surfaces to stay feasible.
+const PUSH_SEED_GAP: Real = 0.1;
+/// Smallest contact gap, as a fraction of the barrier band, that the velocity
+/// seed may leave; see the seed loop in `step`.
+const SEED_GAP_FLOOR: Real = 0.5;
+/// Gap fraction of the barrier band below which a contact counts as jammed for
+/// the convergence test; the barrier force there exceeds any cloth load.
+const JAMMED_GAP_FRACTION: Real = 1.0e-3;
+
 fn barrier(gap: Real, band: Real, stiffness: Real) -> Option<[Real; 3]> {
     if gap <= 0.0 || !gap.is_finite() {
         return None;
@@ -823,9 +836,15 @@ pub(crate) fn step(
         false,
     )?;
     let mut certified = false;
+    let seed_floor = model.band * SEED_GAP_FLOOR;
     if implicit.seed == ImplicitSeed::Velocity && model.count > 0 {
         // Extrapolate the free vertices, shortening the extrapolation until
-        // the continuous checks pass and every contact keeps clearance.
+        // the continuous checks pass and every contact keeps clearance. The
+        // seed also stays out of the inner half of the barrier band: a seed
+        // that lands micrometres from the barrier's zero is committed as-is
+        // when the resulting first Newton direction is tiny, and a settling
+        // layer then approaches its support geometrically step after step
+        // until the barrier Hessian breaks the factorization.
         let mut scale: Real = 1.0;
         for attempt in 0..4 {
             let trial: Vec<Vec3> = x
@@ -848,7 +867,7 @@ pub(crate) fn step(
                     settings.max_contacts,
                     true,
                 )?;
-                if contacts.iter().all(|c| c.gap(&trial) > 0.0) {
+                if contacts.iter().all(|c| c.gap(&trial) >= seed_floor) {
                     x = trial;
                     certified = true;
                     break;
@@ -858,6 +877,78 @@ pub(crate) fn step(
                 scale *= 0.9 * fraction;
             }
             if attempt == 3 || scale * h * cloth.mesh.area().sqrt() < 1e-12 {
+                break;
+            }
+        }
+    }
+    if !certified && (source.continuous_motion() || config.self_collision) {
+        // A kinematic obstacle, or pinned cloth, that reaches resting cloth
+        // within the step cannot be certified against cloth that does not
+        // move: seed the vertices it meets ahead of its ending pose from the
+        // swept witnesses of the physical sweep, as the XPBD prediction solve
+        // does, so the joint path can be certified and Newton starts feasible.
+        // Only the swept witnesses serve while the path is not certified: a
+        // contact query would see the ending pose overlapping the resting
+        // cloth deeply, where a penetration axis is meaningless. Rigid
+        // witnesses are expressed at the obstacle's ending pose; self
+        // witnesses are relative to their particles, and the pinned ones are
+        // already at their targets, so the trial is projected against both
+        // directly. The sweep certifies the path down to a fraction of the
+        // separation, so a certified trial may still rest slightly inside a
+        // contact's separation, where the barrier is undefined; the contacts
+        // queried there are exact and are pushed out the same way before the
+        // path is certified again.
+        let push_target = model.band * PUSH_SEED_GAP;
+        let push_out = |trial: &mut [Vec3], contacts: &[SurfaceContact]| -> bool {
+            let mut moved = false;
+            for contact in contacts {
+                let gap = contact.gap(trial);
+                if gap >= push_target {
+                    continue;
+                }
+                let free = |i: usize| {
+                    contact.weights[i] != 0.0 && model.dofs[contact.particles[i] as usize].is_some()
+                };
+                let mass: Real = (0..4)
+                    .filter(|&i| free(i))
+                    .map(|i| contact.weights[i] * contact.weights[i])
+                    .sum();
+                if mass <= 0.0 {
+                    continue;
+                }
+                let delta = (push_target - gap) / mass;
+                for i in (0..4).filter(|&i| free(i)) {
+                    trial[contact.particles[i] as usize] +=
+                        contact.normal * (delta * contact.weights[i]);
+                    moved = true;
+                }
+            }
+            moved && trial.iter().all(|p| p.is_finite())
+        };
+        let mut trial = x.clone();
+        for _ in 0..PUSH_SEED_ATTEMPTS {
+            let mut contacts = Vec::new();
+            if certify(&mut engine, source, config, &cloth.positions, &trial)? >= 1.0 {
+                contacts = query(
+                    source,
+                    &mut engine,
+                    &cloth.positions,
+                    &trial,
+                    ContactStage::Iteration,
+                    cloth,
+                    settings.max_contacts,
+                    true,
+                )?;
+                if contacts.iter().all(|c| c.gap(&trial) > 0.0) {
+                    x = trial;
+                    certified = true;
+                    break;
+                }
+            } else {
+                source.swept_witnesses(&mut contacts);
+                contacts.extend_from_slice(engine.swept_witnesses());
+            }
+            if !push_out(&mut trial, &contacts) {
                 break;
             }
         }
@@ -964,16 +1055,26 @@ pub(crate) fn step(
         let roundoff_motion = direction
             .iter()
             .all(|d| d.length() <= Real::EPSILON * 128.0 * cloth.mesh.area().sqrt());
+        // A contact deep inside the barrier band makes the barrier Hessian
+        // dominate the Newton direction: the direction is a fraction of the
+        // gap even while the barrier force is far from balanced, so the
+        // displacement criterion cannot judge such a state. Keep iterating
+        // until the pair has separated (each update roughly doubles the gap)
+        // or the direction truly vanishes at a squeezed equilibrium.
+        let jammed = contacts
+            .iter()
+            .any(|c| c.gap(&x) < model.band * JAMMED_GAP_FRACTION);
         // A step whose first direction is already small starts at (or was
         // seeded at) a consistent state; later single small directions can be
         // the low point of an oscillation.
         if newton_rms == 0.0
             || roundoff_motion
-            || (iteration == 0 && newton_rms <= implicit.velocity_tolerance)
-            || (residual_window.len() == window
-                && residual_window
-                    .iter()
-                    .all(|&r| r <= implicit.velocity_tolerance))
+            || (!jammed
+                && ((iteration == 0 && newton_rms <= implicit.velocity_tolerance)
+                    || (residual_window.len() == window
+                        && residual_window
+                            .iter()
+                            .all(|&r| r <= implicit.velocity_tolerance))))
         {
             converged = true;
             break;
@@ -1056,19 +1157,11 @@ pub(crate) fn step(
     if config.self_collision && engine.implicit_motion_fraction(&cloth.positions, &x, true)? < 1.0 {
         return Err(failure("final self sweep", report.iterations));
     }
-    if source.continuous_motion()
-        && external_fraction(
-            source,
-            ContactMotion {
-                start: &cloth.positions,
-                end: &x,
-                stage: ContactStage::Final,
-            },
-            &mut engine.work,
-        )? < 1.0
-    {
-        return Err(failure("final rigid sweep", report.iterations));
-    }
+    // Rigid obstacles need no separate sweep of the step's chord: the seed
+    // extrapolation was certified along the physical trajectory and every
+    // accepted Newton update against the ending poses, so the accepted path is
+    // certified as a whole. Its chord may cut a convex obstacle edge that the
+    // path rounds, which is a legitimate one-step drape, not tunnelling.
     contacts = query(
         source,
         &mut engine,

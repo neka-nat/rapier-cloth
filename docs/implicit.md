@@ -36,11 +36,34 @@ to permit the requested step size.
 Newton starts from `ImplicitSettings::seed`: with the default
 `ImplicitSeed::Velocity`, free vertices begin at their previous position plus
 `velocity × h`, shortened until the continuous checks pass and every contact
-keeps positive clearance (falling back to the previous positions otherwise);
-`ImplicitSeed::Previous` always starts at the previous positions. Both seeds
-converge to the same objective; the velocity seed saves about 10–20% of the
-iterations on the towel task and lets a residual velocity below the tolerance
-persist, where the previous-position seed would zero it.
+keeps at least half the barrier band as clearance (falling back to the previous
+positions otherwise); `ImplicitSeed::Previous` always starts at the previous
+positions. Both seeds converge to the same objective; the velocity seed saves
+about 10–20% of the iterations on the towel task and lets a residual velocity
+below the tolerance persist, where the previous-position seed would zero it.
+
+A kinematic obstacle that reaches resting cloth within the step (a gripper
+pad pressing down, a pusher sliding in) cannot be certified against cloth that
+stays where it is. The step then moves the cloth it meets ahead of the obstacle,
+using the witnesses of the obstacle's physical sweep
+(`ContactSource::swept_witnesses`), until the joint motion of cloth and obstacle
+is certified. Pinned cloth that reaches resting free cloth within the step (a
+pinch through the layers of a garment lifting them) is handled the same way: the
+self-contacts that limited the sweep serve as witnesses, and the free cloth they
+met is pushed ahead of the pinned vertices. A sweep certifies the path down to a
+fraction of the contact separation, so contacts found at the certified positions
+that still sit inside the separation are pushed out the same way before Newton
+starts. A box pushing a
+sheet along a table at 0.1 m/s (1 cm per 0.1 s step) runs this way, whether the
+sheet slides or buckles. Sources without swept witnesses fail such a step with
+`ImplicitSolverFailed { phase: "grasp initialization sweep" }`, as before.
+
+The barrier band is `ClothContactSettings::activation_margin`. With coarse cloth
+sliding around the edges of boxes or convex hulls within one 0.1 s step, a band of
+about 1 mm lets the barrier steer the cloth before continuous collision cuts the
+Newton steps short; with the 0.1 mm default such a step can exhaust the Newton
+budget. Smaller steps also work. The towel example, which only meets a flat
+floor, uses a band equal to its 0.318 mm thickness.
 
 A step converges when `convergence_window` consecutive Newton directions (default
 3) have an RMS displacement per time step at or below `velocity_tolerance`
@@ -64,7 +87,7 @@ cloth.set_implicit_solver(Some(ImplicitSettings {
 
 This policy requires the default iteration cap, tolerance and convergence window.
 It returns the last accepted Newton iterate only after every update was
-accepted and the final physical sweep, contact/budget, finite-state, hard-target
+accepted and the final self sweep, contact/budget, finite-state, hard-target
 and less-than-3% edge-extension checks pass. Line-search, factorization, contact,
 CCD, worker and budget failures still reject the step. It adds no hidden
 physical substeps and does not enlarge the work budgets. Checkpoints retain the
@@ -264,9 +287,11 @@ The two command files retain the author's final-frame convention independently
 at each sample rate. Comparing them establishes task behavior at each step size;
 it is not a temporal-convergence test with an identical continuous input.
 
-The current qualification concerns this flat towel and fixed floor. Moving
-obstacles, garment meshes, weighted grasps, multiple garments, force feedback
-and arbitrary materials require further validation. The default live drape/wind
+The current qualification concerns this flat towel and fixed floor. The
+[T-shirt folding example](garments.md) runs a sewn garment through sleeve and
+hem folds with its own gates, but it is not qualified against a reference. Moving
+obstacles, weighted grasps, multiple garments, force feedback and arbitrary
+materials require further validation. The default live drape/wind
 scenes and older `fold_towel` example continue to use XPBD and their own fixtures.
 The optional `implicit_towel` live scene uses the shared Rapier pose adapter.
 Measure complete-task CPU cost separately from numerical success at a large

@@ -7,7 +7,8 @@ use crate::{
 #[derive(Clone, Copy, PartialEq)]
 enum Fault {
     None,
-    FinalSweep,
+    /// The final query reports a contact without clearance.
+    FinalClearance,
     FinalBudget,
     FinalContact,
     LineSearch,
@@ -15,6 +16,7 @@ enum Fault {
 struct Source {
     fault: Fault,
     iteration_queries: usize,
+    /// Final-stage contact queries; the step makes exactly one.
     final_calls: usize,
     /// Positions of the first iteration-stage query (the accepted state).
     initial: Option<Vec<Vec3>>,
@@ -36,27 +38,35 @@ impl ContactSource for Source {
     fn motion_fraction(
         &mut self,
         motion: ContactMotion<'_>,
-        work: &mut CollisionWork,
+        _: &mut CollisionWork,
     ) -> Result<Real, ClothError> {
-        if motion.stage == ContactStage::Final {
-            self.final_calls += 1;
-            if self.fault == Fault::FinalSweep {
-                return Ok(0.5);
-            }
-            if self.fault == Fault::FinalBudget {
-                return work
-                    .charge(
-                        CollisionBudgetKind::CcdChecks,
-                        2,
-                        CollisionLimits {
-                            ccd_checks: 1,
-                            ..Default::default()
-                        },
-                    )
-                    .map(|_| 1.0);
-            }
-        }
+        // The built-in solvers certify the accepted path segment by segment
+        // and never request a sweep of the step's chord.
+        assert_ne!(motion.stage, ContactStage::Final);
         Ok(1.0)
+    }
+    fn surface_contacts_with_work(
+        &mut self,
+        previous: &[Vec3],
+        positions: &[Vec3],
+        stage: ContactStage,
+        out: &mut Vec<SurfaceContact>,
+        work: &mut CollisionWork,
+    ) -> Result<(), ClothError> {
+        if stage == ContactStage::Final {
+            self.final_calls += 1;
+        }
+        if stage == ContactStage::Final && self.fault == Fault::FinalBudget {
+            work.charge(
+                CollisionBudgetKind::CcdChecks,
+                2,
+                CollisionLimits {
+                    ccd_checks: 1,
+                    ..Default::default()
+                },
+            )?;
+        }
+        self.surface_contacts(previous, positions, stage, out)
     }
     fn surface_contacts(
         &mut self,
@@ -65,10 +75,36 @@ impl ContactSource for Source {
         stage: ContactStage,
         out: &mut Vec<SurfaceContact>,
     ) -> Result<(), ClothError> {
-        if stage == ContactStage::Final && self.fault == Fault::FinalContact {
-            return Err(ClothError::InvalidSurfaceContact(
-                "injected final contact failure",
-            ));
+        if stage == ContactStage::Final {
+            if self.fault == Fault::FinalContact {
+                return Err(ClothError::InvalidSurfaceContact(
+                    "injected final contact failure",
+                ));
+            }
+            if self.fault == Fault::FinalClearance {
+                // Vertex 0 lies on the obstacle surface itself, half a
+                // thickness short of the barrier's zero gap.
+                out.push(SurfaceContact {
+                    key: crate::SurfaceContactKey {
+                        other_cloth: None,
+                        features: [
+                            crate::SurfaceFeature::Vertex(0),
+                            crate::SurfaceFeature::External {
+                                object: 1,
+                                feature: 0,
+                            },
+                        ],
+                    },
+                    particles: [0, 0, 0, 0],
+                    weights: [1.0, 0.0, 0.0, 0.0],
+                    normal: Vec3::Y,
+                    offset: x[0],
+                    surface_velocity: Vec3::ZERO,
+                    separation: 0.001,
+                    static_friction: 0.0,
+                    kinetic_friction: 0.0,
+                });
+            }
         }
         if stage == ContactStage::Iteration {
             self.iteration_queries += 1;
@@ -190,9 +226,9 @@ fn ordinary_success_keeps_converged_status_in_both_policies() {
 }
 
 #[test]
-fn opt_in_does_not_swallow_final_sweep_budget_contact_or_line_search_failures() {
+fn opt_in_does_not_swallow_final_clearance_budget_contact_or_line_search_failures() {
     for fault in [
-        Fault::FinalSweep,
+        Fault::FinalClearance,
         Fault::FinalBudget,
         Fault::FinalContact,
         Fault::LineSearch,
@@ -228,13 +264,9 @@ fn opt_in_does_not_swallow_final_sweep_budget_contact_or_line_search_failures() 
             )
             .unwrap_err();
             match fault {
-                Fault::FinalSweep => assert!(matches!(
-                    error,
-                    ClothError::ImplicitSolverFailed {
-                        phase: "final rigid sweep",
-                        ..
-                    }
-                )),
+                Fault::FinalClearance => {
+                    assert!(matches!(error, ClothError::UnresolvedSurfaceContact))
+                }
                 Fault::FinalBudget => {
                     assert!(matches!(error, ClothError::CollisionBudgetExceeded { .. }))
                 }

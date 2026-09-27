@@ -1,6 +1,7 @@
-use super::surface::{TriangleContactQuery, bounds, deduplicate, overlaps, push_contact};
+use super::convex::{ConvexFeatures, PartContacts};
+use super::surface::{bounds, deduplicate, overlaps, push_contact};
 use super::*;
-use crate::rapier::parry::shape::{Shape, Triangle};
+use crate::rapier::parry::shape::Shape;
 use crate::{ContactMotion, SurfaceContact, SurfaceContactKey, SurfaceFeature};
 
 impl RapierContacts<'_, '_> {
@@ -16,7 +17,7 @@ impl RapierContacts<'_, '_> {
         else {
             return Ok(1.0);
         };
-        let mesh = self.surface_mesh.as_ref().unwrap();
+        let mesh = self.surface_mesh.clone().unwrap();
         if proposed.start.len() != mesh.rest_positions().len()
             || proposed.end.len() != proposed.start.len()
             || proposed
@@ -63,15 +64,16 @@ impl RapierContacts<'_, '_> {
             if shape.as_halfspace().is_none() && !overlaps(&cloth_bounds, &motion.swept_bounds()) {
                 continue;
             }
-            if body.is_some_and(|b| b.is_dynamic())
-                || (shape.as_ball().is_none()
-                    && shape.as_cuboid().is_none()
-                    && shape.as_capsule().is_none()
-                    && shape.as_halfspace().is_none())
-            {
+            if body.is_some_and(|b| b.is_dynamic()) {
                 return Err(IntegrationError::UnsupportedCollision {
                     collider: handle,
-                    reason: "continuous surface primitive is unsupported",
+                    reason: "continuous dynamic surface collision requires two-way coupling",
+                });
+            }
+            if let Err(reason) = super::supported_shape(shape) {
+                return Err(IntegrationError::UnsupportedCollision {
+                    collider: handle,
+                    reason,
                 });
             }
             let raw = handle.into_raw_parts();
@@ -149,69 +151,87 @@ impl RapierContacts<'_, '_> {
                 }
                 continue;
             }
-            let obstacle_bounds = motion.swept_bounds();
-            for (face, &indices) in mesh.triangles().iter().enumerate() {
-                if indices
+            // Each compound part sweeps as its own convex solid on the same
+            // rigid trajectory.
+            let parts: Vec<(&dyn Shape, RigidMotion, Option<u32>)> = match shape.as_compound() {
+                Some(compound) => compound
+                    .shapes()
                     .iter()
-                    .all(|i| self.excluded_pairs.contains(&(*i, raw)))
-                {
+                    .enumerate()
+                    .map(|(i, (local, part))| {
+                        (
+                            part.as_ref(),
+                            motion.part(*local, part.as_ref()),
+                            Some(i as u32),
+                        )
+                    })
+                    .collect(),
+                None => vec![(shape, motion, None)],
+            };
+            for (part_shape, part_motion, part) in parts {
+                let obstacle_bounds = part_motion.swept_bounds();
+                if !overlaps(&cloth_bounds, &obstacle_bounds) {
                     continue;
                 }
-                let start = indices.map(|i| proposed.start[i as usize]);
-                let end = indices.map(|i| proposed.end[i as usize]);
-                if !overlaps(
-                    &bounds(
-                        start.into_iter().chain(end),
-                        minimum + extent * Real::EPSILON * 128.0,
-                    ),
-                    &obstacle_bounds,
-                ) {
-                    continue;
-                }
-                work.charge(CollisionBudgetKind::CandidatePairs, 1, config.limits)?;
-                self.pair_queries += 1;
-                let sweep = PrimitiveSweep {
-                    shape,
-                    motion,
-                    start,
-                    end,
-                    minimum,
-                };
-                let result = sweep.advance(work, config.limits)?;
-                if let CcdResult::Limited { fraction: allowed } = result {
-                    fraction = fraction.min(allowed);
-                    let pose = motion.at(allowed);
-                    let points = sweep.positions(allowed);
-                    // Conservative advancement can stop outside the ordinary
-                    // activation band; request the swept manifold explicitly.
-                    let activation = points
-                        .iter()
-                        .map(|p| p.distance(pose.translation))
-                        .fold(0.0, Real::max)
-                        + motion.radius * 2.0
-                        + separation;
-                    TriangleContactQuery {
-                        shape,
-                        collider: handle,
-                        body,
-                        pose,
-                        output_pose: motion.at(1.0),
-                        indices,
-                        particle_count: proposed.start.len(),
-                        face: face as u32,
-                        points,
-                        stage: None,
-                        activation,
-                        template,
+                let features = self.features(handle, part_shape)?;
+                let excluded = self.excluded_pairs;
+                let limit = self.limit;
+                for (face, &indices) in mesh.triangles().iter().enumerate() {
+                    if indices.iter().all(|i| excluded.contains(&(*i, raw))) {
+                        continue;
                     }
-                    .generate(
-                        &mut self.surface_manifold,
-                        config,
-                        self.limit,
-                        self.excluded_pairs,
-                        &mut self.motion_contacts,
-                        work,
-                    )?;
+                    let start = indices.map(|i| proposed.start[i as usize]);
+                    let end = indices.map(|i| proposed.end[i as usize]);
+                    if !overlaps(
+                        &bounds(
+                            start.into_iter().chain(end),
+                            minimum + extent * Real::EPSILON * 128.0,
+                        ),
+                        &obstacle_bounds,
+                    ) {
+                        continue;
+                    }
+                    work.charge(CollisionBudgetKind::CandidatePairs, 1, config.limits)?;
+                    self.pair_queries += 1;
+                    let sweep = PrimitiveSweep {
+                        features: &features,
+                        motion: part_motion,
+                        start,
+                        end,
+                        minimum,
+                    };
+                    let result = sweep.advance(work, config.limits)?;
+                    if let CcdResult::Limited { fraction: allowed } = result {
+                        fraction = fraction.min(allowed);
+                        let pose = part_motion.at(allowed);
+                        let points = sweep.positions(allowed);
+                        // Witnesses for everything the remaining motion could
+                        // still reach, expressed at the ending pose.
+                        let remaining = part_motion.speed_bound(start, end) * (1.0 - allowed);
+                        PartContacts {
+                            features: &features,
+                            collider: handle,
+                            body,
+                            pose,
+                            output_pose: part_motion.at(1.0),
+                            particle_count: proposed.start.len(),
+                            template,
+                            part,
+                        }
+                        .generate(
+                            indices,
+                            face as u32,
+                            points,
+                            separation + remaining + config.activation_margin,
+                            None,
+                            config,
+                            limit,
+                            excluded,
+                            &mut self.motion_contacts,
+                            work,
+                            |_| false,
+                        )?;
+                    }
                 }
             }
         }
@@ -222,10 +242,7 @@ impl RapierContacts<'_, '_> {
         Ok(fraction)
     }
 }
-use crate::{
-    CollisionBudgetKind, CollisionLimits, CollisionWork,
-    collision::{ccd::CcdResult, geometry::closest_triangle},
-};
+use crate::{CollisionBudgetKind, CollisionLimits, CollisionWork, collision::ccd::CcdResult};
 
 /// COM-linear motion with the actual endpoint rotation. Rapier 0.34's serial
 /// solver advances velocity-based rotations with normalized linear quaternion
@@ -245,6 +262,8 @@ struct RigidMotion {
     angular: Vec3,
     angular_speed_bound: Real,
     radius: Real,
+    /// Local bounds of the swept shape (the part's own for a compound part).
+    local_bounds: Aabb,
     physical: bool,
 }
 impl RigidMotion {
@@ -284,6 +303,7 @@ impl RigidMotion {
             angular: Vec3::ZERO,
             angular_speed_bound: 0.0,
             radius,
+            local_bounds: bound,
             physical: false,
         };
         let body = collider.parent().and_then(|h| scene.query.bodies.get(h));
@@ -391,6 +411,24 @@ impl RigidMotion {
         }
         Ok(result)
     }
+    /// The motion of one compound part: the same rigid trajectory with the
+    /// part's local pose composed in and the part's own extent.
+    fn part(&self, local_part: Pose, shape: &dyn Shape) -> Self {
+        let bound = shape.compute_local_aabb();
+        let radius = bound.mins.abs().max(bound.maxs.abs()).length();
+        let mut result = *self;
+        result.local_bounds = bound;
+        result.start = self.start * local_part;
+        result.end = self.end * local_part;
+        result.local = self.local * local_part;
+        if self.physical {
+            result.radius = radius + (result.local.translation - self.local_com).length();
+        } else {
+            result.com_start = result.start.translation;
+            result.radius = radius;
+        }
+        result
+    }
     fn at(&self, fraction: Real) -> Pose {
         if fraction == 0.0 || !self.physical {
             return self.start;
@@ -414,7 +452,18 @@ impl RigidMotion {
             .fold(0.0, Real::max);
         (translation + self.angular_bound() * self.radius) * (1.0 + 128.0 * Real::EPSILON)
     }
+    /// World bounds of everything the shape passes through. Without rotation
+    /// the shape's bounds at both end poses enclose the linear motion exactly;
+    /// a rotating shape is bounded by the sphere around its center path.
     fn swept_bounds(&self) -> Aabb {
+        if self.angular_speed_bound == 0.0 {
+            let a = self.local_bounds.transform_by(&self.start);
+            let b = self.local_bounds.transform_by(&self.end);
+            let extent =
+                self.radius + self.start.translation.length() + self.end.translation.length();
+            let pad = Vec3::splat(extent * Real::EPSILON * 128.0);
+            return Aabb::new(a.mins.min(b.mins) - pad, a.maxs.max(b.maxs) + pad);
+        }
         let a = self.com_start;
         let b = self.com_start + self.com_delta;
         let pad = Vec3::splat(
@@ -436,7 +485,7 @@ fn rotation_vector(a: Rotation, b: Rotation) -> Vec3 {
 }
 
 struct PrimitiveSweep<'a> {
-    shape: &'a dyn Shape,
+    features: &'a ConvexFeatures,
     motion: RigidMotion,
     start: [Vec3; 3],
     end: [Vec3; 3],
@@ -471,85 +520,35 @@ impl PrimitiveSweep<'_> {
             * Real::EPSILON
             * 64.0
     }
-    fn direction(&self, positions: [Vec3; 3], pose: Pose) -> Result<Vec3, ClothError> {
-        let points = positions.map(|p| pose.inverse_transform_point(p));
-        let triangle = Triangle::new(points[0], points[1], points[2]);
-        let closest =
-            closest_triangle(Vec3::ZERO, points).ok_or(ClothError::DegenerateConstraint)?;
-        let local = if self.shape.as_ball().is_some() {
-            closest.point.normalize_or_zero()
-        } else {
-            let prediction = points.iter().map(|p| p.length()).fold(0.0, Real::max)
-                + self.motion.radius * 2.0
-                + self.minimum;
-            contact(
-                &Pose::IDENTITY,
-                self.shape,
-                &Pose::IDENTITY,
-                &triangle,
-                prediction,
-            )
-            .map_err(|_| {
-                ClothError::UnresolvedContinuousCollision("unsupported primitive distance query")
-            })?
-            .ok_or(ClothError::UnresolvedContinuousCollision(
-                "missing separating direction",
-            ))?
-            .normal1
-        };
-        let mut normal = (pose.rotation * local).normalize_or_zero();
-        // A GJK witness difference loses angular accuracy when a large face is
-        // only micrometres from the primitive. The triangle plane and box SAT
-        // axes remain useful separating directions in that regime. Every
-        // candidate is certified by a support projection, never by its origin.
-        let face = (points[1] - points[0]).cross(points[2] - points[0]);
-        let mut best = self.projected(positions, pose, normal);
-        let mut consider = |axis: Vec3| {
-            let candidate = (pose.rotation * axis).normalize_or_zero();
-            if candidate.is_finite() && candidate.length_squared() > 0.5 {
-                for candidate in [candidate, -candidate] {
-                    let gap = self.projected(positions, pose, candidate);
-                    if gap > best {
-                        best = gap;
-                        normal = candidate;
-                    }
-                }
-            }
-        };
-        consider(face);
-        if self.shape.as_cuboid().is_some() {
-            for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
-                consider(axis);
-                for edge in [
-                    points[1] - points[0],
-                    points[2] - points[1],
-                    points[0] - points[2],
-                ] {
-                    consider(edge.cross(axis));
-                }
-            }
-        }
-        if !normal.is_finite() || normal.length_squared() < 0.5 {
+    /// The exact closest pair of the triangle and the part: the direction from
+    /// the part towards the triangle (world frame) and their distance.
+    fn closest(&self, positions: [Vec3; 3], pose: Pose) -> Result<(Vec3, Real), ClothError> {
+        let local = positions.map(|p| pose.inverse_transform_point(p));
+        let pair =
+            self.features
+                .closest_pair(local)
+                .ok_or(ClothError::UnresolvedContinuousCollision(
+                    "missing separating direction",
+                ))?;
+        let normal = (pose.rotation * pair.normal).normalize_or_zero();
+        if !normal.is_finite() || normal.length_squared() < 0.5 || !pair.distance.is_finite() {
             return Err(ClothError::UnresolvedContinuousCollision(
                 "unresolved primitive direction",
             ));
         }
-        Ok(normal)
+        Ok((normal, pair.distance))
     }
-    /// A separating projection is a lower distance bound even if GJK's
-    /// approximate closest normal is imperfect. Never advance using a possibly
-    /// overestimated unsigned GJK distance alone.
+    /// Separation of the triangle from the part along the world direction
+    /// `normal`: a lower distance bound for any direction. Its accuracy is the
+    /// direction's accuracy times the triangle's extent, so the sweep advances
+    /// on the exact pair distance and uses this only to certify an ending pose.
     fn projected(&self, positions: [Vec3; 3], pose: Pose, normal: Vec3) -> Real {
         let local_normal = pose.rotation.inverse() * normal;
-        let support = self
-            .shape
-            .as_support_map()
-            .unwrap()
-            .local_support_point(local_normal);
         positions
-            .map(|p| local_normal.dot(pose.inverse_transform_point(p) - support))
+            .map(|p| local_normal.dot(pose.inverse_transform_point(p)))
             .into_iter()
             .fold(Real::INFINITY, Real::min)
+            - self.features.support(local_normal)
     }
     fn advance(
         &self,
@@ -574,14 +573,22 @@ impl PrimitiveSweep<'_> {
         // Without this test the initial-clearance reserve can repeatedly seed
         // an already satisfied contact and stall prediction forever.
         work.charge(CollisionBudgetKind::CcdChecks, 1, limits)?;
+        // A direction separating the ending triangle may certify the whole
+        // remaining interval even when the current closest direction cannot;
+        // it is computed once, and only when the first evaluation does not
+        // already certify the motion (resting cloth barely moves per batch).
         let ending_pose = self.motion.at(1.0);
-        let ending_direction = self.direction(self.end, ending_pose).ok();
-        for iteration in 0..256 {
+        let ending_direction = std::cell::OnceCell::new();
+        let ending_direction = || {
+            *ending_direction
+                .get_or_init(|| self.closest(self.end, ending_pose).ok().map(|(n, _)| n))
+        };
+        for iteration in 0..MAX_ADVANCES {
             work.charge(CollisionBudgetKind::CcdChecks, 1, limits)?;
             let positions = self.positions(fraction);
             let pose = self.motion.at(fraction);
-            let normal = self.direction(positions, pose)?;
-            let distance = self.projected(positions, pose, normal) - rounding;
+            let (normal, exact) = self.closest(positions, pose)?;
+            let distance = exact - rounding;
             let clearance = distance - self.minimum;
             if !clearance.is_finite() || clearance <= 0.0 {
                 return Err(ClothError::UnresolvedContinuousCollision(
@@ -599,7 +606,10 @@ impl PrimitiveSweep<'_> {
             if distance.min(end_distance) - curvature > self.minimum {
                 return Ok(CcdResult::Clear);
             }
-            if let Some(normal) = ending_direction {
+            if speed == 0.0 || clearance > speed * remaining {
+                return Ok(CcdResult::Clear);
+            }
+            if let Some(normal) = ending_direction() {
                 let here = self.projected(positions, pose, normal) - rounding;
                 let end = self.projected(self.end, ending_pose, normal) - rounding;
                 if here.min(end) - curvature > self.minimum {
@@ -612,9 +622,6 @@ impl PrimitiveSweep<'_> {
             if fraction > 0.0 && clearance <= reserve {
                 return Ok(CcdResult::Limited { fraction });
             }
-            if speed == 0.0 || clearance > speed * remaining {
-                return Ok(CcdResult::Clear);
-            }
             let next = fraction + 0.8 * clearance / speed;
             if !next.is_finite() || next <= fraction {
                 return Err(ClothError::UnresolvedContinuousCollision(
@@ -623,11 +630,16 @@ impl PrimitiveSweep<'_> {
             }
             fraction = next.min(1.0);
         }
-        Err(ClothError::UnresolvedContinuousCollision(
-            "rigid advancement convergence limit",
-        ))
+        // Every advance kept the motion up to `fraction` clear, so the prefix
+        // certified so far is a valid answer; a feature pivoting about a
+        // near-contact point can need thousands of advances (see the core CCD).
+        Ok(CcdResult::Limited { fraction })
     }
 }
+
+/// Distance evaluations per primitive sweep before the certified prefix is
+/// returned as `Limited`; matches the core's self-collision advancement.
+const MAX_ADVANCES: usize = 2048;
 
 #[cfg(test)]
 mod tests {
@@ -764,8 +776,9 @@ mod tests {
             Vec3::new(0.22, 0.05, -0.1),
             Vec3::new(0.15, 0.05, 0.1),
         ];
+        let features = ConvexFeatures::new(rigid.colliders[collider].shape()).unwrap();
         let sweep = PrimitiveSweep {
-            shape: rigid.colliders[collider].shape(),
+            features: &features,
             motion,
             start: points,
             end: points,
@@ -791,12 +804,33 @@ mod tests {
         assert!((motion.at(center_crossing).translation.y - 0.05).abs() < 256.0 * Real::EPSILON);
     }
 
+    fn cube_hull(half: Real) -> SharedShape {
+        let corners: Vec<Vec3> = (0..8)
+            .map(|i| {
+                Vec3::new(
+                    if i & 1 == 0 { -half } else { half },
+                    if i & 2 == 0 { -half } else { half },
+                    if i & 4 == 0 { -half } else { half },
+                )
+            })
+            .collect();
+        SharedShape::convex_hull(&corners).unwrap()
+    }
+
     #[test]
     fn primitive_sweeps_match_transformed_analytical_crossings_and_sliding() {
         for shape in [
             SharedShape::ball(0.02),
             SharedShape::cuboid(0.02, 0.02, 0.02),
             SharedShape::capsule_x(0.015, 0.02),
+            cube_hull(0.02),
+            SharedShape::compound(vec![
+                (Pose::from_translation(Vec3::X * 0.05), cube_hull(0.02)),
+                (
+                    Pose::from_translation(-Vec3::X * 0.05),
+                    SharedShape::cuboid(0.02, 0.02, 0.02),
+                ),
+            ]),
         ] {
             for seed in 0..32 {
                 let s = seed as Real;
@@ -823,6 +857,15 @@ mod tests {
                 );
                 let scene = RapierScene::new(query, &before, 1.0 / 240.0, Vec3::ZERO);
                 let motion = RigidMotion::new(&scene, collider, ContactStage::Prediction).unwrap();
+                // A compound sweeps part by part; a single shape is its own part.
+                let parts: Vec<(SharedShape, RigidMotion)> = match shape.as_compound() {
+                    Some(compound) => compound
+                        .shapes()
+                        .iter()
+                        .map(|(local, part)| (part.clone(), motion.part(*local, part.as_ref())))
+                        .collect(),
+                    None => vec![(shape.clone(), motion)],
+                };
                 for crossing in [false, true] {
                     let height = if crossing { 0.04 } else { 0.0205 };
                     let start = [
@@ -837,16 +880,23 @@ mod tests {
                         } else {
                             Vec3::X * 0.05
                         };
-                    let sweep = PrimitiveSweep {
-                        shape: rigid.colliders[collider].shape(),
-                        motion,
-                        start,
-                        end: start.map(|p| p + displacement),
-                        minimum: 0.00045,
-                    };
-                    let result = sweep
-                        .advance(&mut CollisionWork::default(), CollisionLimits::default())
-                        .unwrap();
+                    let mut result = CcdResult::Clear;
+                    for (part_shape, part_motion) in &parts {
+                        let features = ConvexFeatures::new(part_shape.as_ref()).unwrap();
+                        let sweep = PrimitiveSweep {
+                            features: &features,
+                            motion: *part_motion,
+                            start,
+                            end: start.map(|p| p + displacement),
+                            minimum: 0.00045,
+                        };
+                        let part_result = sweep
+                            .advance(&mut CollisionWork::default(), CollisionLimits::default())
+                            .unwrap();
+                        if part_result.fraction() < result.fraction() {
+                            result = part_result;
+                        }
+                    }
                     if crossing {
                         assert!(
                             matches!(result, CcdResult::Limited { .. }),

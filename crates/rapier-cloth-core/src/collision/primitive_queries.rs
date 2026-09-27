@@ -742,6 +742,14 @@ impl SelfCollision {
         Ok(fraction)
     }
 
+    /// The self-contacts that limited the latest sweep, taken at the stop
+    /// fraction in relative form: with the moving vertices at their end
+    /// positions, a witness's gap measures how far the cloth it met must move
+    /// to stay ahead of them.
+    pub(crate) fn swept_witnesses(&self) -> &[SurfaceContact] {
+        &self.motion_contacts
+    }
+
     /// Parent contacts at a point of the latest collecting sweep, from its
     /// recorded pairs. Returns false, without output, if no sweep is recorded.
     pub(crate) fn implicit_swept_primitives(

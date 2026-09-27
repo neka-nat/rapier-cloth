@@ -78,8 +78,9 @@ collision filters, attachments and recovery after a failed step.
 
 The solver supports fixed triangle topology, surface density, stretch and dihedral
 bending constraints, pins and attachments with body-local anchors. Collisions
-support spheres, boxes, capsules and fixed half-spaces. Kinematic obstacle motion
-is bounded per substep.
+support spheres, boxes, capsules, convex hulls, compounds of those solids (such as
+convex decompositions) and fixed half-spaces. Kinematic obstacle motion is bounded
+per substep.
 
 Coupling is one-way. Experimental [self-collision](docs/integration.md#discrete-self-collision)
 and [whole-triangle rigid contact](docs/integration.md#rigid-surface-contact) are

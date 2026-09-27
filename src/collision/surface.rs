@@ -2,108 +2,20 @@ use super::*;
 use crate::{
     ClothContactSettings, CollisionBudgetKind, CollisionWork, SurfaceContact, SurfaceContactKey,
     SurfaceFeature,
-    collision::geometry::{SurfaceWitness, closest_triangle},
-    rapier::parry::{
-        query::{DefaultQueryDispatcher, PersistentQueryDispatcher},
-        shape::Triangle,
-    },
 };
 
-pub(super) struct TriangleContactQuery<'a> {
-    pub shape: &'a dyn crate::rapier::parry::shape::Shape,
-    pub collider: ColliderHandle,
-    pub body: Option<&'a RigidBody>,
-    pub pose: Pose,
-    pub output_pose: Pose,
-    pub indices: [u32; 3],
-    pub particle_count: usize,
-    pub face: u32,
-    pub points: [Vec3; 3],
-    pub stage: Option<ContactStage>,
-    pub activation: Real,
-    pub template: SurfaceContact,
-}
-impl TriangleContactQuery<'_> {
-    pub(super) fn generate(
-        &self,
-        manifold: &mut crate::rapier::parry::query::ContactManifold<(), ()>,
-        config: ClothContactSettings,
-        limit: usize,
-        excluded: &BTreeSet<(u32, (u32, u32))>,
-        out: &mut Vec<SurfaceContact>,
-        work: &mut CollisionWork,
-    ) -> Result<(), IntegrationError> {
-        let origin = self.points[0];
-        let triangle = Triangle::new(Vec3::ZERO, self.points[1] - origin, self.points[2] - origin);
-        let local_triangle = [triangle.a, triangle.b, triangle.c];
-        if closest_triangle(Vec3::ZERO, local_triangle).is_none() {
-            return Err(ClothError::DegenerateConstraint.into());
-        }
-        manifold.clear();
-        DefaultQueryDispatcher
-            .contact_manifold_convex_convex(
-                &self.pose.inv_mul(&Pose::from_translation(origin)),
-                self.shape,
-                &triangle,
-                None,
-                None,
-                self.activation,
-                manifold,
-            )
-            .map_err(|_| IntegrationError::UnsupportedCollision {
-                collider: self.collider,
-                reason: "Parry surface manifold query unsupported",
-            })?;
-        let normal = self.output_pose.rotation * manifold.local_n1;
-        for point in &manifold.points {
-            let witness = closest_triangle(point.local_p2, local_triangle)
-                .ok_or(ClothError::DegenerateConstraint)?;
-            let support =
-                SurfaceWitness::from_triangle(self.indices, self.face, witness.barycentric)?;
-            if support
-                .particles
-                .iter()
-                .zip(support.weights)
-                .all(|(&i, w)| w == 0.0 || excluded.contains(&(i, self.collider.into_raw_parts())))
-            {
-                continue;
-            }
-            let mut contact = self.template;
-            contact.key.features[0] = support.feature;
-            if let SurfaceFeature::External { feature, .. } = &mut contact.key.features[1] {
-                *feature = point.fid1.0;
-            }
-            contact.particles = [
-                support.particles[0],
-                support.particles[1],
-                support.particles[2],
-                0,
-            ];
-            contact.weights = [
-                support.weights[0],
-                support.weights[1],
-                support.weights[2],
-                0.0,
-            ];
-            contact.normal = normal;
-            contact.offset = self.output_pose.transform_point(point.local_p1);
-            contact.surface_velocity = self
-                .body
-                .filter(|b| b.is_kinematic())
-                .map_or(Vec3::ZERO, |b| b.velocity_at_point(contact.offset));
-            if let Some(stage) = self.stage {
-                check_distance(
-                    point.dist,
-                    contact.separation,
-                    stage,
-                    self.collider,
-                    support.feature,
-                )?;
-            }
-            push_contact(contact, self.particle_count, config, limit, out, work)?;
-        }
-        Ok(())
+/// External feature identity of a contact. A compound part keeps the feature
+/// code's two header bits, then ten bits of part index and twenty of feature
+/// code, so parts never alias each other; single shapes keep the code unchanged.
+pub(super) fn pack_feature(part: Option<u32>, packed: u32) -> Result<u32, &'static str> {
+    let Some(part) = part else {
+        return Ok(packed);
+    };
+    let code = packed & 0x3fff_ffff;
+    if part >= 1 << 10 || code >= 1 << 20 {
+        return Err("compound part or feature index exceeds the contact identity range");
     }
+    Ok((packed & 0xc000_0000) | (part << 20) | code)
 }
 
 impl RapierContacts<'_, '_> {
@@ -163,13 +75,21 @@ impl RapierContacts<'_, '_> {
         let Some(config) = self.surface_settings else {
             return Ok(());
         };
-        let mesh = self.surface_mesh.as_ref().unwrap();
+        let mesh = self.surface_mesh.clone().unwrap();
         if positions.len() != mesh.rest_positions().len() {
             return Err(ClothError::InvalidSurfaceContact("surface vertex count").into());
         }
         let separation = config.thickness * 0.5;
         let activation = separation + config.activation_margin;
-        out.extend_from_slice(&self.motion_contacts);
+        // Swept witnesses describe each limited triangle at its own certified
+        // stop pose. The prediction solve projects the complete inertial
+        // prediction against them, so there they are the intended contacts.
+        // Every other query evaluates the geometry at the queried positions;
+        // a witness taken further along another triangle's motion is a stale
+        // half-space there and can report penetration around a convex edge.
+        if stage == ContactStage::Prediction {
+            out.extend_from_slice(&self.motion_contacts);
+        }
         let cloth_bounds = bounds(positions.iter().copied(), activation);
         self.candidate_queries += 1;
         // Previous-pose stabilization must find an obstacle even if its current
@@ -214,15 +134,16 @@ impl RapierContacts<'_, '_> {
                     reason: "dynamic surface collision requires two-way coupling",
                 });
             }
-            if (shape.as_halfspace().is_some() && body.is_some_and(|b| b.is_kinematic()))
-                || (shape.as_ball().is_none()
-                    && shape.as_cuboid().is_none()
-                    && shape.as_capsule().is_none()
-                    && shape.as_halfspace().is_none())
-            {
+            if shape.as_halfspace().is_some() && body.is_some_and(|b| b.is_kinematic()) {
                 return Err(IntegrationError::UnsupportedCollision {
                     collider: handle,
-                    reason: "surface collision supports sphere/box/capsule/fixed-halfspace",
+                    reason: "kinematic halfspaces are not supported",
+                });
+            }
+            if let Err(reason) = super::supported_shape(shape) {
+                return Err(IntegrationError::UnsupportedCollision {
+                    collider: handle,
+                    reason,
                 });
             }
             let raw = handle.into_raw_parts();
@@ -276,43 +197,86 @@ impl RapierContacts<'_, '_> {
                 }
                 continue;
             }
-            for (face, &indices) in mesh.triangles().iter().enumerate() {
-                // Excluding a selected patch must not hide its unselected
-                // neighboring vertices or an entire cloth component.
-                if indices
-                    .iter()
-                    .all(|i| self.excluded_pairs.contains(&(*i, raw)))
-                {
+            // A compound is queried part by part at the part's world pose.
+            let parts: Vec<(Pose, &dyn crate::rapier::parry::shape::Shape, Option<u32>)> =
+                match shape.as_compound() {
+                    Some(compound) => compound
+                        .shapes()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (local, part))| (*pose * *local, part.as_ref(), Some(i as u32)))
+                        .collect(),
+                    None => vec![(*pose, shape, None)],
+                };
+            for (part_pose, part_shape, part) in parts {
+                let part_bounds = part_shape.compute_aabb(&part_pose);
+                if !overlaps(&cloth_bounds, &part_bounds) {
                     continue;
                 }
-                let points = indices.map(|i| positions[i as usize]);
-                if !overlaps(&bounds(points, activation), &obstacle_bounds) {
-                    continue;
-                }
-                work.charge(CollisionBudgetKind::CandidatePairs, 1, config.limits)?;
-                self.pair_queries += 1;
-                TriangleContactQuery {
-                    shape,
+                let features = self.features(handle, part_shape)?;
+                let emitter = super::convex::PartContacts {
+                    features: &features,
                     collider: handle,
                     body,
-                    pose: *pose,
-                    output_pose: *pose,
-                    indices,
+                    pose: part_pose,
+                    output_pose: part_pose,
                     particle_count: positions.len(),
-                    face: face as u32,
-                    points,
-                    stage: Some(stage),
-                    activation,
                     template: contact,
+                    part,
+                };
+                // Each cloth vertex meets the whole part once per query, not
+                // once per incident triangle.
+                self.mark_serial = self.mark_serial.wrapping_add(1);
+                let serial = self.mark_serial;
+                let mut marks = std::mem::take(&mut self.vertex_marks);
+                marks.resize(positions.len(), serial.wrapping_sub(1));
+                let excluded = self.excluded_pairs;
+                let limit = self.limit;
+                let mut result = Ok(());
+                for (face, &indices) in mesh.triangles().iter().enumerate() {
+                    // Excluding a selected patch must not hide its unselected
+                    // neighboring vertices or an entire cloth component.
+                    if indices.iter().all(|i| excluded.contains(&(*i, raw))) {
+                        continue;
+                    }
+                    let points = indices.map(|i| positions[i as usize]);
+                    if !overlaps(&bounds(points, activation), &part_bounds) {
+                        continue;
+                    }
+                    if let Err(e) =
+                        work.charge(CollisionBudgetKind::CandidatePairs, 1, config.limits)
+                    {
+                        result = Err(e.into());
+                        break;
+                    }
+                    self.pair_queries += 1;
+                    if let Err(e) = emitter.generate(
+                        indices,
+                        face as u32,
+                        points,
+                        activation,
+                        Some(stage),
+                        config,
+                        limit,
+                        excluded,
+                        out,
+                        work,
+                        |vertex| {
+                            let mark = &mut marks[vertex as usize];
+                            if *mark == serial {
+                                true
+                            } else {
+                                *mark = serial;
+                                false
+                            }
+                        },
+                    ) {
+                        result = Err(e);
+                        break;
+                    }
                 }
-                .generate(
-                    &mut self.surface_manifold,
-                    config,
-                    self.limit,
-                    self.excluded_pairs,
-                    out,
-                    work,
-                )?;
+                self.vertex_marks = marks;
+                result?;
             }
         }
         deduplicate(out, config, self.limit, work)?;
@@ -332,7 +296,7 @@ pub(super) fn bounds(points: impl IntoIterator<Item = Vec3>, margin: Real) -> Aa
 pub(super) fn overlaps(a: &Aabb, b: &Aabb) -> bool {
     a.mins.cmple(b.maxs).all() && b.mins.cmple(a.maxs).all()
 }
-fn check_distance(
+pub(super) fn check_distance(
     distance: Real,
     separation: Real,
     stage: ContactStage,
@@ -466,9 +430,26 @@ mod tests {
         );
     }
 
+    fn cube_hull(half: Real) -> SharedShape {
+        let corners: Vec<Vec3> = (0..8)
+            .map(|i| {
+                Vec3::new(
+                    if i & 1 == 0 { -half } else { half },
+                    if i & 2 == 0 { -half } else { half },
+                    if i & 4 == 0 { -half } else { half },
+                )
+            })
+            .collect();
+        SharedShape::convex_hull(&corners).unwrap()
+    }
+    fn box_distance(local: Vec3, half: Real) -> Real {
+        let q = local.abs() - Vec3::splat(half);
+        q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
+    }
+
     #[test]
     fn primitive_manifold_witnesses_follow_rotated_and_translated_triangle_interiors() {
-        for kind in 0..3 {
+        for kind in 0..5 {
             for trial in 0..64 {
                 let rotation =
                     Rotation::from_scaled_axis(Vec3::new(0.3, 0.7, -0.2) * (trial as Real * 0.13));
@@ -485,11 +466,27 @@ mod tests {
                 let shape = match kind {
                     0 => SharedShape::ball(0.02),
                     1 => SharedShape::cuboid(0.02, 0.02, 0.02),
-                    _ => SharedShape::capsule_x(0.015, 0.02),
+                    2 => SharedShape::capsule_x(0.015, 0.02),
+                    3 => cube_hull(0.02),
+                    _ => SharedShape::compound(vec![
+                        (Pose::from_translation(Vec3::X * 0.05), cube_hull(0.02)),
+                        (Pose::from_translation(-Vec3::X * 0.05), cube_hull(0.02)),
+                    ]),
                 };
                 let contacts = query(&cloth, shape, pose, &[]).unwrap();
                 assert!(!contacts.is_empty(), "kind={kind}, trial={trial}");
-                let minimum = [1, 3, 2][kind];
+                if kind == 4 {
+                    // Both parts touch the triangle and keep distinct identities.
+                    let parts: std::collections::BTreeSet<u32> = contacts
+                        .iter()
+                        .map(|c| match c.key.features[1] {
+                            SurfaceFeature::External { feature, .. } => (feature >> 20) & 0x3ff,
+                            _ => unreachable!(),
+                        })
+                        .collect();
+                    assert_eq!(parts, [0, 1].into_iter().collect(), "trial={trial}");
+                }
+                let minimum = [1, 3, 2, 1, 2][kind];
                 assert!(
                     contacts.len() >= minimum,
                     "kind={kind}, trial={trial}: {} manifold supports, expected at least {minimum}",
@@ -503,14 +500,13 @@ mod tests {
                     let local = pose.inverse_transform_point(contact.offset);
                     let distance = match kind {
                         0 => local.length() - 0.02,
-                        1 => {
-                            let q = local.abs() - Vec3::splat(0.02);
-                            q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
-                        }
-                        _ => {
+                        1 | 3 => box_distance(local, 0.02),
+                        2 => {
                             Vec3::new((local.x.abs() - 0.015).max(0.0), local.y, local.z).length()
                                 - 0.02
                         }
+                        _ => box_distance(local - Vec3::X * 0.05, 0.02)
+                            .min(box_distance(local + Vec3::X * 0.05, 0.02)),
                     };
                     assert!(distance.abs() < 2.0e-5, "kind={kind}, distance={distance}");
                     assert_eq!(contact.key.features[0], SurfaceFeature::Face(0));

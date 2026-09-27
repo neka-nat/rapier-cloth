@@ -13,10 +13,19 @@ $('viewport').appendChild(renderer.domElement);
 const camera = new THREE.PerspectiveCamera(38, 1, 0.01, 40);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-function resetCamera(implicit = false) {
-  if (implicit) { camera.position.set(0.66, 0.60, 0.78); controls.target.set(0, 0.05, -0.03); }
-  else { camera.position.set(1.05, 0.95, 1.25); controls.target.set(0.2, 0.13, -0.1); }
+// Presets frame the 0.5 m towel; a larger recording (a garment) scales the
+// implicit preset by its extent so the whole cloth stays in view.
+function resetCamera(implicit = false, extent = 0.5) {
+  if (implicit) {
+    const scale = Math.max(1, extent / 0.5);
+    camera.position.set(0.66 * scale, 0.60 * scale, 0.78 * scale); controls.target.set(0, 0.05, -0.03);
+  } else { camera.position.set(1.05, 0.95, 1.25); controls.target.set(0.2, 0.13, -0.1); }
   controls.update();
+}
+function recordingExtent(record) {
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const p of record.frames[0].positions) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]); }
+  return Math.max(hi[0] - lo[0], hi[2] - lo[2]);
 }
 resetCamera();
 scene.add(new THREE.HemisphereLight('#e4fff0', '#657466', 2.4));
@@ -38,7 +47,7 @@ function load(data, name) {
   stop(); disposeContent(); record = valid;
   const implicit = record.schema_version === 2;
   grid.visible = !implicit;
-  resetCamera(implicit);
+  resetCamera(implicit, recordingExtent(record));
   $('solver-info').textContent = implicit ? 'RECORDED CPU IMPLICIT · ONE-WAY COUPLING' : 'ONE-WAY COUPLING · CPU XPBD';
   for (const [id, label] of Object.entries(implicit
     ? {stretch:'Max edge extension', penetration:'RMS speed', target:'Max speed', contacts:'Pinned vertices'}

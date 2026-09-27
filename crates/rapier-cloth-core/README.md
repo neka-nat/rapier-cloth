@@ -51,7 +51,7 @@ self-collision can be enabled with
 This separates nonincident vertex-face and edge-edge features using a physical
 thickness (default 1 mm). It rejects initial intersections and uses bounded,
 refitted candidate searches. Setting `continuous_self_collision: true` also checks
-prediction, accepted constraint corrections and the final substep sweep. This
+prediction and every accepted constraint-correction batch. This
 experimental mode can return a typed failure when a safe advance cannot be found;
 it has not qualified the complete folding task or its real-time performance.
 Experimental XPBD surface friction retains static/kinetic contact history.

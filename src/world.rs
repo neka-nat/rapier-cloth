@@ -290,12 +290,22 @@ impl RapierClothWorld {
         h: Real,
         scene: &RapierScene<'_>,
     ) -> Result<WorldStepReport, IntegrationError> {
+        // The budget protects discrete queries from missing a fast crossing.
+        // A cloth with continuous rigid collision certifies every kinematic
+        // motion by sweeping it instead, so the budget applies only while some
+        // cloth in the world still relies on discrete or particle contacts.
+        let discrete = self.cloths.iter().any(|(_, c)| {
+            !c.contact_settings()
+                .is_some_and(|s| s.rigid_surface_collision && s.continuous_rigid_collision)
+        });
         let min_radius = self
             .cloths
             .iter()
             .map(|(_, c)| c.material().contact_radius)
             .reduce(Real::min);
-        if let Some(radius) = min_radius {
+        if let Some(radius) = min_radius
+            && discrete
+        {
             self.validate_motion(scene, radius)?;
         }
         // World-level atomicity: a later cloth failure cannot partially commit

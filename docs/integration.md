@@ -82,8 +82,10 @@ acceleration by vertex mass.
 
 ## Contacts and filters
 
-Supported contacts are fixed spheres, boxes, capsules and half-spaces, and kinematic
-spheres, boxes and capsules. Each vertex is treated as a sphere with
+Supported contacts are fixed spheres, boxes, capsules, half-spaces and convex hulls,
+kinematic spheres, boxes, capsules and convex hulls, and compounds of those solids
+(a convex decomposition is queried part by part, each part keeping its own contact
+identity). Each vertex is treated as a sphere with
 `contact_radius`. Candidates use the cloth AABB and are reevaluated after constraint
 projection. An unsupported shape or dynamic body that becomes a selected contact
 candidate returns `UnsupportedCollision`; its mere presence far away does not
@@ -102,7 +104,9 @@ rotation is not mistaken for zero motion. The default budget is half the smalles
 cloth particle radius. It also applies to distant selected kinematic shapes to avoid
 missing fast crossings; filter out unrelated ones explicitly. On `MotionBudget`, use
 `required_substeps` to plan smaller external steps. This is not a full relative-CCD
-guarantee.
+guarantee. The budget protects discrete queries: when every cloth in the world
+enables `continuous_rigid_collision`, the sweeps certify each kinematic motion and
+the budget is not applied (a gripper at 0.1 m/s then works at a 0.1 s step).
 
 Static sweeps retain the hit tangent plane for the remainder of the substep and
 solve remaining motion along the surface, with zero restitution. Moving surfaces
@@ -197,7 +201,7 @@ Analytical pull/incline, kinetic-load, common-rotation, moving-support and small
 stacked-patch tests exercise this mode. Independent virtual-work and rigid-motion
 tests cover the force distribution on rotated and deformed support triangles.
 Rotating self-support tests also cover checkpoint replay and release after
-separation. Complete garment manipulation,
+separation. Garment manipulation beyond the [T-shirt folding example](garments.md),
 large support deformations and dense-fold performance remain unqualified.
 
 The position-level Coulomb model follows the approach described in
@@ -240,8 +244,17 @@ cloth.set_contact_settings(Some(ClothContactSettings {
 }))?;
 ```
 
-The adapter queries complete triangles against spheres, boxes and capsules, and
-uses vertex inequalities to cover triangles against a fixed half-space. It finds
+The adapter queries complete triangles against spheres, boxes, capsules, convex
+hulls and compounds of those, and uses vertex inequalities to cover triangles
+against a fixed half-space. Each convex part is decomposed into its vertices, edges
+and faces (a ball is a point with a radius, a capsule a segment with a radius), and
+the contacts of a triangle are its exact feature pairs within the activation
+distance: each cloth vertex against the part, each part vertex against the
+triangle, and each part edge against each cloth edge. Every pair distance is a
+continuous closed-form function of the cloth positions, so contacts do not appear
+or vanish with a clipping decision as the cloth slides around an edge. A triangle
+that intersects a polytope reports its inside witnesses along the triangle's
+minimum translation axis, so they are pushed out consistently. The adapter finds
 small obstacles inside a triangle even when every cloth vertex misses them.
 Canonical vertex/edge/face witnesses avoid counting a shared boundary twice;
 collider identities include their handle generation. Gripper exclusions apply
@@ -258,7 +271,8 @@ both combined coefficients.
 
 This configuration performs discrete rigid queries. The continuous flag in the
 example applies to **self-collision only**. Rigid CCD has a separate opt-in below.
-Kinematic sphere/box/capsule poses use the existing motion-budget contract, and
+Kinematic sphere/box/capsule/convex-hull poses (and compounds of them) use the
+existing motion-budget contract, and
 pre-step poses are used for stabilization. Moving contact-point velocities include
 body rotation. Dynamic bodies and moving half-spaces remain unsupported.
 
@@ -283,12 +297,24 @@ cloth.set_contact_settings(Some(ClothContactSettings {
 }))?;
 ```
 
-Fixed half-spaces and fixed/kinematic spheres, boxes and capsules participate in
-prediction, stabilization, elastic/target/contact correction and the final sweep.
-The swept minimum is 90% of `thickness / 2`, with additional numerical clearance;
-contact projection still targets the full half-thickness. Swept contact anchors
-are transported to the ending rigid pose before solving the complete inertial
-prediction. The application still advances both worlds by exactly the same `h`.
+Fixed half-spaces and fixed/kinematic spheres, boxes, capsules, convex hulls and
+compounds of those participate in prediction, stabilization and every
+elastic/target/contact correction batch. The swept minimum is 90% of
+`thickness / 2`, with additional numerical clearance; contact projection still
+targets the full half-thickness. Sweeps advance on the exact closest-pair
+distance of the same feature pairs, so their bound does not depend on the accuracy
+of a GJK direction (at f32 that direction could be degrees off near a faceted
+hull and stall an impact). The pair that limits a sweep is therefore always a
+contact of the correction that follows. Swept contact anchors are
+transported to the ending rigid pose before solving the complete inertial
+prediction; these swept witnesses are supplied only to prediction-stage queries,
+every other query evaluates the obstacle geometry at the queried positions. When
+projecting against the witnesses stops raising the certified fraction, the
+prediction keeps its certified prefix instead of failing. The certified cloth path
+is the sequence of accepted batches; the substep's straight chord is not swept
+separately, because a vertex rounding a convex obstacle edge within one substep
+has a clear piecewise path whose chord cuts the corner. The application still
+advances both worlds by exactly the same `h`.
 
 The declared continuous trajectory uses linear body center-of-mass translation
 and constant angular interpolation between the actual endpoint orientations;
@@ -298,9 +324,10 @@ normalized linear quaternion increments, so its ending angle can differ from
 solver increment angles, including final velocity damping. Velocity-based angular
 commands reaching half a turn per external substep are rejected: endpoint
 quaternions cannot identify their path unambiguously. Reduce the application step
-and restore both worlds before retrying. The existing, normally much tighter
-kinematic motion budget also applies. These checks certify the declared path,
-not an arbitrary trajectory sharing the same endpoint poses.
+and restore both worlds before retrying. The kinematic motion budget applies only
+while another cloth in the world relies on discrete or particle contacts. These
+checks certify the declared path, not an arbitrary trajectory sharing the same
+endpoint poses.
 
 Keep collider geometry and its body-local pose unchanged between snapshot and
 solve. A changed shape, a moved fixed collider or inconsistent kinematic motion
@@ -320,17 +347,24 @@ Custom core sources opt in through `ContactSource::continuous_motion` and implem
 `motion_fraction(ContactMotion, CollisionWork)`. Return a certified fraction in
 `[0, 1]`, charge work, and return an error if certification fails. Stabilization
 holds obstacles at their previous pose; iteration corrections hold their current
-pose. Prediction/final checks span the physical trajectory. The default methods
-preserve existing sources that only supply contact queries.
+pose. Prediction checks span the physical trajectory; the built-in solvers no
+longer request a `Final`-stage sweep (the variant remains for compatibility).
+`ContactSource::swept_witnesses` returns the contacts of the features that limited
+the most recent `motion_fraction`, taken at the certified stop pose and expressed
+at the obstacle's ending pose; the implicit solver seeds cloth that an arriving
+obstacle reaches within one step from them. The default methods preserve existing
+sources that only supply contact queries; a source without swept witnesses keeps
+the former behavior, where such a step fails its initialization sweep.
 
 ## Continuous self-collision
 
 Set `continuous_self_collision: true` together with `self_collision: true` to
 enable experimental continuous checks. The core bounds linear motion during
 prediction, stabilization, elastic/target projection and both contact projection
-paths. Internal trial corrections form batches; each accepted batch and the final
-substep's linear endpoint sweep are checked. No additional physical time steps are
-hidden inside this procedure.
+paths. Internal trial corrections form batches; each accepted batch is checked,
+and the accepted batches form the certified path. A batch that CCD shortens is
+followed by a correction that only pushes features outward to full thickness. No
+additional physical time steps are hidden inside this procedure.
 
 Sweeps retain at least 90% of physical thickness, while contact constraints target
 the full thickness. Thus a 1 mm cloth uses a 0.9 mm minimum swept separation.

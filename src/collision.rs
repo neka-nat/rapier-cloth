@@ -1,7 +1,7 @@
 use crate::rapier::{
     parry::{
         query::{ShapeCastOptions, cast_shapes, contact},
-        shape::Ball,
+        shape::{Ball, Shape},
     },
     prelude::*,
 };
@@ -10,10 +10,38 @@ use crate::{
     IntegrationError, RapierScene, Real, Vec3,
 };
 use std::{collections::BTreeSet, time::Instant};
+#[path = "collision/convex.rs"]
+mod convex;
 #[path = "collision/motion.rs"]
 mod motion;
 #[path = "collision/surface.rs"]
 mod surface;
+
+/// Colliders the bridge can query: spheres, boxes, capsules, half-spaces,
+/// convex polyhedra, and compounds whose parts are spheres, boxes, capsules or
+/// convex polyhedra. Everything else returns the reason for rejection.
+pub(crate) fn supported_shape(shape: &dyn Shape) -> Result<(), &'static str> {
+    let simple = |s: &dyn Shape| {
+        s.as_ball().is_some()
+            || s.as_cuboid().is_some()
+            || s.as_capsule().is_some()
+            || s.as_convex_polyhedron().is_some()
+    };
+    if simple(shape) || shape.as_halfspace().is_some() {
+        return Ok(());
+    }
+    if let Some(compound) = shape.as_compound() {
+        if compound
+            .shapes()
+            .iter()
+            .all(|(_, part)| simple(part.as_ref()))
+        {
+            return Ok(());
+        }
+        return Err("compound part outside sphere/box/capsule/convex-hull support");
+    }
+    Err("shape outside sphere/box/capsule/convex-hull/compound/fixed-halfspace support")
+}
 
 pub(crate) struct RapierContacts<'a, 'b> {
     scene: &'a RapierScene<'b>,
@@ -26,7 +54,12 @@ pub(crate) struct RapierContacts<'a, 'b> {
     merged: Vec<Contact>,
     surface_mesh: Option<std::sync::Arc<crate::ClothMesh>>,
     surface_settings: Option<crate::ClothContactSettings>,
-    surface_manifold: crate::rapier::parry::query::ContactManifold<(), ()>,
+    /// Feature geometry of each convex part queried during this substep,
+    /// keyed by the shape's address.
+    features: std::collections::BTreeMap<usize, std::rc::Rc<convex::ConvexFeatures>>,
+    /// Per-query marks so each cloth vertex's contact with a part is emitted once.
+    vertex_marks: Vec<u32>,
+    mark_serial: u32,
     motion_contacts: Vec<crate::SurfaceContact>,
     pub error: Option<IntegrationError>,
     pub ignored: BTreeSet<(u32, u32)>,
@@ -53,7 +86,9 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
             merged: Vec::new(),
             surface_mesh: None,
             surface_settings: None,
-            surface_manifold: crate::rapier::parry::query::ContactManifold::new(),
+            features: std::collections::BTreeMap::new(),
+            vertex_marks: Vec::new(),
+            mark_serial: 0,
             motion_contacts: Vec::new(),
             error: None,
             ignored: BTreeSet::new(),
@@ -61,6 +96,25 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
             pair_queries: 0,
             query_time_seconds: 0.0,
         }
+    }
+    /// The feature geometry of a convex part, built once per substep.
+    fn features(
+        &mut self,
+        collider: ColliderHandle,
+        shape: &dyn Shape,
+    ) -> Result<std::rc::Rc<convex::ConvexFeatures>, IntegrationError> {
+        let key = shape as *const dyn Shape as *const () as usize;
+        if let Some(features) = self.features.get(&key) {
+            return Ok(std::rc::Rc::clone(features));
+        }
+        let features = std::rc::Rc::new(convex::ConvexFeatures::new(shape).ok_or(
+            IntegrationError::UnsupportedCollision {
+                collider,
+                reason: "shape outside sphere/box/capsule/convex-hull support",
+            },
+        )?);
+        self.features.insert(key, std::rc::Rc::clone(&features));
+        Ok(features)
     }
     pub fn with_surface(mut self, cloth: &crate::Cloth) -> Self {
         if let Some(settings) = cloth
@@ -122,14 +176,10 @@ impl<'a, 'b> RapierContacts<'a, 'b> {
                     reason: "kinematic halfspaces are not supported",
                 });
             }
-            if shape.as_ball().is_none()
-                && shape.as_cuboid().is_none()
-                && shape.as_capsule().is_none()
-                && shape.as_halfspace().is_none()
-            {
+            if let Err(reason) = supported_shape(shape) {
                 return Err(IntegrationError::UnsupportedCollision {
                     collider: handle,
-                    reason: "shape outside sphere/box/capsule/fixed-halfspace support",
+                    reason,
                 });
             }
             let (index, generation) = handle.into_raw_parts();
@@ -306,20 +356,6 @@ impl ContactSource for RapierContacts<'_, '_> {
         self.surface_settings
             .is_some_and(|s| s.continuous_rigid_collision)
     }
-    fn motion_fraction(
-        &mut self,
-        motion: crate::ContactMotion<'_>,
-        work: &mut crate::CollisionWork,
-    ) -> Result<Real, ClothError> {
-        let start = Instant::now();
-        let result = self.generate_motion(motion, work);
-        self.query_time_seconds += start.elapsed().as_secs_f64();
-        result.map_err(|e| {
-            let message = e.to_string();
-            self.error = Some(e);
-            ClothError::External(message)
-        })
-    }
     fn contacts(
         &mut self,
         previous: &[Vec3],
@@ -333,6 +369,23 @@ impl ContactSource for RapierContacts<'_, '_> {
         }
         let start = Instant::now();
         let result = self.generate(previous, positions, radius, stage, out);
+        self.query_time_seconds += start.elapsed().as_secs_f64();
+        result.map_err(|e| {
+            let message = e.to_string();
+            self.error = Some(e);
+            ClothError::External(message)
+        })
+    }
+    fn swept_witnesses(&mut self, out: &mut Vec<crate::SurfaceContact>) {
+        out.extend_from_slice(&self.motion_contacts);
+    }
+    fn motion_fraction(
+        &mut self,
+        motion: crate::ContactMotion<'_>,
+        work: &mut crate::CollisionWork,
+    ) -> Result<Real, ClothError> {
+        let start = Instant::now();
+        let result = self.generate_motion(motion, work);
         self.query_time_seconds += start.elapsed().as_secs_f64();
         result.map_err(|e| {
             let message = e.to_string();
