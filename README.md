@@ -31,7 +31,7 @@ performance remain under development.
 
 ```toml
 [dependencies]
-rapier-cloth = "0.2"
+rapier-cloth = "0.3"
 ```
 
 A repository checkout also works as a path dependency

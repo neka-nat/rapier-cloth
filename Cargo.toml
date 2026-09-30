@@ -35,7 +35,7 @@ f64 = ["dep:rapier-f64", "rapier-cloth-core/f64"]
 implicit = ["rapier-cloth-core/implicit"]
 
 [dependencies]
-rapier-cloth-core = { version = "0.2.0", path = "crates/rapier-cloth-core", default-features = false }
+rapier-cloth-core = { version = "0.3.0", path = "crates/rapier-cloth-core", default-features = false }
 rapier-f32 = { package = "rapier3d", version = "0.34", optional = true }
 rapier-f64 = { package = "rapier3d-f64", version = "0.34", optional = true }
 

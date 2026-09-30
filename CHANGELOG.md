@@ -1,6 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-10-01
+
+Garments, exact convex contact in the Rapier bridge, and a re-certified
+continuous path. The core gains a parametric T-shirt (panels, seams, stitches,
+landmarks), warp and weft stiffness, per-element stiffness scales and compliant
+targets in the implicit solver; the bridge accepts convex hulls and compounds,
+computes contacts from exact features, and can hand a grasp to another body or
+soften it in place.
+
+Upgrading from 0.2.0: `ClothMaterial` (`stitch_compliance`), `ShellMaterial`
+(`warp_stiffness`, `weft_stiffness`, `stitch_stiffness`), `Edge`
+(`compliance_scale`) and `Hinge` (`stiffness_scale`) gained fields, so struct
+literals of these types need the new fields or `..Default::default()`. Runs with
+continuous collision are no longer reproduced bit for bit: the straight-chord
+sweep at the end of a substep is gone and the implicit seed keeps its distance
+from the barrier, which moves the towel reference folds by up to 1.6 mm.
 
 - Certify the continuous path as the sequence of accepted solver batches (XPBD) and accepted Newton updates plus the physically swept seed (implicit) instead of additionally sweeping each substep's straight chord. The chord check rejected legitimate motion: a cloth vertex rounding a convex obstacle edge within one substep has a clear piecewise path whose chord cuts the corner, so the implicit solver could not drape a sheet over a box edge in one 0.1 s step and the XPBD solver failed once sliding cloth passed an edge faster than about half a millimetre per substep. `ContactStage::Final` remains for the final contact query; the built-in solvers no longer request a `Final`-stage `motion_fraction`.
 - After a batch that continuous collision shortened, the XPBD correction pass only pushes contacts short of their target gap outward and applies no friction or coupled support blocks. The former full pass let a contact whose accumulated multiplier pulled its point back to the target gap pivot a neighbouring triangle towards the obstacle; the correction was then itself shortened to nothing and every further batch lost 90% of the remaining clearance until `UnresolvedContinuousCollision("insufficient rigid separation or numerical clearance")`. A free-falling sheet landing across a box edge now settles.

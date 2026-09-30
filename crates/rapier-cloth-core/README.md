@@ -13,7 +13,7 @@ For Rapier collision queries, attachments and time synchronization, use
 
 ```toml
 [dependencies]
-rapier-cloth-core = "0.2"
+rapier-cloth-core = "0.3"
 ```
 
 A repository checkout also works as a path dependency

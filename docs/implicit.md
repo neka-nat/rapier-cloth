@@ -7,7 +7,7 @@ The default solver remains XPBD. Enable the experimental solver per cloth:
 
 ```toml
 [dependencies]
-rapier-cloth = { version = "0.2", default-features = false, features = ["f64", "implicit"] }
+rapier-cloth = { version = "0.3", default-features = false, features = ["f64", "implicit"] }
 ```
 
 ```rust
