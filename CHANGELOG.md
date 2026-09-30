@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The package check (`scripts/check-packages.sh`) fetches the extracted package's dev-dependencies before it builds the package's examples offline. The `packages` CI job had failed since the 0.2.0 release on runners whose registry cache lacked them; the check still builds the extracted sources without network.
+
 ## 0.3.0 — 2026-10-01
 
 Garments, exact convex contact in the Rapier bridge, and a re-certified

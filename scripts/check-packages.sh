@@ -62,6 +62,12 @@ rapier-cloth-core = { path = "$unpacked/rapier-cloth-core-$version" }
 TOML
   cargo run --offline --manifest-path "$consumer/Cargo.toml"
   cargo test --offline --manifest-path "$consumer/Cargo.toml"
+  # The extracted package's examples need its dev-dependencies, which nothing
+  # above has downloaded (the consumer builds the library alone), so fetch
+  # them for that manifest first; the offline builds then still prove the
+  # sources are the extracted ones.
+  cargo fetch --manifest-path "$unpacked/rapier-cloth-$version/Cargo.toml" \
+    --config "patch.crates-io.rapier-cloth-core.path=\"$unpacked/rapier-cloth-core-$version\""
   cargo run --offline --manifest-path "$unpacked/rapier-cloth-$version/Cargo.toml" \
     --config "patch.crates-io.rapier-cloth-core.path=\"$unpacked/rapier-cloth-core-$version\"" \
     --target-dir "$consumer/target" --no-default-features --features "$precision" \
