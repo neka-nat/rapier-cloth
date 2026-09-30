@@ -76,6 +76,7 @@ pub struct Solver {
     velocities: Vec<Vec3>,
     weights: Vec<Real>,
     distance_lambda: Vec<Real>,
+    stitch_lambda: Vec<Real>,
     bend_lambda: Vec<Real>,
     target_lambda: Vec<Vec3>,
     surface_target_lambda: Vec<Vec3>,
@@ -103,6 +104,7 @@ pub struct Solver {
     motion_start: Vec<Vec3>,
     motion_trial: Vec<Vec3>,
     motion_distance_lambda: Vec<Real>,
+    motion_stitch_lambda: Vec<Real>,
     motion_bend_lambda: Vec<Real>,
     motion_target_lambda: Vec<Vec3>,
     motion_surface_target_lambda: Vec<Vec3>,
@@ -297,6 +299,8 @@ impl Solver {
         }
         self.distance_lambda.resize(cloth.mesh.edges().len(), 0.0);
         self.distance_lambda.fill(0.0);
+        self.stitch_lambda.resize(cloth.mesh.stitches().len(), 0.0);
+        self.stitch_lambda.fill(0.0);
         self.bend_lambda.resize(cloth.mesh.hinges().len(), 0.0);
         self.bend_lambda.fill(0.0);
         self.target_lambda.resize(targets.len(), Vec3::ZERO);
@@ -314,12 +318,17 @@ impl Solver {
         }
         self.solve_prediction_contacts(source, radius, h, settings, &cloth.mesh)?;
         let stretch_alpha = cloth.material.stretch_compliance / (h * h);
+        if !cloth.material.stitch_compliance.is_finite() || cloth.material.stitch_compliance < 0.0 {
+            return Err(ClothError::InvalidParameter("stitch compliance"));
+        }
+        let stitch_alpha = cloth.material.stitch_compliance / (h * h);
         let bend_alpha = cloth.material.bend_compliance / (h * h);
         for _ in 0..settings.iterations {
             self.capture_motion();
             if self.continuous_motion() {
                 self.motion_distance_lambda
                     .clone_from(&self.distance_lambda);
+                self.motion_stitch_lambda.clone_from(&self.stitch_lambda);
                 self.motion_bend_lambda.clone_from(&self.bend_lambda);
                 self.motion_target_lambda.clone_from(&self.target_lambda);
                 self.motion_surface_target_lambda
@@ -331,8 +340,20 @@ impl Solver {
                     &self.weights,
                     e.vertices,
                     e.rest_length,
-                    stretch_alpha,
+                    stretch_alpha * e.compliance_scale,
                     &mut self.distance_lambda[i],
+                ) {
+                    return Err(ClothError::DegenerateConstraint);
+                }
+            }
+            for (i, stitch) in cloth.mesh.stitches().iter().enumerate() {
+                if !distance::project(
+                    &mut self.positions,
+                    &self.weights,
+                    stitch.vertices,
+                    stitch.rest_length,
+                    stitch_alpha,
+                    &mut self.stitch_lambda[i],
                 ) {
                     return Err(ClothError::DegenerateConstraint);
                 }
@@ -346,10 +367,10 @@ impl Solver {
                     .zip(ids)
                     .map(|(g, i)| self.weights[i] * g.length_squared())
                     .sum::<Real>()
-                    + bend_alpha;
+                    + bend_alpha / hinge.stiffness_scale;
                 if denom > 0.0 {
                     let dl = (-angle_difference(angle, hinge.rest_angle)
-                        - bend_alpha * self.bend_lambda[j])
+                        - bend_alpha / hinge.stiffness_scale * self.bend_lambda[j])
                         / denom;
                     self.bend_lambda[j] += dl;
                     for k in 0..4 {
@@ -401,6 +422,13 @@ impl Solver {
                     *value = before + (*value - before) * fraction;
                 }
                 for (value, &before) in self.bend_lambda.iter_mut().zip(&self.motion_bend_lambda) {
+                    *value = before + (*value - before) * fraction;
+                }
+                for (value, &before) in self
+                    .stitch_lambda
+                    .iter_mut()
+                    .zip(&self.motion_stitch_lambda)
+                {
                     *value = before + (*value - before) * fraction;
                 }
                 for (value, &before) in self

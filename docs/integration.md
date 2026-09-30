@@ -47,6 +47,7 @@ when changing mesh resolution, time step or solver iterations.
 | `surface_density` | 0.2 | Mass per square metre; vertex masses use triangle areas |
 | `stretch_compliance` | 0 | Edge-length compliance; zero requests inextensible edges |
 | `bend_compliance` | 1e-4 | Dihedral bending compliance; larger values allow easier folding |
+| `stitch_compliance` | 0 | Compliance of the mesh's stitches (`ClothMesh::stitches`); zero keeps them at their rest length |
 | `damping` | 0.1 | Exponential velocity damping coefficient, in inverse seconds |
 | `friction` | 0.5 | Cloth contribution to contact friction |
 | `contact_radius` | 0.005 | Numerical particle radius, not necessarily physical fabric thickness |
@@ -415,7 +416,16 @@ not the collider's. To grasp the current position, compute the anchor with
 
 - Zero compliance creates a hard target. Its velocity is the displacement from the
   previous particle position to the ending anchor position, divided by `h`.
-- Positive compliance creates a soft XPBD target with correction-consistent velocity.
+- Positive compliance creates a soft XPBD target with correction-consistent velocity;
+  the implicit solver holds such an attachment with a spring of stiffness
+  `1 / compliance` newtons per metre.
+- `transfer_attachment(handle, body, excluded_colliders, ..)` hands an attachment
+  to another enabled fixed or kinematic body: the points keep their particles
+  and current world positions, anchors are re-expressed in the new body's frame
+  and the compliance is kept; the exclusions are replaced.
+- `set_attachment_compliance(handle, compliance)` changes a held attachment's
+  compliance in place; the body and the anchors stay, so a grasp can be
+  softened over a few steps before it is released.
 - Multiple attachments on one particle, or an attachment conflicting with a pin,
   are rejected.
 - Attachment `excluded_colliders` must belong to its body. Exclusions apply only to

@@ -74,7 +74,13 @@ fn source_checks_all_stages_without_builtin_self_collision() {
             )
             .unwrap();
         assert_eq!(source.stages.first(), Some(&ContactStage::Stabilization));
-        assert_eq!(source.stages.last(), Some(&ContactStage::Final));
+        // The accepted batches are the certified path: no final chord sweep.
+        assert!(
+            !source.stages.contains(&ContactStage::Final),
+            "{:?}",
+            source.stages
+        );
+        assert_eq!(source.stages.last(), Some(&ContactStage::Iteration));
         assert_eq!(
             source
                 .stages
@@ -99,11 +105,12 @@ fn source_checks_all_stages_without_builtin_self_collision() {
 
 #[test]
 fn invalid_motion_results_at_each_stage_preserve_the_entire_cloth() {
+    // The solvers no longer request a `Final`-stage sweep; the variant remains
+    // for compatibility, so a failure injected there is never reached.
     for stage in [
         ContactStage::Stabilization,
         ContactStage::Prediction,
         ContactStage::Iteration,
-        ContactStage::Final,
     ] {
         for fraction in [Real::NAN, Real::INFINITY, -0.1, 1.1] {
             let mut cloth = cloth();

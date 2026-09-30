@@ -52,14 +52,29 @@ pub enum ImplicitExecution {
     Parallel4,
 }
 
-/// Isotropic thin-shell material in metres and pascals. Areal mass and velocity
+/// Thin-shell material in metres and pascals. Areal mass and velocity
 /// damping remain in `ClothMaterial`. Collision thickness is configured
 /// separately through `ClothContactSettings`.
+///
+/// The membrane is isotropic Neo-Hookean in `youngs_modulus` and
+/// `poisson_ratio`. Woven cloth is stiffer along its threads than on the bias:
+/// `warp_stiffness` and `weft_stiffness` add a stretch energy
+/// `k / 2 (|F a| - 1)^2` per unit volume along each triangle's material axis
+/// and across it, for triangles whose mesh carries material axes
+/// (`ClothMesh::set_material_axes`); triangles without an axis, and the
+/// defaults of zero, keep the isotropic behavior.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShellMaterial {
     pub youngs_modulus: Real,
     pub poisson_ratio: Real,
     pub thickness: Real,
+    /// Extra stiffness along the material axis (warp), in pascals.
+    pub warp_stiffness: Real,
+    /// Extra stiffness across the material axis (weft), in pascals.
+    pub weft_stiffness: Real,
+    /// Spring stiffness of the mesh's stitches (`ClothMesh::stitches`), in
+    /// newtons per metre.
+    pub stitch_stiffness: Real,
 }
 
 impl Default for ShellMaterial {
@@ -68,6 +83,9 @@ impl Default for ShellMaterial {
             youngs_modulus: 821000.0,
             poisson_ratio: 0.243,
             thickness: 0.000318,
+            warp_stiffness: 0.0,
+            weft_stiffness: 0.0,
+            stitch_stiffness: 500.0,
         }
     }
 }
@@ -163,6 +181,18 @@ impl ImplicitSettings {
             if !value.is_finite() || value <= 0.0 {
                 return Err(ClothError::InvalidParameter("implicit solver parameter"));
             }
+        }
+        if [
+            self.material.warp_stiffness,
+            self.material.weft_stiffness,
+            self.material.stitch_stiffness,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v < 0.0)
+        {
+            return Err(ClothError::InvalidParameter(
+                "directional stiffness must be finite and non-negative",
+            ));
         }
         if !self.material.poisson_ratio.is_finite()
             || self.material.poisson_ratio <= -1.0

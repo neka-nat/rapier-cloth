@@ -34,6 +34,7 @@ fn triangle_element(
     dofs: &[Option<usize>],
     mu: Real,
     lambda: Real,
+    fiber_stiffness: (Real, Real),
     blocks: &mut [Block],
 ) -> Result<MembraneElement, ClothError> {
     let mut f = [Vec3::ZERO; 2];
@@ -42,13 +43,30 @@ fn triangle_element(
             f[c] += x[tri.ids[k]] * tri.b[k][c];
         }
     }
-    let (e, g, _) = membrane(f, mu, lambda, false).ok_or(ClothError::DegenerateConstraint)?;
+    let (mu, lambda) = (mu * tri.scale, lambda * tri.scale);
+    let fiber_stiffness = (fiber_stiffness.0 * tri.scale, fiber_stiffness.1 * tri.scale);
+    let (mut e, mut g, _) =
+        membrane(f, mu, lambda, false).ok_or(ClothError::DegenerateConstraint)?;
+    let fiber = tri.fiber.filter(|_| fiber_stiffness != (0.0, 0.0));
+    if let Some(a) = fiber {
+        let (fe, fg, _) =
+            super::fibers(f, a, fiber_stiffness, false).ok_or(ClothError::DegenerateConstraint)?;
+        e += fe;
+        g[0] += fg[0];
+        g[1] += fg[1];
+    }
     let energy = e * tri.volume;
     let gradient = std::array::from_fn(|k| (g[0] * tri.b[k][0] + g[1] * tri.b[k][1]) * tri.volume);
     if blocks.is_empty() {
         return Ok(Element { energy, gradient });
     }
-    let hp = membrane::projected_hessian(f, mu, lambda).ok_or(ClothError::DegenerateConstraint)?;
+    let mut hp =
+        membrane::projected_hessian(f, mu, lambda).ok_or(ClothError::DegenerateConstraint)?;
+    if let Some(a) = fiber {
+        hp += super::fibers(f, a, fiber_stiffness, true)
+            .ok_or(ClothError::DegenerateConstraint)?
+            .2;
+    }
     let mut index = 0;
     for i in 0..3 {
         for j in 0..3 {
@@ -174,6 +192,7 @@ fn evaluate(
                 &model.dofs,
                 model.mu,
                 model.lambda,
+                model.fibers,
                 mine,
             ));
         }

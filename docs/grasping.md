@@ -123,3 +123,23 @@ For explicit anchors, use `attach_surface(SurfaceAttachmentDesc, ...)` with
 Run the [surface_grasp example](../examples/surface_grasp.rs) for a complete query,
 weighted lift and release. Full towel-folding quality and CPU performance remain
 unqualified; these APIs provide selection and commanded grasp constraints.
+
+## Handover
+
+A gripper can take over a grasp another gripper holds without a release in
+between: `RapierClothWorld::transfer_attachment` re-anchors the attachment's
+vertices to the new body at their current positions and keeps the compliance,
+so the cloth does not move at the handover and follows the new body from the
+next step. Two grippers holding disjoint vertex sets at the same time remain
+possible with separate attachments; one vertex cannot belong to two attachments.
+
+## Soft release
+
+A grasp can be loosened before it opens: `RapierClothWorld::set_attachment_compliance`
+raises the compliance of a held attachment in place. The anchors stay, so the
+held vertices keep their targets and hang on weaker springs from the next step
+(the implicit solver holds a compliant attachment with a spring of stiffness
+one over the compliance; XPBD with a soft target). Softening tenfold per step
+for a few steps before `release` lets a taut flap relax instead of snapping
+free. The T-shirt task's `--hem-release-ramp` does the same by re-anchoring,
+see [garments](garments.md).

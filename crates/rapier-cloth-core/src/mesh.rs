@@ -7,12 +7,32 @@ use std::sync::{Arc, OnceLock};
 pub struct Edge {
     pub vertices: [u32; 2],
     pub rest_length: Real,
+    /// Multiplier on this edge's XPBD stretch compliance (1 by default); set
+    /// with [`ClothMesh::scale_edge_compliance`]. Ignored with zero
+    /// compliance, where every edge is inextensible.
+    pub compliance_scale: Real,
 }
 
 #[derive(Debug, Clone)]
 pub struct Hinge {
     pub vertices: [u32; 4],
     pub rest_angle: Real,
+    /// Multiplier on the bending stiffness of this hinge (1 by default), for
+    /// example a stitched seam; set with [`ClothMesh::scale_hinge_stiffness`].
+    pub stiffness_scale: Real,
+}
+
+/// A thread between two vertices of one cloth, for example along a seam
+/// between separately meshed panels. The solvers keep the vertices
+/// `rest_length` apart: XPBD as a distance constraint with
+/// `ClothMaterial::stitch_compliance`, the implicit solver as a spring of
+/// `ShellMaterial::stitch_stiffness`. Stitched vertices stay distinct for
+/// collision, so a rest length of at least the contact thickness keeps the two
+/// panels' seam edges apart the way a seam allowance does.
+#[derive(Debug, Clone)]
+pub struct Stitch {
+    pub vertices: [u32; 2],
+    pub rest_length: Real,
 }
 
 /// Validated, immutable simulation topology. No implicit vertex welding.
@@ -26,6 +46,9 @@ pub struct ClothMesh {
     vertex_faces: Vec<u32>,
     edge_opposites: Vec<u32>,
     area: Real,
+    material_axes: Option<Vec<Vec3>>,
+    triangle_stiffness_scales: Option<Vec<Real>>,
+    stitches: Vec<Stitch>,
     collision_topology: OnceLock<Arc<CollisionTopology>>,
 }
 
@@ -111,6 +134,7 @@ impl ClothMesh {
             edges.push(Edge {
                 vertices,
                 rest_length,
+                compliance_scale: 1.0,
             });
             edge_opposites.push(faces[0][2]);
             if faces.len() == 2 {
@@ -120,6 +144,7 @@ impl ClothMesh {
                 hinges.push(Hinge {
                     vertices: ids,
                     rest_angle,
+                    stiffness_scale: 1.0,
                 });
             }
         }
@@ -132,8 +157,196 @@ impl ClothMesh {
             vertex_faces,
             edge_opposites,
             area,
+            material_axes: None,
+            triangle_stiffness_scales: None,
+            stitches: Vec::new(),
             collision_topology: OnceLock::new(),
         })
+    }
+
+    /// Adds stitches; each joins two distinct vertices with a finite, positive
+    /// rest length, and no pair is stitched twice.
+    pub fn add_stitches(&mut self, stitches: Vec<Stitch>) -> Result<(), ClothError> {
+        let count = self.positions.len() as u32;
+        let mut seen: BTreeSet<[u32; 2]> = self
+            .stitches
+            .iter()
+            .map(|s| {
+                [
+                    s.vertices[0].min(s.vertices[1]),
+                    s.vertices[0].max(s.vertices[1]),
+                ]
+            })
+            .collect();
+        for stitch in &stitches {
+            let [a, b] = stitch.vertices;
+            if a >= count || b >= count || a == b {
+                return Err(ClothError::InvalidParameter(
+                    "stitch must join two distinct vertices of the mesh",
+                ));
+            }
+            if !stitch.rest_length.is_finite() || stitch.rest_length <= 0.0 {
+                return Err(ClothError::InvalidParameter(
+                    "stitch rest length must be finite and positive",
+                ));
+            }
+            if !seen.insert([a.min(b), a.max(b)]) {
+                return Err(ClothError::InvalidParameter("duplicate stitch"));
+            }
+        }
+        self.stitches.extend(stitches);
+        Ok(())
+    }
+    pub fn stitches(&self) -> &[Stitch] {
+        &self.stitches
+    }
+
+    /// Multiplies the XPBD stretch compliance of each edge by `scale(edge)`,
+    /// which must be finite and positive: the discrete counterpart of a
+    /// direction- or region-dependent material. The implicit solver's membrane
+    /// uses triangles instead; see [`ClothMesh::scale_triangle_stiffness`].
+    pub fn scale_edge_compliance(
+        &mut self,
+        scale: impl Fn(&Edge) -> Real,
+    ) -> Result<(), ClothError> {
+        let scales: Vec<Real> = self.edges.iter().map(&scale).collect();
+        if scales.iter().any(|s| !s.is_finite() || *s <= 0.0) {
+            return Err(ClothError::InvalidParameter(
+                "edge compliance scale must be finite and positive",
+            ));
+        }
+        for (edge, s) in self.edges.iter_mut().zip(scales) {
+            edge.compliance_scale *= s;
+        }
+        Ok(())
+    }
+
+    /// Scales each edge's XPBD compliance by its direction relative to the
+    /// material axes: `along` for an edge parallel to the axis of an incident
+    /// triangle, `across` for one perpendicular to it, blended by the squared
+    /// cosine in between (so bias edges get the mean). Requires material axes.
+    pub fn scale_edge_compliance_by_material_axes(
+        &mut self,
+        along: Real,
+        across: Real,
+    ) -> Result<(), ClothError> {
+        let axes = self
+            .material_axes
+            .clone()
+            .ok_or(ClothError::InvalidParameter("mesh has no material axes"))?;
+        if [along, across].iter().any(|v| !v.is_finite() || *v <= 0.0) {
+            return Err(ClothError::InvalidParameter(
+                "edge compliance scale must be finite and positive",
+            ));
+        }
+        // Axis of the first face of each edge, in edge order.
+        let mut edge_axis: BTreeMap<[u32; 2], Vec3> = BTreeMap::new();
+        for (k, t) in self.triangles.iter().enumerate() {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let key = [a.min(b), a.max(b)];
+                edge_axis.entry(key).or_insert(axes[k]);
+            }
+        }
+        let scales: Vec<Real> = self
+            .edges
+            .iter()
+            .map(|edge| {
+                let d = (self.positions[edge.vertices[1] as usize]
+                    - self.positions[edge.vertices[0] as usize])
+                    .normalize_or_zero();
+                let mut key = edge.vertices;
+                key.sort_unstable();
+                let c2 = edge_axis[&key].dot(d).powi(2);
+                along * c2 + across * (1.0 - c2)
+            })
+            .collect();
+        for (edge, s) in self.edges.iter_mut().zip(scales) {
+            edge.compliance_scale *= s;
+        }
+        Ok(())
+    }
+
+    /// Multiplies the membrane stiffness of each triangle (the implicit
+    /// solver's Young's modulus and directional stiffness) by
+    /// `scale(index, triangle)`, which must be finite and positive.
+    pub fn scale_triangle_stiffness(
+        &mut self,
+        scale: impl Fn(usize, &[u32; 3]) -> Real,
+    ) -> Result<(), ClothError> {
+        let scales: Vec<Real> = self
+            .triangles
+            .iter()
+            .enumerate()
+            .map(|(k, t)| scale(k, t))
+            .collect();
+        if scales.iter().any(|s| !s.is_finite() || *s <= 0.0) {
+            return Err(ClothError::InvalidParameter(
+                "triangle stiffness scale must be finite and positive",
+            ));
+        }
+        let current = self
+            .triangle_stiffness_scales
+            .get_or_insert_with(|| vec![1.0; scales.len()]);
+        for (c, s) in current.iter_mut().zip(scales) {
+            *c *= s;
+        }
+        Ok(())
+    }
+    /// Per-triangle membrane stiffness multipliers, if any were set.
+    pub fn triangle_stiffness_scales(&self) -> Option<&[Real]> {
+        self.triangle_stiffness_scales.as_deref()
+    }
+
+    /// Sets one material (warp) direction per triangle, in rest space; each
+    /// must be finite and non-zero, and is stored normalized. The implicit
+    /// solver projects it into the triangle's rest plane and applies
+    /// `ShellMaterial::warp_stiffness` along it and `weft_stiffness` across
+    /// it. `None` removes the axes.
+    pub fn set_material_axes(&mut self, axes: Option<Vec<Vec3>>) -> Result<(), ClothError> {
+        let Some(axes) = axes else {
+            self.material_axes = None;
+            return Ok(());
+        };
+        if axes.len() != self.triangles.len() {
+            return Err(ClothError::InvalidParameter(
+                "one material axis per triangle",
+            ));
+        }
+        let mut normalized = Vec::with_capacity(axes.len());
+        for axis in axes {
+            let length = axis.length();
+            if !axis.is_finite() || length <= Real::MIN_POSITIVE {
+                return Err(ClothError::InvalidParameter(
+                    "material axes must be finite and non-zero",
+                ));
+            }
+            normalized.push(axis / length);
+        }
+        self.material_axes = Some(normalized);
+        Ok(())
+    }
+    /// The material axes set with [`ClothMesh::set_material_axes`].
+    pub fn material_axes(&self) -> Option<&[Vec3]> {
+        self.material_axes.as_deref()
+    }
+
+    /// Multiplies the bending stiffness of each hinge by `scale(hinge)`, which
+    /// must be finite and positive. The implicit solver scales the hinge's
+    /// bending rigidity; XPBD divides the hinge's bend compliance.
+    pub fn scale_hinge_stiffness(
+        &mut self,
+        scale: impl Fn(&Hinge) -> Real,
+    ) -> Result<(), ClothError> {
+        let scales: Vec<Real> = self.hinges.iter().map(&scale).collect();
+        if scales.iter().any(|s| !s.is_finite() || *s <= 0.0) {
+            return Err(ClothError::InvalidParameter(
+                "hinge stiffness scale must be finite and positive",
+            ));
+        }
+        for (hinge, s) in self.hinges.iter_mut().zip(scales) {
+            hinge.stiffness_scale *= s;
+        }
+        Ok(())
     }
 
     pub fn rest_positions(&self) -> &[Vec3] {

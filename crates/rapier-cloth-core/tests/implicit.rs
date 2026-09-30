@@ -188,7 +188,7 @@ fn invalid_settings_and_unsupported_targets_leave_state_unchanged() {
         &[Target {
             particle: 1,
             position: p,
-            compliance: 0.001,
+            compliance: -0.001,
         }],
         &mut NoContacts,
     );
@@ -436,5 +436,77 @@ fn a_pinned_layer_lifting_resting_cloth_seeds_by_pushing_it_ahead() {
             p.y - below.y > 0.0009,
             "free vertex {i} at {p:?} was not carried above {below:?}"
         );
+    }
+}
+
+#[test]
+fn compliant_targets_are_springs_of_stiffness_one_over_compliance() {
+    // Every vertex hangs from a spring anchored at its rest position. Only
+    // springs and gravity act on the sheet as a whole, so at rest the spring
+    // forces sum to the weight, and each spring carries about its vertex's
+    // weight (the membrane only redistributes the small differences).
+    let mut c = cloth();
+    // A static balance check needs a tighter stop than the default 1 mm/s.
+    c.set_implicit_solver(Some(ImplicitSettings {
+        velocity_tolerance: 1.0e-7,
+        ..Default::default()
+    }))
+    .unwrap();
+    let compliance = 0.02;
+    let gravity = Vec3::new(0.0, -9.81, 0.0);
+    let rest = c.positions().to_vec();
+    let targets: Vec<Target> = rest
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| Target {
+            particle: i as u32,
+            position: p,
+            compliance,
+        })
+        .collect();
+    let mut solver = Solver::new();
+    let mut report = None;
+    for _ in 0..300 {
+        report = Some(
+            solver
+                .step_with_contacts(&mut c, 0.1, gravity, &settings(), &targets, &mut NoContacts)
+                .unwrap(),
+        );
+    }
+    assert!(report.unwrap().implicit.is_some_and(|o| o.converged));
+    let masses = c.masses();
+    let total_weight: Real = masses.iter().sum::<Real>() * 9.81;
+    let mut total_spring = 0.0;
+    for (i, p) in c.positions().iter().enumerate() {
+        let sag = rest[i] - *p;
+        assert!(sag.x.abs() < 1e-5 && sag.z.abs() < 1e-5, "{sag:?}");
+        let expected = masses[i] * 9.81 * compliance;
+        assert!(
+            sag.y > 0.5 * expected && sag.y < 1.5 * expected,
+            "vertex {i}: sag {} expected about {expected}",
+            sag.y
+        );
+        total_spring += sag.y / compliance;
+    }
+    assert!(
+        (total_spring - total_weight).abs() < 1e-4 * total_weight,
+        "springs carry {total_spring} N, weight {total_weight} N"
+    );
+    // Compliance is validated, and a compliant target keeps the state intact
+    // when rejected.
+    let before = c.clone();
+    for compliance in [-1.0, Real::NAN, Real::INFINITY] {
+        let bad = [Target {
+            particle: 0,
+            position: rest[0],
+            compliance,
+        }];
+        let result =
+            solver.step_with_contacts(&mut c, 0.1, gravity, &settings(), &bad, &mut NoContacts);
+        assert!(
+            matches!(result, Err(ClothError::InvalidParameter(_))),
+            "{result:?}"
+        );
+        unchanged(&c, &before);
     }
 }

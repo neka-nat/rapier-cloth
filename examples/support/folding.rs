@@ -363,6 +363,7 @@ impl FoldingWorld {
                 damping: real(config.damping),
                 friction: real(config.kinetic_friction),
                 contact_radius: real(config.legacy_contact_radius),
+                stitch_compliance: 0.0,
             },
         )?);
         Ok(Self {

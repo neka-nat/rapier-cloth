@@ -13,13 +13,14 @@ mod folding_oracle;
 mod garment_task;
 
 use garment_task::{ShirtTask, ShirtTaskConfig};
-use rapier_cloth::core::garment::{GarmentLayers, TShirtPattern};
+use rapier_cloth::core::garment::{GarmentLayers, NeckShape, SeamJoin, TShirtPattern};
 use rapier_cloth::{ImplicitCapPolicy, ImplicitExecution};
 use std::io::Write;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = ShirtTaskConfig::default();
     let mut output = None;
+    let mut usd_path = None;
     let mut summary_path = None;
     let mut steps = None;
     let mut args = std::env::args().skip(1);
@@ -34,6 +35,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "--spacing" => config.pattern.spacing = value()?.parse()?,
+            "--neck" => {
+                config.pattern.neck = match value()?.as_str() {
+                    "notch" => NeckShape::Notch,
+                    "round" => NeckShape::Round,
+                    other => return Err(format!("unknown neck shape {other}").into()),
+                }
+            }
+            "--seam-stiffness" => config.pattern.seam_stiffness = value()?.parse()?,
+            "--warp" => config.warp_stiffness = value()?.parse()?,
+            "--weft" => config.weft_stiffness = value()?.parse()?,
             "--workers" => {
                 config.execution = match value()?.as_str() {
                     "1" => ImplicitExecution::Serial,
@@ -60,20 +71,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--band" => config.band = value()?.parse()?,
             "--h" => config.h = value()?.parse()?,
             "--hem-inset" => config.hem_inset = value()?.parse()?,
+            "--hem-compliance" => config.hem_compliance = value()?.parse()?,
+            "--final-settle" => config.final_settle = value()?.parse()?,
             "--hem-arc-height" => config.hem_arc_height = value()?.parse()?,
             "--release-height" => config.release_height = value()?.parse()?,
             "--max-iterations" => config.max_iterations = value()?.parse()?,
             "--hem-fold" => config.hem_fold = value()?.parse()?,
+            "--sleeve-dwell" => config.sleeve_dwell = value()?.parse()?,
+            "--hem-dwell" => config.hem_dwell = value()?.parse()?,
+            "--hem-release-ramp" => config.hem_release_ramp = value()?.parse()?,
+            "--seams" => {
+                config.pattern.seams = match value()?.as_str() {
+                    "shared" => SeamJoin::Shared,
+                    "stitched" => SeamJoin::Stitched,
+                    other => return Err(format!("unknown seam join {other}").into()),
+                }
+            }
+            "--stitch-length" => config.pattern.stitch_length = value()?.parse()?,
+            "--stitch-stiffness" => config.stitch_stiffness = value()?.parse()?,
+            "--sleeve-stiffness" => config.pattern.sleeve_stiffness = value()?.parse()?,
             "--patch-radius" => config.patch_radius = value()?.parse()?,
             "--steps" => steps = Some(value()?.parse::<usize>()?),
             "--output" => output = Some(value()?),
+            "--usd" => usd_path = Some(value()?),
             "--summary" => summary_path = Some(value()?),
             "--help" | "-h" => {
                 println!(
-                    "fold_shirt_implicit [--layers single|sewn] [--spacing m] [--workers 1|4] \
+                    "fold_shirt_implicit [--layers single|sewn] [--spacing m] [--neck notch|round] [--seam-stiffness k] [--warp Pa] [--weft Pa] [--workers 1|4] \
                      [--cap-policy strict|approximate] [--friction mu] [--patch-radius m] [--pinch top|all] \
-                     [--sleeve-fold s] [--hem-fold s] [--band m] [--h s] [--max-iterations n] [--hem-inset m] [--hem-arc-height k] [--release-height m] \
-                     [--steps n] [--output recording.json] [--summary summary.json]"
+                     [--sleeve-fold s] [--hem-fold s] [--sleeve-dwell s] [--hem-dwell s] [--hem-release-ramp n] [--seams shared|stitched] [--stitch-length m] [--stitch-stiffness N/m] [--sleeve-stiffness k] [--final-settle s] [--band m] [--h s] [--max-iterations n] [--hem-inset m] [--hem-compliance m/N] [--hem-arc-height k] [--release-height m] \
+                     [--steps n] [--output recording.json] [--usd stage.usda] [--summary summary.json]"
                 );
                 return Ok(());
             }
@@ -134,6 +161,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::to_writer(&mut file, &recording)?;
         file.flush()?;
         eprintln!("recording written to {path}");
+    }
+    if let Some(path) = usd_path {
+        task.write_usda(std::path::Path::new(&path))?;
+        eprintln!("USD stage written to {path}");
     }
     if let Some(error) = failure {
         return Err(error.into());

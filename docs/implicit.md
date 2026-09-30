@@ -50,7 +50,12 @@ using the witnesses of the obstacle's physical sweep
 is certified. Pinned cloth that reaches resting free cloth within the step (a
 pinch through the layers of a garment lifting them) is handled the same way: the
 self-contacts that limited the sweep serve as witnesses, and the free cloth they
-met is pushed ahead of the pinned vertices. A sweep certifies the path down to a
+met is pushed ahead of the pinned vertices. Inside a step, the line search does
+not let a trial drive the smallest contact gap below one ten-thousandth of the
+band while it is shrinking, and a contact that stays jammed below one thousandth
+of the band doubles the barrier stiffness for the rest of the step (up to ten
+thousand times); both keep the barrier Hessian within the range the sparse
+factorization can handle. A sweep certifies the path down to a
 fraction of the contact separation, so contacts found at the certified positions
 that still sit inside the separation are pushed out the same way before Newton
 starts. A box pushing a
@@ -179,9 +184,22 @@ positive clearance; this solver does not recover initially overlapping layers.
 Enable continuous checks for each active collision mode. Existing cumulative
 candidate, retained-contact and CCD limits apply to the whole physical step.
 
+`ShellMaterial::warp_stiffness` and `weft_stiffness` add a stretch energy
+`k / 2 (|F a| - 1)^2` per unit volume along each triangle's material axis
+(`ClothMesh::set_material_axes`, projected into the rest plane) and across it,
+with a positive semidefinite Hessian; triangles without an axis and the
+defaults of zero keep the isotropic Neo-Hookean membrane. Hinges scaled with
+`ClothMesh::scale_hinge_stiffness` bend accordingly, triangles scaled with
+`ClothMesh::scale_triangle_stiffness` stretch accordingly, and the mesh's
+stitches (`ClothMesh::stitches`) are springs of `ShellMaterial::stitch_stiffness`
+between their two vertices with a positive semidefinite Hessian.
+
 Friction uses `kinetic_friction` and a smooth transition velocity, default
 0.001 m/s. It permits slow creep under tangential load and does not implement
-exact static sticking or use `static_friction`. Hard particle pins and hard
+exact static sticking or use `static_friction`. Compliant particle targets
+(`Target::compliance` > 0, or an attachment with positive compliance) hold their
+particle with a spring of stiffness `1 / compliance` newtons per metre instead of
+fixing it; weighted surface targets remain unsupported. Hard particle pins and hard
 vertex attachments are supported; compliant targets and weighted surface
 attachments currently return an error. Coupling remains one-way.
 

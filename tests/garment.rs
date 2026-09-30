@@ -6,7 +6,7 @@ mod oracle;
 mod support;
 
 use rapier_cloth::Real;
-use rapier_cloth::core::garment::{GarmentLayers, Landmark, Layer, Side, TShirtPattern};
+use rapier_cloth::core::garment::{GarmentLayers, Landmark, Layer, SeamJoin, Side, TShirtPattern};
 use rapier_cloth::{rapier::prelude::*, *};
 use support::TestWorld;
 
@@ -214,4 +214,46 @@ fn a_sewn_shirt_keeps_its_layers_apart_on_the_table() {
         audit.max_separation_deficit
     );
     assert!(contacts > 0, "stacked layers report self-contacts");
+}
+
+#[test]
+fn a_stitched_shirt_rests_with_its_panels_threaded_together() {
+    let mut world = table_world();
+    // Stitches as long as the layer gap start slack-free.
+    let pattern = TShirtPattern {
+        spacing: 0.05,
+        seams: SeamJoin::Stitched,
+        stitch_length: 2.0 * THICKNESS,
+        ..TShirtPattern::default()
+    };
+    let (handle, garment) = add_shirt(&mut world, pattern);
+    assert!(!garment.stitches().is_empty());
+    for step in 0..10 {
+        let report = world
+            .tick()
+            .unwrap_or_else(|e| panic!("step {step}: {e:?}"));
+        let (_, cloth_report) = &report.cloths[0];
+        assert!(
+            cloth_report.implicit.is_some_and(|o| o.converged),
+            "step {step}: {:?}",
+            cloth_report.implicit
+        );
+        assert!(cloth_report.max_stretch < 1.01, "step {step}");
+    }
+    let cloth = world.cloth.cloth(handle).unwrap();
+    let positions = cloth.positions();
+    assert!(max_speed(cloth) < 0.005, "max speed {}", max_speed(cloth));
+    // Every stitch stays near its rest length: the panels neither drift apart
+    // nor cross (the barrier keeps them at least a thickness apart).
+    for stitch in garment.stitches() {
+        let [f, b] = stitch.vertices;
+        let length = positions[f as usize].distance(positions[b as usize]);
+        assert!(
+            length > 0.8 * THICKNESS && length < 2.5 * stitch.rest_length,
+            "stitch {:?} is {length} long",
+            stitch.vertices
+        );
+    }
+    let audit = oracle::audit_surface(&points(positions), garment.mesh().triangles(), THICKNESS);
+    assert_eq!(audit.crossing_pairs, 0);
 }

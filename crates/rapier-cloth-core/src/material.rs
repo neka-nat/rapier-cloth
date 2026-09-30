@@ -12,6 +12,9 @@ pub struct ClothMaterial {
     pub friction: Real,
     /// Numerical particle radius; need not equal physical cloth thickness.
     pub contact_radius: Real,
+    /// XPBD compliance of the mesh's stitches (`ClothMesh::stitches`); zero
+    /// keeps them at their rest length.
+    pub stitch_compliance: Real,
 }
 
 impl Default for ClothMaterial {
@@ -23,6 +26,7 @@ impl Default for ClothMaterial {
             damping: 0.1,
             friction: 0.5,
             contact_radius: 0.005,
+            stitch_compliance: 0.0,
         }
     }
 }

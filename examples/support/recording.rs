@@ -196,6 +196,7 @@ pub fn simulate(config: Config) -> Result<(Recording, Summary), Box<dyn std::err
             damping: config.damping,
             friction: config.friction,
             contact_radius: config.contact_radius,
+            stitch_compliance: 0.0,
         },
     )?);
     let precision = if cfg!(feature = "f64") { "f64" } else { "f32" }.to_string();

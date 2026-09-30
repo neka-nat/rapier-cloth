@@ -1,7 +1,9 @@
 use crate::attachment::{Attachment, Attachments};
 use crate::rapier::prelude::*;
 use crate::rapier_collision::RapierContacts;
-use crate::{AttachmentDesc, AttachmentEvent, AttachmentEventKind, AttachmentHandle, Target};
+use crate::{
+    AttachmentDesc, AttachmentEvent, AttachmentEventKind, AttachmentHandle, AttachmentPoint, Target,
+};
 use crate::{
     Cloth, ClothError, ClothHandle, ClothSet, IntegrationError, RapierScene, Real, Solver,
     SolverSettings, WorldId, WorldStepReport,
@@ -192,6 +194,78 @@ impl RapierClothWorld {
         }
         self.cloths.get_mut(desc.cloth)?.clear_contact_history();
         Ok(self.attachments.insert(Attachment::Vertices(desc)))
+    }
+    /// Hands a vertex attachment over to another body without releasing it:
+    /// every point keeps its particle and its current world position, its
+    /// anchor is re-expressed in the new body's frame, and the compliance is
+    /// kept. `excluded_colliders` replaces the exclusions and must belong to
+    /// the new body. The next step follows the new body.
+    pub fn transfer_attachment(
+        &mut self,
+        handle: AttachmentHandle,
+        body: RigidBodyHandle,
+        excluded_colliders: Vec<ColliderHandle>,
+        bodies: &RigidBodySet,
+        colliders: &ColliderSet,
+    ) -> Result<(), IntegrationError> {
+        let desc = self.attachment(handle)?.clone();
+        let cloth = self.cloths.get(desc.cloth)?;
+        let target = bodies
+            .get(body)
+            .ok_or(IntegrationError::InvalidAttachment("body handle"))?;
+        if target.is_dynamic() || !target.is_enabled() {
+            return Err(IntegrationError::InvalidAttachment(
+                "body must be enabled and fixed or kinematic",
+            ));
+        }
+        for handle in &excluded_colliders {
+            if colliders
+                .get(*handle)
+                .is_none_or(|c| c.parent() != Some(body))
+            {
+                return Err(IntegrationError::InvalidAttachment(
+                    "excluded collider must belong to attached body",
+                ));
+            }
+        }
+        let pose = *target.position();
+        let points = desc
+            .points
+            .iter()
+            .map(|p| AttachmentPoint {
+                particle: p.particle,
+                local_anchor: pose.inverse_transform_point(cloth.positions()[p.particle as usize]),
+            })
+            .collect();
+        if let Some(Attachment::Vertices(a)) = self.attachments.get_mut(handle) {
+            a.body = body;
+            a.points = points;
+            a.excluded_colliders = excluded_colliders;
+        }
+        self.cloths.get_mut(desc.cloth)?.clear_contact_history();
+        Ok(())
+    }
+    /// Changes the compliance of a vertex attachment in place: the body and
+    /// the anchors stay, so the held vertices keep their targets and only the
+    /// stiffness of the hold (`1 / compliance`) changes from the next step.
+    /// Raising it over a few steps before `release` is a soft release.
+    pub fn set_attachment_compliance(
+        &mut self,
+        handle: AttachmentHandle,
+        compliance: Real,
+    ) -> Result<(), IntegrationError> {
+        if !compliance.is_finite() || compliance < 0.0 {
+            return Err(IntegrationError::InvalidAttachment("compliance"));
+        }
+        match self.attachments.get_mut(handle) {
+            Some(Attachment::Vertices(a)) => {
+                a.compliance = compliance;
+                Ok(())
+            }
+            _ => Err(IntegrationError::InvalidAttachment(
+                "stale, foreign or surface attachment handle",
+            )),
+        }
     }
     pub fn attachment(
         &self,

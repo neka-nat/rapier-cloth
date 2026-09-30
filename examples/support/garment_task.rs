@@ -28,11 +28,22 @@ pub struct ShirtTaskConfig {
     pub cap_policy: ImplicitCapPolicy,
     /// Newton iteration cap per step (`ImplicitSettings::max_iterations`).
     pub max_iterations: usize,
+    /// Extra membrane stiffness along the garment's length (warp) and across
+    /// it (weft), in pascals; zero keeps the isotropic shell.
+    pub warp_stiffness: Real,
+    pub weft_stiffness: Real,
+    /// Spring stiffness of stitched seams (N/m).
+    pub stitch_stiffness: Real,
     /// Radius of the pinched patch around a landmark; at least one and a half
     /// cells, so a coarse mesh still holds the landmark's neighbours.
     pub patch_radius: Real,
     /// Which layers a gripper closes on.
     pub pinch: Pinch,
+    /// Compliance (m/N) of the hem grasps: 0 pins the patch rigidly, a
+    /// positive value holds it with springs of stiffness 1/compliance, so the
+    /// flap sagging between the two grippers extends the springs instead of
+    /// stretching the hem.
+    pub hem_compliance: Real,
     /// How far each hem gripper moves towards the other at mid-flight, so the
     /// sagging flap between them is not stretched across.
     pub hem_inset: Real,
@@ -44,8 +55,16 @@ pub struct ShirtTaskConfig {
     pub release_height: Real,
     pub settle: Real,
     pub sleeve_fold: Real,
+    /// Hold at the end of the sleeve turn before releasing, so the sleeve is
+    /// at rest when it is let go.
+    pub sleeve_dwell: Real,
     pub sleeve_settle: Real,
     pub hem_fold: Real,
+    /// Hold at the end of the hem turn before releasing.
+    pub hem_dwell: Real,
+    /// Steps over which a compliant hem grasp softens tenfold per step before
+    /// it is released, so the flap descends instead of dropping.
+    pub hem_release_ramp: usize,
     pub final_settle: Real,
 }
 
@@ -61,15 +80,22 @@ impl Default for ShirtTaskConfig {
             execution: ImplicitExecution::Serial,
             cap_policy: ImplicitCapPolicy::Strict,
             max_iterations: 128,
+            warp_stiffness: 0.0,
+            weft_stiffness: 0.0,
+            stitch_stiffness: 500.0,
             patch_radius: 0.04,
             pinch: Pinch::AllLayers,
-            hem_inset: 0.005,
+            hem_compliance: 0.02,
+            hem_inset: 0.0,
             hem_arc_height: 1.0,
             release_height: 0.05,
             settle: 0.5,
             sleeve_fold: 3.0,
+            sleeve_dwell: 0.0,
             sleeve_settle: 1.5,
             hem_fold: 12.0,
+            hem_dwell: 0.0,
+            hem_release_ramp: 0,
             final_settle: 2.0,
         }
     }
@@ -90,8 +116,11 @@ pub enum Pinch {
 #[derive(Debug, Clone, Copy)]
 pub struct Schedule {
     pub sleeve_grasp: usize,
+    /// End of the sleeve turn; the gripper holds still until the release.
+    pub sleeve_turn_end: usize,
     pub sleeve_release: usize,
     pub hem_grasp: usize,
+    pub hem_turn_end: usize,
     pub hem_release: usize,
     pub end: usize,
 }
@@ -99,14 +128,19 @@ pub struct Schedule {
 impl Schedule {
     fn new(config: &ShirtTaskConfig) -> Self {
         let steps = |seconds: Real| (seconds / config.h).round().max(1.0) as usize;
+        let dwell = |seconds: Real| (seconds / config.h).round().max(0.0) as usize;
         let sleeve_grasp = steps(config.settle);
-        let sleeve_release = sleeve_grasp + steps(config.sleeve_fold);
+        let sleeve_turn_end = sleeve_grasp + steps(config.sleeve_fold);
+        let sleeve_release = sleeve_turn_end + dwell(config.sleeve_dwell);
         let hem_grasp = sleeve_release + steps(config.sleeve_settle);
-        let hem_release = hem_grasp + steps(config.hem_fold);
+        let hem_turn_end = hem_grasp + steps(config.hem_fold);
+        let hem_release = hem_turn_end + dwell(config.hem_dwell);
         Self {
             sleeve_grasp,
+            sleeve_turn_end,
             sleeve_release,
             hem_grasp,
+            hem_turn_end,
             hem_release,
             end: hem_release + steps(config.final_settle),
         }
@@ -288,6 +322,12 @@ impl ShirtTask {
                 execution: config.execution,
                 cap_policy: config.cap_policy,
                 max_iterations: config.max_iterations,
+                material: ShellMaterial {
+                    warp_stiffness: config.warp_stiffness,
+                    weft_stiffness: config.weft_stiffness,
+                    stitch_stiffness: config.stitch_stiffness,
+                    ..Default::default()
+                },
                 ..Default::default()
             }))
             .map_err(|e| e.to_string())?;
@@ -390,10 +430,11 @@ impl ShirtTask {
         if next <= s.sleeve_release {
             // Turn about the body's side (axis z through sign * half width).
             // The turn stops short of the plane by the release height, so the
-            // fabric between the fold line and the patch keeps its length.
+            // fabric between the fold line and the patch keeps its length;
+            // after the turn the gripper holds still until the release.
             let pivot = Vec3::new(sign * self.body_half_width(), cuff_rest.y, cuff_rest.z);
             let theta = self.turn_angle(cuff_rest, pivot)
-                * smoothstep(ratio(s.sleeve_grasp, s.sleeve_release));
+                * smoothstep(ratio(s.sleeve_grasp, s.sleeve_turn_end));
             // The patch rises first: a left sleeve (at -x) turns about -z, a
             // right sleeve about +z.
             let rotation = Rotation::from_axis_angle(Vec3::Z, sign * theta);
@@ -413,7 +454,7 @@ impl ShirtTask {
             // stopping short of the plane by the release height.
             let pivot = Vec3::new(hem_rest.x, hem_rest.y, 0.0);
             let theta =
-                self.turn_angle(hem_rest, pivot) * smoothstep(ratio(s.hem_grasp, s.hem_release));
+                self.turn_angle(hem_rest, pivot) * smoothstep(ratio(s.hem_grasp, s.hem_turn_end));
             let rotation = Rotation::from_axis_angle(Vec3::X, theta);
             let inset = Vec3::X * (-sign * self.config.hem_inset * theta.sin());
             // A flattened arc keeps the same start and end but lowers the
@@ -461,7 +502,7 @@ impl ShirtTask {
         self.scripted_pose(self.schedule.hem_release - 1, side)
     }
 
-    fn attach(&mut self, side: Side, vertices: Vec<u32>) -> Result<(), String> {
+    fn attach(&mut self, side: Side, vertices: Vec<u32>, compliance: Real) -> Result<(), String> {
         let k = side_index(side);
         let body = self.grippers[k];
         let pose = *self.rigid.bodies[body].position();
@@ -484,7 +525,7 @@ impl ShirtTask {
                     cloth: self.cloth,
                     body,
                     points,
-                    compliance: 0.0,
+                    compliance,
                     excluded_colliders: vec![],
                 },
                 &self.rigid.bodies,
@@ -523,7 +564,7 @@ impl ShirtTask {
                 let k = side_index(side);
                 if step == s.sleeve_grasp {
                     let patch = self.patches_at_start(k);
-                    self.attach(side, patch)?;
+                    self.attach(side, patch, 0.0)?;
                 } else if step == s.sleeve_release {
                     self.release(side)?;
                 } else if step == s.hem_grasp {
@@ -541,9 +582,22 @@ impl ShirtTask {
                     pose.rotation = Rotation::IDENTITY;
                     self.rigid.bodies[body].set_position(pose, true);
                     self.hem_grasp_centre[k] = Some(centre);
-                    self.attach(side, patch)?;
+                    self.attach(side, patch, self.config.hem_compliance)?;
                 } else if step == s.hem_release {
                     self.release(side)?;
+                } else if step + self.config.hem_release_ramp >= s.hem_release
+                    && step < s.hem_release
+                    && step > s.hem_grasp
+                    && self.config.hem_compliance > 0.0
+                {
+                    // Soften the grasp tenfold per remaining step: re-anchor at
+                    // the current positions with a larger compliance.
+                    let remaining = s.hem_release - step;
+                    let factor =
+                        (10.0 as Real).powi((self.config.hem_release_ramp - remaining + 1) as i32);
+                    let patch = self.patches[k].clone();
+                    self.release(side)?;
+                    self.attach(side, patch, self.config.hem_compliance * factor)?;
                 }
                 let pose = self.scripted_pose(step, side);
                 self.rigid.bodies[self.grippers[k]].set_next_kinematic_position(pose);
@@ -829,11 +883,16 @@ impl ShirtTask {
                 "task": "fold_shirt",
                 "layers": format!("{:?}", self.config.pattern.layers).to_lowercase(),
                 "spacing": self.config.pattern.spacing,
+                "neck": format!("{:?}", self.config.pattern.neck).to_lowercase(),
+                "seam_stiffness": self.config.pattern.seam_stiffness,
+                "warp_stiffness": self.config.warp_stiffness,
+                "weft_stiffness": self.config.weft_stiffness,
                 "thickness": self.config.thickness,
                 "band": self.config.band,
                 "friction": self.config.friction,
-                "schedule": {"sleeve_grasp": s.sleeve_grasp, "sleeve_release": s.sleeve_release,
-                    "hem_grasp": s.hem_grasp, "hem_release": s.hem_release, "end": s.end},
+                "schedule": {"sleeve_grasp": s.sleeve_grasp, "sleeve_turn_end": s.sleeve_turn_end,
+                    "sleeve_release": s.sleeve_release, "hem_grasp": s.hem_grasp,
+                    "hem_turn_end": s.hem_turn_end, "hem_release": s.hem_release, "end": s.end},
                 "landmarks": self.landmark_indices(),
             },
             "triangles": self.garment.mesh().triangles(),
@@ -888,6 +947,118 @@ fn select_patch(garment: &Garment, config: &ShirtTaskConfig, landmark: Landmark)
     match config.pinch {
         Pinch::TopLayer => garment.top_patch(landmark, radius),
         Pinch::AllLayers => garment.patch(landmark, radius),
+    }
+}
+
+impl ShirtTask {
+    /// Writes the run as a USD ASCII stage: the garment as a `Mesh` with
+    /// time-sampled points, the table and the grippers as `Cube` prims under
+    /// time-sampled `Xform`s, one time code per accepted step at
+    /// `1 / h` codes per second, Y up, metres. Hosts that read USD time
+    /// samples (botrail's scenes are USD) can play it back without the viewer.
+    pub fn write_usda(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+        let h = self.config.h;
+        let last = self.frames.last().map_or(0, |f| f.step);
+        writeln!(out, "#usda 1.0")?;
+        writeln!(
+            out,
+            "(\n    defaultPrim = \"World\"\n    startTimeCode = 0\n    endTimeCode = {last}\n    timeCodesPerSecond = {}\n    metersPerUnit = 1\n    upAxis = \"Y\"\n)",
+            1.0 / h
+        )?;
+        writeln!(out, "def Xform \"World\"\n{{")?;
+        let mesh = self.garment.mesh();
+        writeln!(out, "    def Mesh \"garment\"\n    {{")?;
+        write!(out, "        int[] faceVertexCounts = [")?;
+        for (k, _) in mesh.triangles().iter().enumerate() {
+            write!(out, "{}3", if k == 0 { "" } else { ", " })?;
+        }
+        writeln!(out, "]")?;
+        write!(out, "        int[] faceVertexIndices = [")?;
+        for (k, t) in mesh.triangles().iter().enumerate() {
+            write!(
+                out,
+                "{}{}, {}, {}",
+                if k == 0 { "" } else { ", " },
+                t[0],
+                t[1],
+                t[2]
+            )?;
+        }
+        writeln!(out, "]")?;
+        writeln!(out, "        uniform token subdivisionScheme = \"none\"")?;
+        // A default value as well as the samples: importers that read the
+        // default time (botrail's does) get the initial shape.
+        if let Some(first) = self.frames.first() {
+            write!(out, "        point3f[] points = [")?;
+            for (k, p) in first.positions.iter().enumerate() {
+                write!(
+                    out,
+                    "{}({}, {}, {})",
+                    if k == 0 { "" } else { ", " },
+                    p.x,
+                    p.y,
+                    p.z
+                )?;
+            }
+            writeln!(out, "]")?;
+        }
+        writeln!(out, "        point3f[] points.timeSamples = {{")?;
+        for f in &self.frames {
+            write!(out, "            {}: [", f.step)?;
+            for (k, p) in f.positions.iter().enumerate() {
+                write!(
+                    out,
+                    "{}({}, {}, {})",
+                    if k == 0 { "" } else { ", " },
+                    p.x,
+                    p.y,
+                    p.z
+                )?;
+            }
+            writeln!(out, "],")?;
+        }
+        writeln!(out, "        }}\n    }}")?;
+        let table_top = self.config.thickness * 0.5;
+        let half = 0.6 + self.sleeve_length();
+        writeln!(
+            out,
+            "    def Cube \"table\"\n    {{\n        double size = 1\n        float3 xformOp:scale = ({}, 0.02, {})\n        double3 xformOp:translate = (0, {}, 0)\n        uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:scale\"]\n    }}",
+            2.0 * half,
+            2.0 * (0.5 + self.body_half_length()),
+            table_top - 0.01
+        )?;
+        for (g, name) in ["gripper_left", "gripper_right"].iter().enumerate() {
+            writeln!(out, "    def Xform \"{name}\"\n    {{")?;
+            writeln!(out, "        matrix4d xformOp:transform.timeSamples = {{")?;
+            for f in &self.frames {
+                let pose = f.bodies[g];
+                let (cx, cy, cz) = (
+                    pose.rotation * Vec3::X,
+                    pose.rotation * Vec3::Y,
+                    pose.rotation * Vec3::Z,
+                );
+                let t = pose.translation;
+                writeln!(
+                    out,
+                    "            {}: ( ({}, {}, {}, 0), ({}, {}, {}, 0), ({}, {}, {}, 0), ({}, {}, {}, 1) ),",
+                    f.step, cx.x, cx.y, cx.z, cy.x, cy.y, cy.z, cz.x, cz.y, cz.z, t.x, t.y, t.z
+                )?;
+            }
+            writeln!(out, "        }}")?;
+            writeln!(
+                out,
+                "        uniform token[] xformOpOrder = [\"xformOp:transform\"]"
+            )?;
+            writeln!(
+                out,
+                "        def Cube \"finger\"\n        {{\n            double size = 1\n            float3 xformOp:scale = (0.024, 0.016, 0.024)\n            uniform token[] xformOpOrder = [\"xformOp:scale\"]\n        }}"
+            )?;
+            writeln!(out, "    }}")?;
+        }
+        writeln!(out, "}}")?;
+        out.flush()
     }
 }
 

@@ -19,6 +19,33 @@
 use crate::{ClothError, ClothMesh, Real, Vec3};
 use std::collections::BTreeMap;
 
+/// Shape of the neck opening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NeckShape {
+    /// A grid-aligned rectangular notch.
+    #[default]
+    Notch,
+    /// A half ellipse as wide as the notch and as deep as each panel's neck
+    /// depth: cells whose centre falls inside are removed and the vertices
+    /// left inside the curve are moved out onto it, unless that would make a
+    /// triangle thinner than three tenths of a cell.
+    Round,
+}
+
+/// How the panels of a sewn garment are joined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SeamJoin {
+    /// Seam vertices are shared by both panels: one closed surface, seam
+    /// hinges rest folded and can be stiffened (`seam_stiffness`).
+    #[default]
+    Shared,
+    /// Each panel keeps its own seam vertices and stitches
+    /// (`ClothMesh::stitches`) of length `stitch_length` join them: two open
+    /// sheets threaded together, free to hinge at the seam, and a model for
+    /// panels meshed separately.
+    Stitched,
+}
+
 /// Which panels a pattern is cut into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GarmentLayers {
@@ -106,6 +133,19 @@ pub struct TShirtPattern {
     pub neck_depth_back: Real,
     pub spacing: Real,
     pub layers: GarmentLayers,
+    pub seams: SeamJoin,
+    /// Rest length of the stitches of a `SeamJoin::Stitched` garment: place
+    /// the layers this far apart (at least the contact thickness).
+    pub stitch_length: Real,
+    pub neck: NeckShape,
+    /// Membrane stiffness of the sleeves relative to the body (1 keeps one
+    /// material); a per-region material for the implicit solver.
+    pub sleeve_stiffness: Real,
+    /// Bending stiffness of the seams relative to the panels: a stitched seam
+    /// with its allowance is stiffer than the fabric (a few times), 1 keeps the
+    /// seams as soft as the panels. Applied to the hinges across seam edges of
+    /// a sewn garment.
+    pub seam_stiffness: Real,
 }
 
 impl Default for TShirtPattern {
@@ -121,6 +161,11 @@ impl Default for TShirtPattern {
             neck_depth_back: 0.02,
             spacing: 0.02,
             layers: GarmentLayers::Sewn,
+            seams: SeamJoin::Shared,
+            stitch_length: 0.0015,
+            neck: NeckShape::Notch,
+            sleeve_stiffness: 1.0,
+            seam_stiffness: 1.0,
         }
     }
 }
@@ -136,6 +181,8 @@ pub struct TShirtCells {
     pub neck: [usize; 3],
     /// The first neck column.
     pub neck_start: usize,
+    /// Whether the neck is a half ellipse rather than a notch.
+    pub round_neck: bool,
 }
 
 impl TShirtCells {
@@ -176,9 +223,25 @@ impl TShirtCells {
             return false;
         }
         let n0 = self.neck_start();
-        let in_neck =
-            (n0..n0 + self.neck_columns()).contains(&i) && j >= by - self.neck_rows(layer);
+        let in_neck = if self.round_neck {
+            let (xi, eta) = self.neck_coordinates(layer, i as Real + 0.5, j as Real + 0.5);
+            xi * xi + eta * eta < 1.0
+        } else {
+            (n0..n0 + self.neck_columns()).contains(&i) && j >= by - self.neck_rows(layer)
+        };
         !in_neck
+    }
+    /// Grid coordinates relative to the neck's half ellipse: `xi` across it
+    /// (±1 at the shoulder corners), `eta` down from the shoulder line (1 at
+    /// the panel's neck depth).
+    fn neck_coordinates(&self, layer: Layer, column: Real, row: Real) -> (Real, Real) {
+        let half_width = self.neck_columns() as Real * 0.5;
+        let centre = self.neck_start() as Real + half_width;
+        let depth = self.neck_rows(layer) as Real;
+        (
+            (column - centre) / half_width,
+            (self.body_rows() as Real - row) / depth,
+        )
     }
     /// Whether the corner `(i, j)` belongs to a panel: a corner of some cell.
     fn corner(&self, layer: Layer, i: i32, j: i32) -> bool {
@@ -241,6 +304,18 @@ impl TShirtPattern {
                 "garment dimensions must be positive and finite",
             ));
         }
+        if [
+            self.seam_stiffness,
+            self.sleeve_stiffness,
+            self.stitch_length,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v <= 0.0)
+        {
+            return Err(ClothError::InvalidParameter(
+                "seam and sleeve stiffness and stitch length must be finite and positive",
+            ));
+        }
         let count = |length: Real, minimum: usize| -> Result<usize, ClothError> {
             let cells = (length / self.spacing).round();
             if !cells.is_finite() || cells > 4096.0 {
@@ -279,6 +354,7 @@ impl TShirtPattern {
             sleeve,
             neck: [neck_columns, neck_front, neck_back],
             neck_start: (body[0] - neck_columns) / 2,
+            round_neck: self.neck == NeckShape::Round,
         })
     }
 
@@ -297,6 +373,8 @@ impl TShirtPattern {
         let mut front = BTreeMap::new();
         let mut back = BTreeMap::new();
         let sewn = self.layers == GarmentLayers::Sewn;
+        let shared = sewn && self.seams == SeamJoin::Shared;
+        let mut stitches = Vec::new();
 
         // Front panel corners in row-major order, then its triangles.
         for j in 0..=by {
@@ -304,7 +382,7 @@ impl TShirtPattern {
                 if !cells.corner(Layer::Front, i, j) {
                     continue;
                 }
-                let layer = if sewn && cells.seam(Layer::Front, i, j) {
+                let layer = if shared && cells.seam(Layer::Front, i, j) {
                     Layer::Seam
                 } else {
                     Layer::Front
@@ -341,16 +419,23 @@ impl TShirtPattern {
                         continue;
                     }
                     if cells.seam(Layer::Back, i, j) {
-                        let shared = front.get(&[i, j]).copied().ok_or(ClothError::InvalidMesh(
-                            "garment seam corner missing on the front panel".to_owned(),
-                        ))?;
-                        if vertices[shared as usize].layer != Layer::Seam {
-                            return Err(ClothError::InvalidMesh(
-                                "garment seams differ between the panels".to_owned(),
-                            ));
+                        let counterpart =
+                            front.get(&[i, j]).copied().ok_or(ClothError::InvalidMesh(
+                                "garment seam corner missing on the front panel".to_owned(),
+                            ))?;
+                        if shared {
+                            if vertices[counterpart as usize].layer != Layer::Seam {
+                                return Err(ClothError::InvalidMesh(
+                                    "garment seams differ between the panels".to_owned(),
+                                ));
+                            }
+                            back.insert([i, j], counterpart);
+                            continue;
                         }
-                        back.insert([i, j], shared);
-                        continue;
+                        stitches.push(crate::mesh::Stitch {
+                            vertices: [counterpart, positions.len() as u32],
+                            rest_length: self.stitch_length,
+                        });
                     }
                     back.insert([i, j], positions.len() as u32);
                     positions.push(rest(i, j));
@@ -375,7 +460,36 @@ impl TShirtPattern {
                 }
             }
         }
-        let mesh = ClothMesh::new(positions, triangles)?;
+        if cells.round_neck {
+            round_neckline(&cells, s, half, &mut positions, &triangles, &vertices);
+        }
+        let mut mesh = ClothMesh::new(positions, triangles)?;
+        mesh.add_stitches(stitches)?;
+        // Woven along the length: the warp runs from the hem to the shoulders
+        // on both panels, so directional stiffness applies consistently.
+        mesh.set_material_axes(Some(vec![Vec3::Z; mesh.triangles().len()]))?;
+        if self.sleeve_stiffness != 1.0 {
+            let regions = triangle_regions(mesh.triangles(), &vertices);
+            let scale = self.sleeve_stiffness;
+            mesh.scale_triangle_stiffness(|k, _| {
+                if regions[k] == Region::Body {
+                    1.0
+                } else {
+                    scale
+                }
+            })?;
+        }
+        if shared && self.seam_stiffness != 1.0 {
+            let seam = |v: u32| vertices[v as usize].layer == Layer::Seam;
+            let scale = self.seam_stiffness;
+            mesh.scale_hinge_stiffness(|hinge| {
+                if seam(hinge.vertices[0]) && seam(hinge.vertices[1]) {
+                    scale
+                } else {
+                    1.0
+                }
+            })?;
+        }
         Ok(Garment {
             mesh,
             pattern: *self,
@@ -384,6 +498,84 @@ impl TShirtPattern {
             front,
             back,
         })
+    }
+}
+
+/// The region of each triangle: a sleeve when any corner lies beyond the
+/// body's side columns, the body otherwise.
+fn triangle_regions(triangles: &[[u32; 3]], vertices: &[VertexInfo]) -> Vec<Region> {
+    triangles
+        .iter()
+        .map(|t| {
+            t.iter()
+                .map(|&v| vertices[v as usize].region)
+                .find(|r| *r != Region::Body)
+                .unwrap_or(Region::Body)
+        })
+        .collect()
+}
+
+/// Moves the vertices left inside a round neck's ellipse out onto the curve,
+/// radially from the ellipse centre, then puts back any move that would leave
+/// a triangle thinner than three tenths of a cell.
+fn round_neckline(
+    cells: &TShirtCells,
+    spacing: Real,
+    half: Vec3,
+    positions: &mut [Vec3],
+    triangles: &[[u32; 3]],
+    vertices: &[VertexInfo],
+) {
+    let rest = |column: Real, row: Real| Vec3::new(column * spacing, 0.0, row * spacing) - half;
+    let mut moved = std::collections::BTreeSet::new();
+    for (v, info) in vertices.iter().enumerate() {
+        let layer = match info.layer {
+            Layer::Back => Layer::Back,
+            _ => Layer::Front,
+        };
+        let [i, j] = info.cell;
+        if info.layer == Layer::Seam || j >= cells.body_rows() {
+            continue;
+        }
+        let (xi, eta) = cells.neck_coordinates(layer, i as Real, j as Real);
+        let r2 = xi * xi + eta * eta;
+        if r2 >= 1.0 - 1e-9 || r2 <= 0.0 {
+            continue;
+        }
+        let scale = 1.0 / r2.sqrt();
+        let half_width = cells.neck_columns() as Real * 0.5;
+        let column = cells.neck_start() as Real + half_width + xi * scale * half_width;
+        let row = cells.body_rows() as Real - eta * scale * cells.neck_rows(layer) as Real;
+        positions[v] = rest(column, row);
+        moved.insert(v);
+    }
+    // Quality guard, repeated until no triangle is thin.
+    let minimum = 0.3 * spacing;
+    for _ in 0..4 {
+        let mut reverted = false;
+        for t in triangles {
+            let p = t.map(|i| positions[i as usize]);
+            let area2 = (p[1] - p[0]).cross(p[2] - p[0]).length();
+            let longest = [
+                p[0].distance(p[1]),
+                p[1].distance(p[2]),
+                p[2].distance(p[0]),
+            ]
+            .into_iter()
+            .fold(0.0, Real::max);
+            if area2 / longest < minimum {
+                for &v in t {
+                    if moved.remove(&(v as usize)) {
+                        let [i, j] = vertices[v as usize].cell;
+                        positions[v as usize] = rest(i as Real, j as Real);
+                        reverted = true;
+                    }
+                }
+            }
+        }
+        if !reverted {
+            break;
+        }
     }
 }
 
@@ -411,6 +603,10 @@ impl Garment {
     }
     pub fn cells(&self) -> TShirtCells {
         self.cells
+    }
+    /// The region of each triangle, indexed like the mesh triangles.
+    pub fn triangle_regions(&self) -> Vec<Region> {
+        triangle_regions(self.mesh.triangles(), &self.vertices)
     }
     /// Per-vertex pattern placement, indexed like the mesh vertices.
     pub fn vertices(&self) -> &[VertexInfo] {
@@ -485,7 +681,11 @@ impl Garment {
             .filter(|&v| self.vertices[v as usize].layer != Layer::Back)
             .collect()
     }
-    /// The vertices shared by both panels.
+    /// The stitches of a `SeamJoin::Stitched` garment.
+    pub fn stitches(&self) -> &[crate::mesh::Stitch] {
+        self.mesh.stitches()
+    }
+    /// The vertices shared by both panels (none when the seams are stitched).
     pub fn seam_vertices(&self) -> impl Iterator<Item = u32> + '_ {
         self.vertices
             .iter()
@@ -533,6 +733,10 @@ mod tests {
 
     fn pi() -> Real {
         std::f64::consts::PI as Real
+    }
+    /// Rounding allowance for both precisions.
+    fn tol() -> Real {
+        1.0e3 * Real::EPSILON
     }
 
     /// Boundary edges (edges without a hinge) grouped into closed loops; every
@@ -627,7 +831,7 @@ mod tests {
         assert_eq!(boundary_loops(mesh), 4, "neck, hem and two cuffs");
         let expected = pattern_area(cells, pattern.spacing, Layer::Front)
             + pattern_area(cells, pattern.spacing, Layer::Back);
-        assert!((mesh.area() - expected).abs() < 1e-9 * expected);
+        assert!((mesh.area() - expected).abs() < tol() * expected);
         // Every triangle is a right isosceles triangle with legs of one cell.
         for t in mesh.triangles() {
             let p = t.map(|i| mesh.rest_positions()[i as usize]);
@@ -637,9 +841,12 @@ mod tests {
                 p[2].distance(p[0]),
             ];
             lengths.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            assert!((lengths[0] - pattern.spacing).abs() < 1e-12);
-            assert!((lengths[1] - pattern.spacing).abs() < 1e-12);
-            assert!((lengths[2] - pattern.spacing * (2.0 as Real).sqrt()).abs() < 1e-12);
+            assert!((lengths[0] - pattern.spacing).abs() < tol() * pattern.spacing);
+            assert!((lengths[1] - pattern.spacing).abs() < tol() * pattern.spacing);
+            assert!(
+                (lengths[2] - pattern.spacing * (2.0 as Real).sqrt()).abs()
+                    < tol() * pattern.spacing
+            );
         }
         // Seam hinges rest fully folded, panel hinges flat.
         let seams: BTreeSet<u32> = garment.seam_vertices().collect();
@@ -649,9 +856,9 @@ mod tests {
                 seams.contains(&hinge.vertices[0]) && seams.contains(&hinge.vertices[1]);
             if across_seam {
                 folded += 1;
-                assert!((hinge.rest_angle.abs() - pi()).abs() < 1e-9, "{hinge:?}");
+                assert!((hinge.rest_angle.abs() - pi()).abs() < tol(), "{hinge:?}");
             } else {
-                assert!(hinge.rest_angle.abs() < 1e-9, "{hinge:?}");
+                assert!(hinge.rest_angle.abs() < tol(), "{hinge:?}");
             }
         }
         // Outline minus openings: two sides, two sleeve bottoms, two cuffs'
@@ -684,7 +891,7 @@ mod tests {
         let s = pattern.spacing;
         let at = |landmark: Landmark| rest[garment.landmark(landmark).unwrap() as usize];
         let (w, l) = (25.0 * s, 35.0 * s);
-        let close = |a: Vec3, b: Vec3| assert!(a.distance(b) < 1e-12, "{a:?} vs {b:?}");
+        let close = |a: Vec3, b: Vec3| assert!(a.distance(b) < tol(), "{a:?} vs {b:?}");
         close(
             at(Landmark::HemCorner(Side::Left)),
             Vec3::new(-w / 2.0, 0.0, -l / 2.0),
@@ -766,8 +973,8 @@ mod tests {
         assert_eq!(components(mesh), 1);
         assert_eq!(boundary_loops(mesh), 1);
         let expected = pattern_area(garment.cells(), pattern.spacing, Layer::Front);
-        assert!((mesh.area() - expected).abs() < 1e-9 * expected);
-        assert!(mesh.hinges().iter().all(|h| h.rest_angle.abs() < 1e-9));
+        assert!((mesh.area() - expected).abs() < tol() * expected);
+        assert!(mesh.hinges().iter().all(|h| h.rest_angle.abs() < tol()));
         assert!(garment.vertices().iter().all(|v| v.layer == Layer::Front));
         assert_eq!(garment.seam_vertices().count(), 0);
         assert_eq!(garment.landmark(Landmark::NeckBack), None);
@@ -776,7 +983,7 @@ mod tests {
             .placed_positions(Vec3::new(1.0, 2.0, 3.0), 0.01)
             .unwrap();
         for (p, r) in placed.iter().zip(mesh.rest_positions()) {
-            assert!(p.distance(*r + Vec3::new(1.0, 2.0, 3.0)) < 1e-12);
+            assert!(p.distance(*r + Vec3::new(1.0, 2.0, 3.0)) < tol() * 4.0);
         }
     }
 
@@ -806,7 +1013,7 @@ mod tests {
                 Layer::Back => -0.002,
                 Layer::Seam => 0.0,
             };
-            assert!(p.distance(rest + origin + Vec3::Y * lift) < 1e-12);
+            assert!(p.distance(rest + origin + Vec3::Y * lift) < tol());
         }
         let mut cloth =
             crate::Cloth::new(garment.mesh().clone(), crate::ClothMaterial::default()).unwrap();
@@ -827,6 +1034,227 @@ mod tests {
         assert!(
             top.iter()
                 .any(|&v| garment.vertices()[v as usize].layer == Layer::Seam)
+        );
+    }
+
+    #[test]
+    fn round_necklines_follow_the_curve_and_stay_well_shaped() {
+        for (spacing, layers) in [
+            (0.02, GarmentLayers::Sewn),
+            (0.05, GarmentLayers::Sewn),
+            (0.02, GarmentLayers::Single),
+            (0.03, GarmentLayers::Single),
+        ] {
+            let notch = TShirtPattern {
+                spacing,
+                layers,
+                ..TShirtPattern::default()
+            };
+            let round = TShirtPattern {
+                neck: NeckShape::Round,
+                ..notch
+            };
+            let garment = round.build().unwrap();
+            let mesh = garment.mesh();
+            // Fewer cells leave than with the rectangular notch.
+            assert!(mesh.area() > notch.build().unwrap().mesh().area());
+            assert_eq!(
+                boundary_loops(mesh),
+                if layers == GarmentLayers::Sewn { 4 } else { 1 }
+            );
+            let rest = mesh.rest_positions();
+            for t in mesh.triangles() {
+                let p = t.map(|i| rest[i as usize]);
+                let area2 = (p[1] - p[0]).cross(p[2] - p[0]).length();
+                let longest = [
+                    p[0].distance(p[1]),
+                    p[1].distance(p[2]),
+                    p[2].distance(p[0]),
+                ]
+                .into_iter()
+                .fold(0.0, Real::max);
+                assert!(
+                    area2 / longest >= 0.3 * spacing - tol() * spacing,
+                    "thin triangle {t:?}"
+                );
+            }
+            // Every front-panel vertex that left the grid sits on the ellipse.
+            let cells = garment.cells();
+            let mut snapped = 0;
+            for (v, info) in garment.vertices().iter().enumerate() {
+                if info.layer == Layer::Back {
+                    continue;
+                }
+                let grid = Vec3::new(info.cell[0] as Real, 0.0, info.cell[1] as Real) * spacing
+                    - Vec3::new(
+                        cells.body[0] as Real * spacing * 0.5,
+                        0.0,
+                        cells.body[1] as Real * spacing * 0.5,
+                    );
+                if rest[v].distance(grid) > tol() * spacing {
+                    let column = (rest[v].x + cells.body[0] as Real * spacing * 0.5) / spacing;
+                    let row = (rest[v].z + cells.body[1] as Real * spacing * 0.5) / spacing;
+                    let (xi, eta) = cells.neck_coordinates(Layer::Front, column, row);
+                    assert!((xi * xi + eta * eta - 1.0).abs() < tol(), "{v}: {xi} {eta}");
+                    snapped += 1;
+                }
+            }
+            assert!(snapped > 0);
+            assert!(garment.landmark(Landmark::NeckFront).is_some());
+        }
+    }
+
+    #[test]
+    fn stitched_seams_join_two_open_panels() {
+        let shared = TShirtPattern {
+            spacing: 0.05,
+            ..TShirtPattern::default()
+        };
+        let stitched = TShirtPattern {
+            seams: SeamJoin::Stitched,
+            stitch_length: 0.001,
+            ..shared
+        };
+        let a = shared.build().unwrap();
+        let b = stitched.build().unwrap();
+        assert_eq!(components(b.mesh()), 2);
+        assert_eq!(boundary_loops(b.mesh()), 2);
+        assert_eq!(b.stitches().len(), a.seam_vertices().count());
+        assert_eq!(b.seam_vertices().count(), 0);
+        let rest = b.mesh().rest_positions();
+        for stitch in b.stitches() {
+            let [f, k] = stitch.vertices;
+            assert_eq!(b.vertices()[f as usize].layer, Layer::Front);
+            assert_eq!(b.vertices()[k as usize].layer, Layer::Back);
+            assert!(rest[f as usize].distance(rest[k as usize]) < 1e-12);
+            assert_eq!(stitch.rest_length, 0.001);
+        }
+        // Placement separates the stitched pairs by the gap.
+        let placed = b.placed_positions(Vec3::ZERO, 0.001).unwrap();
+        for stitch in b.stitches() {
+            let [f, k] = stitch.vertices;
+            assert!((placed[f as usize].distance(placed[k as usize]) - 0.001).abs() < 1e-12);
+        }
+        // Seam stiffness does not apply without shared seams; no hinge is
+        // scaled and no hinge rests folded.
+        let stiff = TShirtPattern {
+            seam_stiffness: 4.0,
+            ..stitched
+        }
+        .build()
+        .unwrap();
+        assert!(
+            stiff
+                .mesh()
+                .hinges()
+                .iter()
+                .all(|h| h.stiffness_scale == 1.0 && h.rest_angle.abs() < tol())
+        );
+        // Stitch validation.
+        let mut mesh = a.mesh().clone();
+        let n = mesh.rest_positions().len() as u32;
+        assert!(
+            mesh.add_stitches(vec![crate::mesh::Stitch {
+                vertices: [0, 0],
+                rest_length: 0.001
+            }])
+            .is_err()
+        );
+        assert!(
+            mesh.add_stitches(vec![crate::mesh::Stitch {
+                vertices: [0, n],
+                rest_length: 0.001
+            }])
+            .is_err()
+        );
+        assert!(
+            mesh.add_stitches(vec![crate::mesh::Stitch {
+                vertices: [0, 1],
+                rest_length: 0.0
+            }])
+            .is_err()
+        );
+        mesh.add_stitches(vec![crate::mesh::Stitch {
+            vertices: [0, 1],
+            rest_length: 0.001,
+        }])
+        .unwrap();
+        assert!(
+            mesh.add_stitches(vec![crate::mesh::Stitch {
+                vertices: [1, 0],
+                rest_length: 0.001
+            }])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sleeve_stiffness_scales_only_the_sleeve_triangles() {
+        let pattern = TShirtPattern {
+            spacing: 0.05,
+            sleeve_stiffness: 0.5,
+            ..TShirtPattern::default()
+        };
+        let garment = pattern.build().unwrap();
+        let regions = garment.triangle_regions();
+        let scales = garment.mesh().triangle_stiffness_scales().unwrap();
+        for (region, scale) in regions.iter().zip(scales) {
+            assert_eq!(*scale, if *region == Region::Body { 1.0 } else { 0.5 });
+        }
+        assert!(regions.contains(&Region::LeftSleeve));
+        assert!(regions.contains(&Region::RightSleeve));
+        assert!(
+            TShirtPattern::default()
+                .build()
+                .unwrap()
+                .mesh()
+                .triangle_stiffness_scales()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn seam_stiffness_scales_only_the_seam_hinges() {
+        let pattern = TShirtPattern {
+            spacing: 0.05,
+            seam_stiffness: 4.0,
+            ..TShirtPattern::default()
+        };
+        let garment = pattern.build().unwrap();
+        let seams: BTreeSet<u32> = garment.seam_vertices().collect();
+        for hinge in garment.mesh().hinges() {
+            let across_seam =
+                seams.contains(&hinge.vertices[0]) && seams.contains(&hinge.vertices[1]);
+            assert_eq!(hinge.stiffness_scale, if across_seam { 4.0 } else { 1.0 });
+        }
+        assert!(
+            garment
+                .mesh()
+                .hinges()
+                .iter()
+                .any(|h| h.stiffness_scale == 4.0)
+        );
+        assert!(
+            TShirtPattern {
+                seam_stiffness: 0.0,
+                ..pattern
+            }
+            .build()
+            .is_err()
+        );
+        // A single panel has no seams to stiffen.
+        let single = TShirtPattern {
+            layers: GarmentLayers::Single,
+            ..pattern
+        }
+        .build()
+        .unwrap();
+        assert!(
+            single
+                .mesh()
+                .hinges()
+                .iter()
+                .all(|h| h.stiffness_scale == 1.0)
         );
     }
 

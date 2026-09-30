@@ -30,6 +30,11 @@ struct Triangle {
     ids: [usize; 3],
     b: [[Real; 2]; 3],
     volume: Real,
+    /// Unit material (warp) axis in the triangle's rest frame, if the mesh
+    /// carries one.
+    fiber: Option<[Real; 2]>,
+    /// Membrane stiffness multiplier of this triangle.
+    scale: Real,
 }
 #[derive(Clone)]
 struct Hinge {
@@ -160,6 +165,20 @@ const SEED_GAP_FLOOR: Real = 0.5;
 /// Gap fraction of the barrier band below which a contact counts as jammed for
 /// the convergence test; the barrier force there exceeds any cloth load.
 const JAMMED_GAP_FRACTION: Real = 1.0e-3;
+/// Gap fraction of the barrier band below which the line search does not let
+/// a trial drive the smallest gap any further. The barrier energy stays finite
+/// as a gap closes, so a trial can lower the total energy while squeezing one
+/// pair to a vanishing gap, where the barrier Hessian (about stiffness times
+/// band squared over gap squared) outgrows the rest of the system by fifteen
+/// orders of magnitude and the factorization breaks down. At this fraction the
+/// barrier force already exceeds any cloth load, so holding the gap there only
+/// shortens the step; the next direction separates the pair.
+const LINE_SEARCH_GAP_FLOOR: Real = 1.0e-4;
+/// Largest factor by which a step may raise the barrier stiffness while a
+/// contact stays jammed, as the incremental potential contact method does:
+/// a stiffer barrier balances the load squeezing the pair at a wider, better
+/// conditioned gap. The factor resets with the next step.
+const JAMMED_STIFFNESS_LIMIT: Real = 1.0e4;
 
 fn barrier(gap: Real, band: Real, stiffness: Real) -> Option<[Real; 3]> {
     if gap <= 0.0 || !gap.is_finite() {
@@ -234,6 +253,67 @@ fn membrane(
     Some((e, p, h))
 }
 
+/// Extra stretch energy `k / 2 (|F a| - 1)^2` along the unit material direction
+/// `a` of the rest frame, with its gradient and Hessian in the layout of
+/// [`membrane`]. The Hessian drops the term that turns negative under
+/// compression, so it stays positive semidefinite like the membrane's.
+pub(super) fn fiber(
+    f: [Vec3; 2],
+    a: [Real; 2],
+    k: Real,
+    hessian: bool,
+) -> Option<(Real, [Vec3; 2], SMatrix<Real, 6, 6>)> {
+    let fa = f[0] * a[0] + f[1] * a[1];
+    let s = fa.length();
+    if !s.is_finite() || s <= 1e-8 {
+        return None;
+    }
+    let n = fa / s;
+    let e = 0.5 * k * (s - 1.0) * (s - 1.0);
+    let slope = k * (s - 1.0);
+    let g = [n * (slope * a[0]), n * (slope * a[1])];
+    let mut h = SMatrix::<Real, 6, 6>::zeros();
+    if hessian {
+        let tension = (s - 1.0).max(0.0) / s;
+        for r in 0..2 {
+            for c in 0..2 {
+                let w = k * a[r] * a[c];
+                for u in 0..3 {
+                    for v in 0..3 {
+                        let delta = if u == v { 1.0 } else { 0.0 };
+                        h[(r * 3 + u, c * 3 + v)] =
+                            w * (n[u] * n[v] + tension * (delta - n[u] * n[v]));
+                    }
+                }
+            }
+        }
+    }
+    Some((e, g, h))
+}
+
+/// Warp along `a` and weft across it, skipping zero stiffness.
+pub(super) fn fibers(
+    f: [Vec3; 2],
+    a: [Real; 2],
+    k: (Real, Real),
+    hessian: bool,
+) -> Option<(Real, [Vec3; 2], SMatrix<Real, 6, 6>)> {
+    let mut e = 0.0;
+    let mut g = [Vec3::ZERO; 2];
+    let mut h = SMatrix::<Real, 6, 6>::zeros();
+    for (axis, k) in [(a, k.0), ([-a[1], a[0]], k.1)] {
+        if k == 0.0 {
+            continue;
+        }
+        let (fe, fg, fh) = fiber(f, axis, k, hessian)?;
+        e += fe;
+        g[0] += fg[0];
+        g[1] += fg[1];
+        h += fh;
+    }
+    Some((e, g, h))
+}
+
 fn push_gradient(dofs: &[Option<usize>], gradient: &mut [Real], i: usize, g: Vec3) {
     if let Some(d) = dofs[i] {
         for c in 0..3 {
@@ -263,15 +343,35 @@ fn push_block(
     }
 }
 
+/// A compliant particle target: a spring of stiffness `1 / compliance`
+/// between the particle and its target position.
+struct Spring {
+    particle: usize,
+    position: Vec3,
+    stiffness: Real,
+}
+
+/// A stitch as a spring between two particles.
+struct StitchSpring {
+    a: usize,
+    b: usize,
+    rest: Real,
+    stiffness: Real,
+}
+
 struct Model<'a> {
     cloth: &'a Cloth,
     triangles: Vec<Triangle>,
     hinges: Vec<Hinge>,
+    springs: Vec<Spring>,
+    stitches: Vec<StitchSpring>,
     dofs: Vec<Option<usize>>,
     count: usize,
     prediction: Vec<Vec3>,
     mu: Real,
     lambda: Real,
+    /// Warp and weft stiffness along and across each triangle's fiber.
+    fibers: (Real, Real),
     h: Real,
     band: Real,
     barrier_stiffness: Real,
@@ -308,22 +408,36 @@ impl<'a> Model<'a> {
         let lambda = young * nu / (1.0 - nu * nu);
         let mut count = 0;
         let mut fixed = vec![false; cloth.positions.len()];
+        let mut claimed = vec![false; cloth.positions.len()];
         for &i in cloth.pins.keys() {
             fixed[i as usize] = true;
+            claimed[i as usize] = true;
         }
+        let mut springs = Vec::new();
         for target in targets {
-            if target.compliance != 0.0 {
+            if !target.compliance.is_finite() || target.compliance < 0.0 {
                 return Err(ClothError::InvalidParameter(
-                    "implicit solver currently supports hard particle targets only",
+                    "implicit target compliance must be finite and non-negative",
                 ));
             }
             if target.particle as usize >= fixed.len() || !target.position.is_finite() {
                 return Err(ClothError::InvalidParameter("implicit target"));
             }
-            if fixed[target.particle as usize] {
+            if claimed[target.particle as usize] {
                 return Err(ClothError::ConflictingTarget(target.particle));
             }
-            fixed[target.particle as usize] = true;
+            claimed[target.particle as usize] = true;
+            if target.compliance == 0.0 {
+                fixed[target.particle as usize] = true;
+            } else {
+                // A compliant target leaves the particle free and holds it
+                // with a spring, as XPBD's compliant constraint does.
+                springs.push(Spring {
+                    particle: target.particle as usize,
+                    position: target.position,
+                    stiffness: 1.0 / target.compliance,
+                });
+            }
         }
         let dofs = fixed
             .iter()
@@ -338,11 +452,14 @@ impl<'a> Model<'a> {
             })
             .collect();
         let rest = cloth.mesh.rest_positions();
+        let axes = cloth.mesh.material_axes();
+        let scales = cloth.mesh.triangle_stiffness_scales();
         let triangles = cloth
             .mesh
             .triangles()
             .iter()
-            .map(|&ids| {
+            .enumerate()
+            .map(|(k, &ids)| {
                 let ids = ids.map(|i| i as usize);
                 let u = rest[ids[1]] - rest[ids[0]];
                 let v = rest[ids[2]] - rest[ids[0]];
@@ -352,10 +469,21 @@ impl<'a> Model<'a> {
                 let height = cross / len;
                 let b1 = [1.0 / len, -s / (len * height)];
                 let b2 = [0.0, 1.0 / height];
+                // The rest frame: e1 along the first edge, e2 across it in
+                // the triangle's plane; the material axis projects into it.
+                let fiber = axes.map(|axes| axes[k]).and_then(|axis| {
+                    let e1 = u / len;
+                    let e2 = (v - e1 * s) / height;
+                    let projected = [axis.dot(e1), axis.dot(e2)];
+                    let norm = (projected[0] * projected[0] + projected[1] * projected[1]).sqrt();
+                    (norm > 1e-6).then(|| [projected[0] / norm, projected[1] / norm])
+                });
                 Triangle {
                     ids,
                     b: [[-b1[0] - b2[0], -b1[1] - b2[1]], b1, b2],
                     volume: 0.5 * cross * t,
+                    fiber,
+                    scale: scales.map_or(1.0, |s| s[k]),
                 }
             })
             .collect();
@@ -372,7 +500,8 @@ impl<'a> Model<'a> {
                 Hinge {
                     ids,
                     rest: hinge.rest_angle,
-                    stiffness: rigidity * 6.0 * edge.length_squared() / area2,
+                    stiffness: rigidity * 6.0 * edge.length_squared() / area2
+                        * hinge.stiffness_scale,
                 }
             })
             .collect();
@@ -393,8 +522,24 @@ impl<'a> Model<'a> {
             hinges,
             dofs,
             count,
+            springs,
+            stitches: cloth
+                .mesh
+                .stitches()
+                .iter()
+                .map(|s| StitchSpring {
+                    a: s.vertices[0] as usize,
+                    b: s.vertices[1] as usize,
+                    rest: s.rest_length,
+                    stiffness: implicit.material.stitch_stiffness,
+                })
+                .collect(),
             prediction,
             mu,
+            fibers: (
+                implicit.material.warp_stiffness,
+                implicit.material.weft_stiffness,
+            ),
             lambda,
             h,
             band: config.activation_margin,
@@ -453,6 +598,53 @@ impl<'a> Model<'a> {
                 [[w, 0.0, 0.0], [0.0, w, 0.0], [0.0, 0.0, w]],
             );
         }
+        for spring in &self.springs {
+            let i = spring.particle;
+            let k = spring.stiffness;
+            let d = x[i] - spring.position;
+            energy.add(0.5 * k * d.length_squared());
+            push_gradient(dofs, &mut a.gradient, i, d * k);
+            push_block(
+                dofs,
+                hessian,
+                &mut a.blocks,
+                i,
+                i,
+                [[k, 0.0, 0.0], [0.0, k, 0.0], [0.0, 0.0, k]],
+            );
+        }
+        for stitch in &self.stitches {
+            let k = stitch.stiffness;
+            let d = x[stitch.a] - x[stitch.b];
+            let len = d.length();
+            if !len.is_finite() {
+                return Err(ClothError::NonFiniteState);
+            }
+            if len <= 1e-12 {
+                // Coincident ends: the spring is compressed with no direction.
+                energy.add(0.5 * k * stitch.rest * stitch.rest);
+                continue;
+            }
+            let n = d / len;
+            energy.add(0.5 * k * (len - stitch.rest) * (len - stitch.rest));
+            let g = n * (k * (len - stitch.rest));
+            push_gradient(dofs, &mut a.gradient, stitch.a, g);
+            push_gradient(dofs, &mut a.gradient, stitch.b, -g);
+            if hessian {
+                let tension = (len - stitch.rest).max(0.0) / len;
+                let block: [[Real; 3]; 3] = std::array::from_fn(|u| {
+                    std::array::from_fn(|v| {
+                        let delta = if u == v { 1.0 } else { 0.0 };
+                        k * (n[u] * n[v] + tension * (delta - n[u] * n[v]))
+                    })
+                });
+                let negative = block.map(|row| row.map(|v| -v));
+                push_block(dofs, hessian, &mut a.blocks, stitch.a, stitch.a, block);
+                push_block(dofs, hessian, &mut a.blocks, stitch.b, stitch.b, block);
+                push_block(dofs, hessian, &mut a.blocks, stitch.a, stitch.b, negative);
+                push_block(dofs, hessian, &mut a.blocks, stitch.b, stitch.a, negative);
+            }
+        }
         if self.implicit.execution == ImplicitExecution::Parallel4 && self.triangles.len() >= 1024 {
             let gradient = &mut a.gradient;
             elements::assemble(
@@ -472,8 +664,19 @@ impl<'a> Model<'a> {
                         f[c] += x[tri.ids[k]] * tri.b[k][c];
                     }
                 }
-                let (e, g, _) = membrane(f, self.mu, self.lambda, false)
-                    .ok_or(ClothError::DegenerateConstraint)?;
+                let (mu, lambda) = (self.mu * tri.scale, self.lambda * tri.scale);
+                let fiber_stiffness = (self.fibers.0 * tri.scale, self.fibers.1 * tri.scale);
+                let (mut e, mut g, _) =
+                    membrane(f, mu, lambda, false).ok_or(ClothError::DegenerateConstraint)?;
+                if let Some(a) = tri.fiber
+                    && fiber_stiffness != (0.0, 0.0)
+                {
+                    let (fe, fg, _) = fibers(f, a, fiber_stiffness, false)
+                        .ok_or(ClothError::DegenerateConstraint)?;
+                    e += fe;
+                    g[0] += fg[0];
+                    g[1] += fg[1];
+                }
                 energy.add(e * tri.volume);
                 for k in 0..3 {
                     push_gradient(
@@ -484,8 +687,15 @@ impl<'a> Model<'a> {
                     );
                 }
                 if hessian {
-                    let hp = membrane::projected_hessian(f, self.mu, self.lambda)
+                    let mut hp = membrane::projected_hessian(f, mu, lambda)
                         .ok_or(ClothError::DegenerateConstraint)?;
+                    if let Some(a) = tri.fiber
+                        && fiber_stiffness != (0.0, 0.0)
+                    {
+                        hp += fibers(f, a, fiber_stiffness, true)
+                            .ok_or(ClothError::DegenerateConstraint)?
+                            .2;
+                    }
                     for i in 0..3 {
                         for j in 0..3 {
                             if !active_block(tri.ids[i], tri.ids[j]) {
@@ -813,7 +1023,7 @@ pub(crate) fn step(
             "implicit solver requires a positive barrier width and continuous surface contacts",
         ));
     }
-    let model = Model::new(cloth, h, gravity, targets, implicit)?;
+    let mut model = Model::new(cloth, h, gravity, targets, implicit)?;
     let config = cloth.contact_settings.unwrap();
     let mut engine = SelfCollision::new(cloth.mesh.clone(), config);
     engine.begin(cloth.mesh.clone(), config);
@@ -822,7 +1032,7 @@ pub(crate) fn step(
     for (&i, &p) in &cloth.pins {
         x[i as usize] = p;
     }
-    for t in targets {
+    for t in targets.iter().filter(|t| t.compliance == 0.0) {
         x[t.particle as usize] = t.position;
     }
     let initial = query(
@@ -1015,6 +1225,7 @@ pub(crate) fn step(
     // configurable window (default three, as in the author solver).
     let window = implicit.convergence_window;
     let mut residual_window = std::collections::VecDeque::new();
+    let mut previous_min_gap = Real::INFINITY;
     let sparse = &mut cache.sparse;
     sparse.begin_step(std::sync::Arc::clone(&model.workers));
     let mut assembled = Assembly::default();
@@ -1024,6 +1235,22 @@ pub(crate) fn step(
     } else {
         implicit.max_iterations
     } {
+        let min_gap = contacts
+            .iter()
+            .map(|c| c.gap(&x))
+            .fold(Real::INFINITY, Real::min);
+        let jammed = min_gap < model.band * JAMMED_GAP_FRACTION;
+        // A pair that stays jammed while the smallest gap keeps shrinking is
+        // being squeezed by a load the barrier cannot yet hold at a workable
+        // gap: double the barrier stiffness for the rest of the step, before
+        // this iteration's energy and direction are assembled with it.
+        if jammed
+            && min_gap < previous_min_gap
+            && model.barrier_stiffness < implicit.barrier_stiffness * JAMMED_STIFFNESS_LIMIT
+        {
+            model.barrier_stiffness *= 2.0;
+        }
+        previous_min_gap = min_gap;
         model.assemble_into(&x, &contacts, &friction, true, &mut assembled)?;
         sparse.load(model.count, &assembled.blocks, iteration)?;
         let mut solution: Vec<Real> = assembled.gradient.iter().map(|g| -g).collect();
@@ -1061,9 +1288,6 @@ pub(crate) fn step(
         // displacement criterion cannot judge such a state. Keep iterating
         // until the pair has separated (each update roughly doubles the gap)
         // or the direction truly vanishes at a squeezed equilibrium.
-        let jammed = contacts
-            .iter()
-            .any(|c| c.gap(&x) < model.band * JAMMED_GAP_FRACTION);
         // A step whose first direction is already small starts at (or was
         // seeded at) a consistent state; later single small directions can be
         // the low point of an oscillation.
@@ -1102,6 +1326,11 @@ pub(crate) fn step(
             alpha = alpha.min(rigid_alpha);
         }
         let mut accepted = None;
+        let gap_floor = model.band * LINE_SEARCH_GAP_FLOOR;
+        let current_min_gap = contacts
+            .iter()
+            .map(|c| c.gap(&x))
+            .fold(Real::INFINITY, Real::min);
         for _ in 0..implicit.max_line_search_iterations {
             let trial: Vec<_> = x
                 .iter()
@@ -1118,10 +1347,18 @@ pub(crate) fn step(
                 settings.max_contacts,
                 true,
             )?;
+            let trial_min_gap = trial_contacts
+                .iter()
+                .map(|c| c.gap(&trial))
+                .fold(Real::INFINITY, Real::min);
+            let squeezes = trial_min_gap < gap_floor && trial_min_gap < current_min_gap;
             let evaluation =
                 model.assemble_into(&trial, &trial_contacts, &friction, false, &mut trial_eval);
             match evaluation {
-                Ok(()) if trial_eval.energy <= assembled.energy + 0.0001 * alpha * slope => {
+                Ok(())
+                    if !squeezes
+                        && trial_eval.energy <= assembled.energy + 0.0001 * alpha * slope =>
+                {
                     accepted = Some((trial, trial_contacts));
                     break;
                 }
@@ -1253,7 +1490,9 @@ fn validate_approximate_targets(
         return Err(ClothError::NonFiniteState);
     }
     if cloth.pins.iter().any(|(&i, &p)| x[i as usize] != p)
-        || targets.iter().any(|t| x[t.particle as usize] != t.position)
+        || targets
+            .iter()
+            .any(|t| t.compliance == 0.0 && x[t.particle as usize] != t.position)
     {
         return Err(failure("approximate hard target", iterations));
     }
@@ -1432,6 +1671,153 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn fiber_gradient_and_hessian_follow_energy() {
+        let f = [Vec3::new(1.04, 0.05, 0.10), Vec3::new(-0.03, 0.98, 0.04)];
+        let a = [0.6, 0.8];
+        let (e, g, h) = fibers(f, a, (3.0, 1.5), true).unwrap();
+        assert!(e > 0.0);
+        let eps = 1e-6;
+        for j in 0..6 {
+            let mut plus = f;
+            let mut minus = f;
+            plus[j / 3][j % 3] += eps;
+            minus[j / 3][j % 3] -= eps;
+            let (ep, gp, _) = fibers(plus, a, (3.0, 1.5), false).unwrap();
+            let (em, gm, _) = fibers(minus, a, (3.0, 1.5), false).unwrap();
+            assert!(((ep - em) / (2.0 * eps) - g[j / 3][j % 3]).abs() < 1e-6);
+            // Both fibers are stretched here, so the Hessian is exact.
+            for i in 0..6 {
+                let fd = (gp[i / 3][i % 3] - gm[i / 3][i % 3]) / (2.0 * eps);
+                assert!(
+                    (fd - h[(i, j)]).abs() < 1e-5,
+                    "{i} {j}: {fd} vs {}",
+                    h[(i, j)]
+                );
+            }
+        }
+        // Under compression the projected Hessian stays positive semidefinite.
+        let squeezed = [Vec3::new(0.9, 0.0, 0.0), Vec3::new(0.0, 0.9, 0.0)];
+        let (_, _, hc) = fibers(squeezed, a, (3.0, 1.5), true).unwrap();
+        for k in 0..6 {
+            let mut v = [0.0; 6];
+            v[k] = 1.0;
+            let q: Real = (0..6)
+                .map(|i| (0..6).map(|j| v[i] * hc[(i, j)] * v[j]).sum::<Real>())
+                .sum();
+            assert!(q >= -1e-12, "{q}");
+        }
+    }
+
+    #[test]
+    fn material_axes_make_the_stretch_energy_direction_dependent() {
+        // A uniform 1% stretch along the warp costs k_w/2 eps^2 per volume more
+        // than the same stretch across it, at any resolution.
+        let (warp, weft) = (2.0e5, 5.0e4);
+        let eps = 0.01;
+        let mut densities = Vec::new();
+        for n in [3usize, 6] {
+            let mut mesh = crate::GridBuilder::new(n, n)
+                .size(0.3, 0.3)
+                .build()
+                .unwrap();
+            mesh.set_material_axes(Some(vec![Vec3::X; mesh.triangles().len()]))
+                .unwrap();
+            let mut cloth = Cloth::new(mesh, crate::ClothMaterial::default()).unwrap();
+            cloth
+                .set_contact_settings(Some(crate::ClothContactSettings {
+                    activation_margin: 0.001,
+                    ..Default::default()
+                }))
+                .unwrap();
+            let implicit = ImplicitSettings {
+                material: ShellMaterial {
+                    warp_stiffness: warp,
+                    weft_stiffness: weft,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let model = Model::new(&cloth, 0.1, Vec3::ZERO, &[], implicit).unwrap();
+            let volume: Real = model.triangles.iter().map(|t| t.volume).sum();
+            let energy = |sx: Real, sz: Real| {
+                let x: Vec<Vec3> = cloth
+                    .positions
+                    .iter()
+                    .map(|p| Vec3::new(p.x * sx, p.y, p.z * sz))
+                    .collect();
+                model.assemble(&x, &[], &[], false).unwrap().energy
+            };
+            let rest = energy(1.0, 1.0);
+            let along = energy(1.0 + eps, 1.0) - rest;
+            let across = energy(1.0, 1.0 + eps) - rest;
+            let expected = 0.5 * (warp - weft) * eps * eps * volume;
+            assert!(
+                ((along - across) - expected).abs() < 1e-9 * expected.abs().max(1e-30) + 1e-14,
+                "n={n}: {along} - {across} vs {expected}"
+            );
+            // The inertia term of the lumped masses is resolution dependent
+            // but identical for both directions; the difference is the
+            // material's, and its density does not depend on the resolution.
+            densities.push((along - across) / cloth.mesh.area());
+            // Without axes the two directions cost the same.
+            let mut plain = cloth.clone();
+            plain.mesh = std::sync::Arc::new({
+                let mut m = (*cloth.mesh).clone();
+                m.set_material_axes(None).unwrap();
+                m
+            });
+            let model = Model::new(&plain, 0.1, Vec3::ZERO, &[], implicit).unwrap();
+            let e = |sx: Real, sz: Real| {
+                let x: Vec<Vec3> = plain
+                    .positions
+                    .iter()
+                    .map(|p| Vec3::new(p.x * sx, p.y, p.z * sz))
+                    .collect();
+                model.assemble(&x, &[], &[], false).unwrap().energy
+            };
+            assert!((e(1.0 + eps, 1.0) - e(1.0, 1.0 + eps)).abs() < 1e-12);
+        }
+        assert!((densities[0] - densities[1]).abs() < 1e-9 * densities[0]);
+    }
+
+    #[test]
+    fn triangle_stiffness_scales_scale_the_membrane_energy() {
+        let build = |scale: Real| {
+            let mut mesh = crate::GridBuilder::new(4, 4)
+                .size(0.2, 0.2)
+                .build()
+                .unwrap();
+            if scale != 1.0 {
+                mesh.scale_triangle_stiffness(|_, _| scale).unwrap();
+            }
+            let mut cloth = Cloth::new(mesh, crate::ClothMaterial::default()).unwrap();
+            cloth
+                .set_contact_settings(Some(crate::ClothContactSettings {
+                    activation_margin: 0.001,
+                    ..Default::default()
+                }))
+                .unwrap();
+            cloth
+        };
+        // A huge step makes the inertia term negligible, leaving the membrane.
+        let energy = |cloth: &Cloth| {
+            let model =
+                Model::new(cloth, 1.0e6, Vec3::ZERO, &[], ImplicitSettings::default()).unwrap();
+            let x: Vec<Vec3> = cloth
+                .positions
+                .iter()
+                .map(|p| Vec3::new(p.x * 1.01, p.y, p.z * 0.995))
+                .collect();
+            model.assemble(&x, &[], &[], false).unwrap().energy
+        };
+        let plain = energy(&build(1.0));
+        let doubled = energy(&build(2.0));
+        assert!(plain > 0.0 && (doubled - 2.0 * plain).abs() < 1e-9 * doubled);
+        let mut mesh = (*build(1.0).mesh).clone();
+        assert!(mesh.scale_triangle_stiffness(|_, _| 0.0).is_err());
+    }
+
     #[test]
     fn membrane_gradient_and_hessian_follow_energy() {
         let f = [Vec3::new(1.03, 0.07, 0.13), Vec3::new(-0.05, 0.97, 0.02)];

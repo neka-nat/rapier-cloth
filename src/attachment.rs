@@ -159,6 +159,15 @@ impl Attachments {
             .filter(|s| s.generation == h.generation)
             .and_then(|s| s.value.as_ref())
     }
+    pub fn get_mut(&mut self, h: AttachmentHandle) -> Option<&mut Attachment> {
+        if h.arena != self.identity {
+            return None;
+        }
+        self.slots
+            .get_mut(h.index as usize)
+            .filter(|s| s.generation == h.generation)
+            .and_then(|s| s.value.as_mut())
+    }
     pub fn remove(&mut self, h: AttachmentHandle) -> Option<Attachment> {
         self.get(h)?;
         let slot = &mut self.slots[h.index as usize];

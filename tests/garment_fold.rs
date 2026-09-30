@@ -8,7 +8,7 @@ mod folding_oracle;
 mod garment_task;
 
 use garment_task::{ShirtTask, ShirtTaskConfig};
-use rapier_cloth::core::garment::{GarmentLayers, TShirtPattern};
+use rapier_cloth::core::garment::{GarmentLayers, NeckShape, SeamJoin, TShirtPattern};
 
 fn coarse(layers: GarmentLayers) -> ShirtTaskConfig {
     ShirtTaskConfig {
@@ -53,11 +53,46 @@ fn a_coarse_sewn_shirt_folds_into_a_quarter_of_its_footprint() {
 }
 
 #[test]
-fn a_coarse_single_panel_shirt_folds_too() {
-    // A coarse single sheet sags more between the hem grippers than the sewn
-    // tube or the 2 cm shirts, so its hem grippers close in further.
+fn a_round_neck_woven_shirt_with_stiff_seams_folds_too() {
+    let base = coarse(GarmentLayers::Sewn);
     let config = ShirtTaskConfig {
-        hem_inset: 0.02,
+        pattern: TShirtPattern {
+            neck: NeckShape::Round,
+            seam_stiffness: 3.0,
+            ..base.pattern
+        },
+        warp_stiffness: 4.0e5,
+        weft_stiffness: 2.0e5,
+        ..base
+    };
+    let mut task = ShirtTask::new(config).unwrap();
+    let summary = task.run().unwrap_or_else(|e| panic!("{e}"));
+    assert!(summary.passed, "{summary:?}");
+}
+
+#[test]
+fn a_coarse_stitched_shirt_folds_too() {
+    let base = coarse(GarmentLayers::Sewn);
+    let config = ShirtTaskConfig {
+        pattern: TShirtPattern {
+            seams: SeamJoin::Stitched,
+            // The task places the layers thickness + band apart.
+            stitch_length: base.thickness + base.band,
+            ..base.pattern
+        },
+        ..base
+    };
+    let mut task = ShirtTask::new(config).unwrap();
+    let summary = task.run().unwrap_or_else(|e| panic!("{e}"));
+    assert!(summary.passed, "{summary:?}");
+}
+
+#[test]
+fn a_coarse_single_panel_shirt_folds_too() {
+    // A coarse single sheet lands unevenly and creeps with the default hem
+    // compliance; a stiffer grasp settles it (see docs/garments.md).
+    let config = ShirtTaskConfig {
+        hem_compliance: 0.01,
         ..coarse(GarmentLayers::Single)
     };
     let mut task = ShirtTask::new(config).unwrap();

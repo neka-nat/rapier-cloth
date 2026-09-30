@@ -33,7 +33,7 @@ The project does not promise bitwise determinism across CPUs or precisions.
 | Moving obstacles | Kinematic spheres, boxes, capsules, convex hulls and their compounds; within the motion budget for discrete queries, certified by sweeps for continuous ones | Dynamic obstacle contacts and unrestricted fast motion |
 | Coupling | One-way obstacle-to-cloth interaction | Cloth reaction forces on dynamic rigid bodies |
 | Cloth collision | Particle contacts/static particle sweeps, opt-in self-contact and whole-triangle rigid contacts, separate optional continuous checks | Cloth-to-cloth collision and unrestricted continuous motion |
-| Garments | A parametric sewn T-shirt as one mesh (shared seam vertices, flat-folded rest state) with landmarks and layer patches; see [garments](garments.md) | Anisotropic or per-panel materials, seam stiffness, curved patterns, several garments colliding |
+| Garments | A parametric sewn T-shirt as one mesh (shared or stitched seams, flat-folded rest state, notch or round neck) with landmarks, layer patches, seam and sleeve stiffness and warp/weft material axes; see [garments](garments.md) | Seam allowance geometry, sliding threads, set-in sleeves, several garments colliding |
 | Grasping | Pins and body-local attachment targets | Grasping based only on static friction |
 | Recovery | In-memory checkpoint of one cloth world | Public serialized checkpoints or automatic Rapier rollback |
 
